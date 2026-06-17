@@ -1,0 +1,1234 @@
+[
+  {
+    "id": "find-symbol:_clearFilterCache",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_clearFilterCache\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_clearFilterCache"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_clearFilterCache",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_clearFilterCache",
+        "filter-dsl.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_clearShellBoostCache",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_clearShellBoostCache\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_clearShellBoostCache"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_clearShellBoostCache",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_clearShellBoostCache",
+        "shell-graph-boost.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_getRecentCommits",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_getRecentCommits\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_getRecentCommits"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_getRecentCommits",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_getRecentCommits",
+        "manifest.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_resetDefuddleNoiseState",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_resetDefuddleNoiseState\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_resetDefuddleNoiseState"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_resetDefuddleNoiseState",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_resetDefuddleNoiseState",
+        "extract.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_resetNudgeState",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_resetNudgeState\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_resetNudgeState"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_resetNudgeState",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_resetNudgeState",
+        "nudge-state.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:accumulateSession",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"accumulateSession\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "accumulateSession"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "accumulateSession",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "accumulateSession",
+        "weekly-accumulator.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:acquirePidLock",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"acquirePidLock\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "acquirePidLock"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "acquirePidLock",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "acquirePidLock",
+        "daemon.ts"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:ActionCard",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"ActionCard\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "ActionCard"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "ActionCard",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "ActionCard",
+        "Dashboard.tsx"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:QueryRouter",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"QueryRouter\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "QueryRouter"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "QueryRouter",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "QueryRouter"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:createSessionStats",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"createSessionStats\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "createSessionStats"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "createSessionStats",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "createSessionStats"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:ShadowLedger",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"ShadowLedger\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "ShadowLedger"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "ShadowLedger",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "ShadowLedger"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:openMetricsStore",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"openMetricsStore\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "openMetricsStore"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "openMetricsStore",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "openMetricsStore"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:scoreIntent",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"scoreIntent\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "scoreIntent"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "scoreIntent",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "scoreIntent"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:renderLoadedNoteLine",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"renderLoadedNoteLine\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "renderLoadedNoteLine"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "renderLoadedNoteLine",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "renderLoadedNoteLine"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:baseNote",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"baseNote\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "baseNote"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "baseNote",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "baseNote"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:TokenFlowWriter",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"TokenFlowWriter\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "TokenFlowWriter"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "TokenFlowWriter",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "TokenFlowWriter"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:QueryRouter",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"QueryRouter\"? (100 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "QueryRouter",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "QueryRouter",
+      "files": [
+        "benchmarks/lib/harness.ts",
+        "src/__tests__/community-tools.test.ts",
+        "src/__tests__/format-encoder.test.ts",
+        "src/__tests__/local-mode-offline.test.ts",
+        "src/__tests__/network-boundary.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "bootHarness",
+        "it: Local Mode QueryRouter handles errors locally (TL-15)",
+        "it: PARSE mode gets lite greeting",
+        "it: _meta includes blast_radius for entity tools",
+        "it: _meta includes conventions for entity tools",
+        "it: accumulates token depth from tool call responses",
+        "it: added entity — included in results with drift status",
+        "it: all 14+ local MCP tools respond without network calls via QueryRouter",
+        "it: base entity only (no overlay) — no _meta.drift",
+        "it: caps extremely large multi-line output to within budget",
+        "it: clears violations after draining",
+        "it: compresses large string results exceeding 2K tokens",
+        "it: conventions are deduped across entities",
+        "it: counter fires only once per threshold crossing",
+        "it: defaults top_n to 10",
+        "it: defaults top_n to 20",
+        "it: deleted entity — excluded from results, drift annotated",
+        "it: detects repeated queries to same entity",
+        "it: detects retry when same entity queried within 60s",
+        "it: different entities each get their own blast radius",
+        "it: different entities get independent context delivery",
+        "it: different entities get independent reminders",
+        "it: does not compress output under 2K tokens",
+        "it: does not compress structured object results",
+        "it: does not inject blast_radius for non-entity tools",
+        "it: does not inject value_counter when <=10 tool calls",
+        "it: does not inject when caught events not divisible by 3",
+        "it: does not inject when no violations pending",
+        "it: drift alert fires only once per entity per session",
+        "it: enrichment does not break when localGraph methods throw",
+        "it: every response includes _meta with source and latency_ms",
+        "it: executes local tools with local source in meta",
+        "it: feeds blast radius results into health monitor",
+        "it: feeds compression events into quality monitor on large output",
+        "it: feeds errors into context rot detector on tool failure",
+        "it: first MCP response includes session_greeting",
+        "it: first call for entity delivers blast_radius in _context",
+        "it: first query includes blast radius, second omits it",
+        "it: getDegradedTools lists all tools for setup mode",
+        "it: getEfficiencySnapshot returns a snapshot when tracker is wired",
+        "it: getMode returns current mode",
+        "it: get_callers returns columnar text for uniform caller rows",
+        "it: get_function strips community but preserves body (useful code)",
+        "it: get_project_stats returns from local CozoDB (not cloud API)",
+        "it: greeting fires exactly once per session",
+        "it: greeting on non-entity tools too",
+        "it: greeting varies by health grade — A+ is healthy",
+        "it: greeting varies by health grade — C shows concern",
+        "it: greeting varies by health grade — D/F shows warning",
+        "it: health drops below 0.8 after 3+ queries to same entity",
+        "it: includes cross_community_count in _meta",
+        "it: injects _context reminder signal on re-query of previously-seen entity",
+        "it: injects _meta.session_health with suggest_new_session on critical rot",
+        "it: injects blast_radius in _context for first entity query",
+        "it: injects community metadata into _meta for enrichable tools",
+        "it: injects conventions in _context with adherence rates",
+        "it: injects drift_alert when entity is modified",
+        "it: injects pending_violations from store into _context",
+        "it: injects session_health when health drops below 0.6",
+        "it: injects session_warning in _context when rot triggers inject_refresh",
+        "it: injects value_counter every 3rd caught event after 10 tool calls",
+        "it: is registered as a local route",
+        "it: local failure returns error with local source",
+        "it: local mode has no degraded tools",
+        "it: local mode includes mode in _meta",
+        "it: local mode returns error on local failure (no cloud fallback)",
+        "it: local mode serves local tools normally",
+        "it: local-routed tools resolve from CozoDB with zero network calls",
+        "it: local-routed tools resolve without network calls",
+        "it: low-adherence conventions feed as violations",
+        "it: marks chokepoints when detected",
+        "it: modified entity — overlay body replaces base body, _meta.drift present",
+        "it: no drift overlay — pure CozoDB results (no performance degradation)",
+        "it: no drift_alert when entity has no drift",
+        "it: no health info still produces a default greeting",
+        "it: no session_health warning when health is good",
+        "it: omits community fields when entity has no community assignment",
+        "it: parse mode degrades get_conventions",
+        "it: parse mode serves local tools",
+        "it: passes community_id filter to graph store",
+        "it: rapid tool calls trigger acceleration signal in health monitor",
+        "it: recognizes all local tools",
+        "it: records tool calls into health monitor",
+        "it: reminder includes blast radius count from first query",
+        "it: reminder is short (<50 tokens)",
+        "it: resolves locally and returns adherence rates",
+        "it: returns empty rules when no local rules",
+        "it: returns error when local fails (no cloud fallback)",
+        "it: returns false for unknown tools",
+        "it: returns null when no efficiency tracker set",
+        "it: routes to local and returns cross-community edges",
+        "it: routes to local and returns highest-degree entities",
+        "it: search_code returns columnar for uniform entity rows",
+        "it: second call for same entity does not repeat blast_radius",
+        "it: setup mode returns informational for all tools",
+        "it: setup mode returns informational response (not an error)",
+        "it: setup mode still tracks tool calls but skips enrichment",
+        "it: skips convention injection for non-entity tools",
+        "loadIntelligenceTools",
+        "startProxy"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:createSessionStats",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"createSessionStats\"? (54 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "createSessionStats",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "createSessionStats",
+      "files": [
+        "src/__tests__/components.test.ts",
+        "src/__tests__/local-mode-stats.test.ts",
+        "src/__tests__/proxy.test.ts",
+        "src/__tests__/session-event-wiring.test.ts",
+        "src/__tests__/session-events.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "it: circular buffer wraps correctly at capacity",
+        "it: counts only once per call",
+        "it: creates localMode stats for local mode",
+        "it: creates localMode=null for standard mode",
+        "it: creates stats with zero counters",
+        "it: detects circular import when file appears in its own imports",
+        "it: does not detect circular when file is not in its own imports",
+        "it: does not record for 'added' drift status",
+        "it: does not record violations when check_rules has empty violations",
+        "it: does not record violations when check_rules has no violations field",
+        "it: does not record when drift is null",
+        "it: does not record when fan_in <= 10 even with high risk",
+        "it: does not record when fan_in > 0",
+        "it: events are embedded in SessionStats",
+        "it: falls back to standard format when localMode is null",
+        "it: formatSessionStats includes latency section",
+        "it: formats stats with local percentage and savings",
+        "it: handles empty imports array",
+        "it: includes violations and risk warnings in output",
+        "it: increments local tool calls",
+        "it: omits caught section when no events",
+        "it: omits empty sections",
+        "it: persists and accumulates session stats",
+        "it: persists and loads stats across calls",
+        "it: recordChokepointWarning increments chokepointWarningsIssued",
+        "it: recordCircularDep increments circularDepsDetected",
+        "it: recordDeadCodeReference increments deadCodeReferences",
+        "it: recordSignaturePreservation increments signaturePreservations",
+        "it: recordViolation increments both violationsCaught and conventionViolationsCaught",
+        "it: records all samples as local",
+        "it: records latency samples and computes percentiles",
+        "it: records one violation per check_rules violation entry",
+        "it: records preservation when drift status is 'modified'",
+        "it: records warning when fan_in > 10 and risk is high",
+        "it: records when fan_in is exactly 0",
+        "it: renders cumulative this-week stats",
+        "it: renders deep link when provided",
+        "it: renders local rate with progress bar",
+        "it: renders nothing when zero tool calls",
+        "it: renders one-liner for short sessions (≤10 tool calls)",
+        "it: renders session section header with duration",
+        "it: renders specific caught event labels",
+        "it: renders token savings",
+        "it: renders tool call counts in full summary",
+        "it: returns existing cumulative when localMode is null",
+        "it: returns null for zero tool calls",
+        "it: returns null format when no calls made",
+        "it: returns null percentiles for zero samples",
+        "it: totalCaughtEvents reflects all event types from a session",
+        "it: tracks violations and risk warnings",
+        "it: violationsCaught is separate from events.conventionViolationsCaught",
+        "it: writes cumulative file to ~/.unerr/",
+        "makeStats",
+        "startProxy"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:ShadowLedger",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"ShadowLedger\"? (52 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "ShadowLedger",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "ShadowLedger",
+      "files": [
+        "src/__tests__/commit-watcher.test.ts",
+        "src/__tests__/intent-correlator.test.ts",
+        "src/__tests__/layer4-sprint-ba2.test.ts",
+        "src/__tests__/offline-rewind.test.ts",
+        "src/__tests__/redactor.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "beforeEach@L24",
+        "it: appends entries as JSONL (one JSON per line)",
+        "it: assigns session ID consistent across records",
+        "it: associateCommit links correlations by overlapping files",
+        "it: associates pending correlations on commit",
+        "it: blast radius resolution uses CozoDB entities and callers",
+        "it: builds tool chain from correlated entries",
+        "it: carries forward incomplete work from previous session",
+        "it: clear removes all correlations",
+        "it: correlates entries within 30s window",
+        "it: creates ledger directory and file on first record",
+        "it: creates pending correlation on sync_local_diff",
+        "it: detects imports from deleted files",
+        "it: does NOT generate agent-as-LLM prompt for simple sessions",
+        "it: extracts files from diff format",
+        "it: extracts files from structured format",
+        "it: generates agent-as-LLM prompt for sessions with >50 entries",
+        "it: generates unique 12-char hex IDs",
+        "it: getPending returns only uncommitted correlations",
+        "it: getSessionEntryCount counts current session only",
+        "it: getStats returns correct counts",
+        "it: handles empty file gracefully",
+        "it: includes branch and file count in resume",
+        "it: ledger.closeTurn() anchors a fresh first_call boundary on next record",
+        "it: loads recent entries from file into buffer on startup",
+        "it: maintains in-memory buffer of recent entries",
+        "it: mints a fresh 12-hex id when no session id is injected",
+        "it: opens timeline.db and upserts a turn when the segmenter closes one",
+        "it: orders incomplete work by modification count (proxy for risk)",
+        "it: persists incomplete items to disk for next session",
+        "it: persists to disk and loads on new instance",
+        "it: readAllEntries reads full file",
+        "it: recovers from corrupted JSONL on startup",
+        "it: redacts a secret-looking arg before persisting",
+        "it: removeFlushed clears committed correlations",
+        "it: resumes under an injected session id (warm-restart continuity)",
+        "it: returns 0 when no sync_local_diff recorded",
+        "it: returns 0 when only non-sync tools recorded",
+        "it: returns latest sync when multiple syncs recorded",
+        "it: returns null and does NOT create timeline.db when UNERR_TIMELINE_V2=0",
+        "it: returns null for empty ledger (no false resume)",
+        "it: returns null when no issues found",
+        "it: returns null when no root intent exists",
+        "it: returns timestamp of most recent sync_local_diff",
+        "it: skips non-overlapping files during association",
+        "it: stamps recorded entries with turn_id and turn_confidence",
+        "it: stop() releases the store and detaches the listener",
+        "it: sync_local_diff always correlates to current root",
+        "it: truncates arg values longer than 200 chars",
+        "offline-rewind.test.ts",
+        "startProxy"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:openMetricsStore",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"openMetricsStore\"? (47 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "openMetricsStore",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "openMetricsStore",
+      "files": [
+        "scripts/migrate-jsonl-to-sqlite.ts",
+        "src/__tests__/log-tailer.test.ts",
+        "src/__tests__/metrics-store.test.ts",
+        "src/__tests__/session-summary-writer.test.ts",
+        "src/__tests__/token-flow.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "BehaviorEventWriter.constructor",
+        "BehaviorEventWriter.record",
+        "TokenFlowWriter.constructor",
+        "TokenFlowWriter.record",
+        "appendCompressionLog",
+        "appendFileReadLog",
+        "appendSessionHistory",
+        "buildAgentResolver",
+        "bumpCacheHit",
+        "createLogbookRoutes",
+        "it: creates metrics.db on first open and is idempotent",
+        "it: events from different PIDs coexist in same store",
+        "it: inserts + reads compression events with monotonic id",
+        "it: inserts + reads file_read events",
+        "it: inserts + reads token_flow events; filters by session",
+        "it: polls compression rows from metrics.db",
+        "it: polls file-read rows for events with savings",
+        "it: polls token-flow rows and filters own-PID",
+        "it: reset() empties tables and resets autoincrement",
+        "it: returns cache_hit=true on identical re-fetch",
+        "it: session_id filtering isolates concurrent sessions",
+        "it: skips compression entries with 0% savings",
+        "it: skips file-read entries with 0% savings",
+        "it: skips malformed detail JSON gracefully",
+        "it: supports id > lastSeen polling for compression",
+        "it: upgrades a legacy DB (no `agent` column) without crashing",
+        "it: upserts session summary row into metrics.db",
+        "it: upserts session_history (one row per session_id)",
+        "it: upserts session_summary and reads by id",
+        "it: writes a compression_events row with category=fetch_url",
+        "lookupFetchCache",
+        "materializeTranscripts",
+        "migrateCompression",
+        "migrateFileReads",
+        "migrateSessionHistory",
+        "migrateSessionSummaries",
+        "migrateTokenFlow",
+        "readBehaviorEvents",
+        "readRecentCompressionLogs",
+        "readRecentFileReadLogs",
+        "readSessionHistory",
+        "readTokenFlowEvents",
+        "recordUserPromptReceived",
+        "startLogTailer",
+        "storeFetchCache",
+        "storeNegativeFetchCache",
+        "writeSessionSummary"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:scoreIntent",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"scoreIntent\"? (44 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "scoreIntent",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "scoreIntent",
+      "files": [
+        "src/__tests__/import-family-tagging.test.ts",
+        "src/__tests__/intent-latency.test.ts",
+        "src/__tests__/intent-scorer.test.ts",
+        "src/__tests__/ledger-stickiness.test.ts",
+        "src/router/dispatch.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "IntentDispatcher.evaluateIntent",
+        "it: 100 synthetic heavy calls: all complete under 5ms",
+        "it: CODEOWNERS file activates gh",
+        "it: DB entity + GitHub file → both families exposed (multiDomain=true)",
+        "it: Prisma schema file activates pg",
+        "it: SQL file pattern scores pg family",
+        "it: budget exceeded flag triggers fail-open",
+        "it: budgetExceeded flag is false for all normal calls",
+        "it: collector builds correct scorer input shape",
+        "it: completes within 5ms budget",
+        "it: db/seeds directory activates pg",
+        "it: dominant tool family gets scored via history",
+        "it: empty input: 100 calls under 0.5ms each",
+        "it: empty signals: nothing exposed",
+        "it: entities with multiple family tags score both",
+        "it: entity importing octokit activates gh",
+        "it: entity importing pg scores pg family ≥0.40",
+        "it: equal tool calls split score evenly",
+        "it: file patterns combine with entity tags",
+        "it: frequently-used family has lower threshold",
+        "it: github workflows file activates gh",
+        "it: light input: 100 calls under 1ms each",
+        "it: low file pattern score can exceed lowered threshold",
+        "it: multi-domain includes reason explanation",
+        "it: multiple DB files don't inflate score beyond entity tag weight",
+        "it: multiple entities with same family don't double-count",
+        "it: never-used family requires higher score",
+        "it: non-sticky family with raised threshold is NOT exposed at low score",
+        "it: one family above threshold, one below → NOT multi-domain",
+        "it: recent gh tool calls activate gh via history signal",
+        "it: recently-used family stays exposed even without signals",
+        "it: returns sorted scores (highest first)",
+        "it: scores are sorted descending",
+        "it: scores entity with pg-family tag ≥0.40",
+        "it: stickiness expires after 6 turns",
+        "it: sticky family includes reason",
+        "it: sticky family is exposed even with high threshold",
+        "it: synthetic codebase: 5 files with known imports → correct family exposure",
+        "it: three families scoring high → all exposed",
+        "it: tool history alone (no files/entities) can expose a family",
+        "it: unknown family in entity tags is ignored",
+        "it: unrecognized file paths: no family exposed",
+        "it: untagged families stay at 0 score",
+        "it@L543"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:renderLoadedNoteLine",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"renderLoadedNoteLine\"? (39 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "renderLoadedNoteLine",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "renderLoadedNoteLine",
+      "files": [
+        "src/__tests__/loaded-note-line.test.ts",
+        "src/proxy/context-preface.ts",
+        "src/proxy/surface2-line-handler.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "handleSurface2LineProxy",
+        "it: appends 'also primed <file>' when topFile differs from anchor",
+        "it: clips long content at word boundary with ellipsis",
+        "it: collapses long file paths to …/parent/basename",
+        "it: count 0 → no badge",
+        "it: count 10 → (reinforced 10×)",
+        "it: count 2 → no badge (under threshold)",
+        "it: count 3 → (reinforced 3×)",
+        "it: e anchor + anchor_missing → entity not found",
+        "it: e anchor → for `<entity>`",
+        "it: empty conflict_group_id → no marker",
+        "it: f anchor + anchor_missing → file no longer in repo",
+        "it: f anchor → for <path>",
+        "it: g anchor → for files matching <glob>",
+        "it: includes 'also primed' when the anchor is an entity (no path overlap)",
+        "it: legitimate p-anchored fct (no signature, no reinforcement) → renders normally",
+        "it: non-empty conflict_group_id → appends conflict marker",
+        "it: null note + empty topFile string → returns null",
+        "it: null note + null topFile → returns null",
+        "it: null note + topFile → 'primed <file>'",
+        "it: omits 'also primed' when topFile matches the note's f-anchor",
+        "it: p anchor → no 'for' phrase (omitted as filler)",
+        "it: p-anchored fct + smoke-test signature + 0 reinforcement → guided empty",
+        "it: polarity + → no suffix",
+        "it: polarity - on blk → no (don't) suffix (blocker is implicitly negative)",
+        "it: polarity - on rul → (don't)",
+        "it: polarity - on wrn → no (don't) suffix (warning is implicitly negative)",
+        "it: polarity ~ → (mixed) on any kind",
+        "it: populated convention with reinforcement + top file",
+        "it: populated rule with file anchor, recent age, plain polarity",
+        "it: renders blk → blocker",
+        "it: renders cnv → convention (with 'a' article — c is consonant)",
+        "it: renders dec → decision",
+        "it: renders fct → fact",
+        "it: renders rul → rule",
+        "it: renders wrn → warning (with 'a' article — w is consonant)",
+        "it: short content not clipped",
+        "it: warning with anchor_missing + conflict tail",
+        "renderContextPreface"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:baseNote",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"baseNote\"? (37 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "baseNote",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "baseNote",
+      "files": [
+        "src/__tests__/loaded-note-line.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "it: appends 'also primed <file>' when topFile differs from anchor",
+        "it: clips long content at word boundary with ellipsis",
+        "it: collapses long file paths to …/parent/basename",
+        "it: count 0 → no badge",
+        "it: count 10 → (reinforced 10×)",
+        "it: count 2 → no badge (under threshold)",
+        "it: count 3 → (reinforced 3×)",
+        "it: e anchor + anchor_missing → entity not found",
+        "it: e anchor → for `<entity>`",
+        "it: empty conflict_group_id → no marker",
+        "it: f anchor + anchor_missing → file no longer in repo",
+        "it: f anchor → for <path>",
+        "it: g anchor → for files matching <glob>",
+        "it: includes 'also primed' when the anchor is an entity (no path overlap)",
+        "it: isColdStartNote false for rul/cnv/wrn/dec/blk regardless of content",
+        "it: legitimate p-anchored fct (no signature, no reinforcement) → renders normally",
+        "it: non-empty conflict_group_id → appends conflict marker",
+        "it: omits 'also primed' when topFile matches the note's f-anchor",
+        "it: p anchor → no 'for' phrase (omitted as filler)",
+        "it: p-anchored fct + smoke-test signature + 0 reinforcement → guided empty",
+        "it: polarity + → no suffix",
+        "it: polarity - on blk → no (don't) suffix (blocker is implicitly negative)",
+        "it: polarity - on rul → (don't)",
+        "it: polarity - on wrn → no (don't) suffix (warning is implicitly negative)",
+        "it: polarity ~ → (mixed) on any kind",
+        "it: populated convention with reinforcement + top file",
+        "it: populated rule with file anchor, recent age, plain polarity",
+        "it: renders blk → blocker",
+        "it: renders cnv → convention (with 'a' article — c is consonant)",
+        "it: renders dec → decision",
+        "it: renders fct → fact",
+        "it: renders rul → rule",
+        "it: renders wrn → warning (with 'a' article — w is consonant)",
+        "it: short content not clipped",
+        "it: smoke-test signature but reinforced ≥ 1 → not cold-start (user-touched)",
+        "it: smoke-test signature on file anchor → not cold-start (anchored, not generic)",
+        "it: warning with anchor_missing + conflict tail"
+      ]
+    }
+  },
+  {
+    "id": "find-callers:TokenFlowWriter",
+    "bucket": "navigation",
+    "category": "find-callers",
+    "question": "Who calls \"TokenFlowWriter\"? (36 known callers)",
+    "unerr": {
+      "tool": "get_references",
+      "args": {
+        "key": "TokenFlowWriter",
+        "direction": "callers"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-files",
+      "pattern": "TokenFlowWriter",
+      "files": [
+        "src/__tests__/agent-turn-attribution.test.ts",
+        "src/__tests__/named-events.test.ts",
+        "src/__tests__/persistence-effectiveness.test.ts",
+        "src/__tests__/phase3-routes.test.ts",
+        "src/__tests__/prompt-trace-route.test.ts"
+      ]
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "beforeEach@L16",
+        "beforeEach@L20",
+        "beforeEach@L28",
+        "beforeEach@L31",
+        "it: /headroom computes compounded headroom_turns from token-flow rows",
+        "it: /headroom/session/:id returns detail with per-turn breakdown",
+        "it: /headroom/sessions returns per-session summary with headroom_compounded",
+        "it: assigns monotonic IDs across multiple writes",
+        "it: computes correct session totals",
+        "it: creates metrics.db on first write",
+        "it: does not modify the underlying behavior_events / token_flow_events rows",
+        "it: events → aggregation → session history → receipt",
+        "it: filters by mechanism",
+        "it: filters by session_id",
+        "it: getSessionEfficiency computes correct percentage",
+        "it: getSessionEfficiency returns 0 when no events",
+        "it: getSessionEvents returns in-memory buffer",
+        "it: getSessionTokensSaved computes running total",
+        "it: handles all 7 mechanism types",
+        "it: handles zero-savings events",
+        "it: merges behavior + token-flow streams ordered by ts",
+        "it: per-call agent override beats the stored agent",
+        "it: persists 2200 events without loss",
+        "it: projects a token-flow event with synthetic tokenflow.<mechanism> type",
+        "it: reads all events from JSONL file",
+        "it: record() completes in under 1ms per write",
+        "it: records detail metadata when provided",
+        "it: records events with null tool (shell compression)",
+        "it: renders preface head on first call and emits empty tail (Surface 3 is now MCP-tool-driven)",
+        "it: returns null data when no events recorded",
+        "it: stamps constructor-supplied agent on every event",
+        "it: writes events with auto-populated fields",
+        "makeSummary",
+        "recordShellTokenFlow",
+        "seedEvents",
+        "startProxy"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/__tests__/loaded-note-line.test.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/__tests__/loaded-note-line.test.ts? (58 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/__tests__/loaded-note-line.test.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/__tests__/loaded-note-line.test.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "NOW",
+        "DAY",
+        "baseNote"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/__tests__/prompt-hooks.test.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/__tests__/prompt-hooks.test.ts? (58 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/__tests__/prompt-hooks.test.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/__tests__/prompt-hooks.test.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "tmpRepo",
+        "writeLedger",
+        "readContext"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/tracking/metrics-store.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/tracking/metrics-store.ts? (55 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/tracking/metrics-store.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/tracking/metrics-store.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "CompressionEventRow",
+        "FileReadEventRow",
+        "TokenFlowEventRow",
+        "SessionHistoryRow",
+        "BehaviorEventRow",
+        "SessionSummaryRow",
+        "FetchCacheRow",
+        "CompressionEventInsert"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/ui/pages/LogbookPage.tsx",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/ui/pages/LogbookPage.tsx? (54 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/ui/pages/LogbookPage.tsx"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/ui/pages/LogbookPage.tsx"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "PromptFeedItem",
+        "PromptFeedResponse",
+        "PromptDetailResponse",
+        "StoryResponse",
+        "FacetsResponse",
+        "PAGE_SIZE",
+        "REFETCH_MS",
+        "todayLocal"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/ui/pages/SessionTimelinePage.tsx",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/ui/pages/SessionTimelinePage.tsx? (52 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/ui/pages/SessionTimelinePage.tsx"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/ui/pages/SessionTimelinePage.tsx"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "TurnPrompt",
+        "TurnRow",
+        "MarkerRow",
+        "SessionRow",
+        "AgentRow",
+        "HeatmapBucket",
+        "ResumeData",
+        "IntentRailRow"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/proxy/session-stats.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/proxy/session-stats.ts? (51 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/proxy/session-stats.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/proxy/session-stats.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "AVG_TOKENS_SAVED_PER_LOCAL_CALL",
+        "COST_PER_1K_TOKENS",
+        "LATENCY_BUFFER_SIZE",
+        "LatencyTracker",
+        "createLatencyTracker",
+        "recordLatency",
+        "LatencyPercentiles",
+        "computePercentiles"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/tracking/drift-tracker.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/tracking/drift-tracker.ts? (48 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/tracking/drift-tracker.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/tracking/drift-tracker.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "DriftOrigin",
+        "AI_THRESHOLD_MS",
+        "MIXED_THRESHOLD_MS",
+        "determineOrigin",
+        "DriftTrackerConfig",
+        "DriftResult",
+        "DriftDashboardPayload",
+        "DRIFT_WATCHER_OPTIONS"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/timeline/timeline-store.ts",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/timeline/timeline-store.ts? (47 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/timeline/timeline-store.ts"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/timeline/timeline-store.ts"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "TIMELINE_DB_FILENAME",
+        "TimelineDbResult",
+        "openTimelineDb",
+        "getExistingRelations",
+        "initTimelineSchema",
+        "TurnRow",
+        "MarkerRow",
+        "IntentRow"
+      ]
+    }
+  }
+]

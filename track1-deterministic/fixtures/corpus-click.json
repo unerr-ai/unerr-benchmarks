@@ -1,0 +1,819 @@
+[
+  {
+    "id": "find-symbol:__getattr__",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"__getattr__\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "__getattr__"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "__getattr__",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "__getattr__",
+        "parser.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:__getattr__",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"__getattr__\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "__getattr__"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "__getattr__",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "__getattr__",
+        "core.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:__getattr__",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"__getattr__\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "__getattr__"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "__getattr__",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "__getattr__",
+        "__init__.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_ApostropheReprType",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_ApostropheReprType\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_ApostropheReprType"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_ApostropheReprType",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_ApostropheReprType",
+        "test_termui.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_AtomicFile",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_AtomicFile\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_AtomicFile"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_AtomicFile",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_AtomicFile",
+        "_compat.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_BufferedTextPagerStream",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_BufferedTextPagerStream\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_BufferedTextPagerStream"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_BufferedTextPagerStream",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_BufferedTextPagerStream",
+        "_termui_impl.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_build_prompt",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_build_prompt\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_build_prompt"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_build_prompt",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_build_prompt",
+        "termui.py"
+      ]
+    }
+  },
+  {
+    "id": "find-symbol:_detect_program_name",
+    "bucket": "navigation",
+    "category": "find-symbol",
+    "question": "Where is \"_detect_program_name\" defined?",
+    "unerr": {
+      "tool": "search_code",
+      "args": {
+        "query": "_detect_program_name"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_detect_program_name",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "all",
+      "needles": [
+        "_detect_program_name",
+        "utils.py"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:ParamTypeInfoDict",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"ParamTypeInfoDict\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "ParamTypeInfoDict"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "ParamTypeInfoDict",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "ParamTypeInfoDict"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:UsageError",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"UsageError\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "UsageError"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "UsageError",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "UsageError"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:ShellComplete",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"ShellComplete\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "ShellComplete"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "ShellComplete",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "ShellComplete"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:Option",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"Option\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "Option"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "Option",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "Option"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:_WindowsConsoleRawIOBase",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"_WindowsConsoleRawIOBase\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "_WindowsConsoleRawIOBase"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_WindowsConsoleRawIOBase",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "_WindowsConsoleRawIOBase"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:NonExitingOption",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"NonExitingOption\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "NonExitingOption"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "NonExitingOption",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "NonExitingOption"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:_force_correct_text_reader",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"_force_correct_text_reader\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "_force_correct_text_reader"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "_force_correct_text_reader",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "_force_correct_text_reader"
+      ]
+    }
+  },
+  {
+    "id": "get-entity:test_choice_normalization",
+    "bucket": "navigation",
+    "category": "get-entity",
+    "question": "Show the definition of \"test_choice_normalization\".",
+    "unerr": {
+      "tool": "get_entity",
+      "args": {
+        "key": "test_choice_normalization"
+      }
+    },
+    "baseline": {
+      "kind": "grep+read-top",
+      "pattern": "test_choice_normalization",
+      "readTopN": 1
+    },
+    "fidelity": {
+      "kind": "any",
+      "needles": [
+        "test_choice_normalization"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:tests/test_arguments.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in tests/test_arguments.py? (60 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "tests/test_arguments.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "tests/test_arguments.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "test_nargs_star",
+        "copy",
+        "test_nargs_tup",
+        "test_nargs_tup_composite",
+        "test_nargs_mismatch_with_tuple_type",
+        "cli",
+        "test_nargs_err",
+        "test_bytes_args"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/click/_compat.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/click/_compat.py? (50 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/click/_compat.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/_compat.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_make_text_stream",
+        "is_ascii_encoding",
+        "get_best_encoding",
+        "_NonClosingTextIOWrapper",
+        "_FixupStream",
+        "_is_binary_reader",
+        "_is_binary_writer",
+        "_find_binary_reader"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/click/_termui_impl.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/click/_termui_impl.py? (48 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/click/_termui_impl.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/_termui_impl.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_BufferedTextPagerStream",
+        "_has_binary_buffer",
+        "ProgressBar",
+        "MaybeStripAnsi",
+        "_pager_contextmanager",
+        "get_pager_file",
+        "_pipepager",
+        "_tempfilepager"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:src/click/testing.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in src/click/testing.py? (47 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "src/click/testing.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/testing.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "EchoingStdin",
+        "_pause_echo",
+        "_FDCapture",
+        "BytesIOCopy",
+        "StreamMixer",
+        "_NamedTextIOWrapper",
+        "make_input_stream",
+        "Result"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:tests/test_shell_completion.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in tests/test_shell_completion.py? (45 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "tests/test_shell_completion.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "tests/test_shell_completion.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_get_completions",
+        "_get_words",
+        "test_command",
+        "test_group",
+        "test_nested_group",
+        "test_group_command_same_option",
+        "test_chained",
+        "test_help_option"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:tests/test_utils.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in tests/test_utils.py? (45 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "tests/test_utils.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "tests/test_utils.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "test_unset_sentinel",
+        "test_echo",
+        "cli",
+        "test_echo_custom_file",
+        "test_echo_no_streams",
+        "test_styling",
+        "test_unstyle_other_ansi",
+        "test_filename_formatting"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:tests/test_defaults.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in tests/test_defaults.py? (40 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "tests/test_defaults.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "tests/test_defaults.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "test_basic_defaults",
+        "test_multiple_defaults",
+        "cli",
+        "test_nargs_plus_multiple",
+        "test_multiple_flag_default",
+        "test_flag_default_map",
+        "foo",
+        "test_shared_param_prefers_first_default"
+      ]
+    }
+  },
+  {
+    "id": "understand-file:tests/test_formatting.py",
+    "bucket": "compression",
+    "category": "understand-file",
+    "question": "What are the main functions/classes in tests/test_formatting.py? (37 entities)",
+    "unerr": {
+      "tool": "file_outline",
+      "args": {
+        "file_path": "tests/test_formatting.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "tests/test_formatting.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "test_basic_functionality",
+        "test_wrapping_long_options_strings",
+        "a_very_long",
+        "test_wrapping_long_command_name",
+        "a_very_very_very_long",
+        "command",
+        "test_formatting_empty_help_lines",
+        "test_formatting_usage_error"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/__init__.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/__init__.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/__init__.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/__init__.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "core",
+        "decorators",
+        "exceptions",
+        "formatting",
+        "globals",
+        "parser",
+        "termui",
+        "types"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/core.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/core.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/core.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/core.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_utils",
+        "decorators",
+        "exceptions",
+        "formatting",
+        "globals",
+        "parser",
+        "shell_completion",
+        "termui"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/termui.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/termui.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/termui.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/termui.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_compat",
+        "_termui_impl",
+        "exceptions",
+        "globals",
+        "types",
+        "utils"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/types.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/types.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/types.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/types.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_compat",
+        "core",
+        "exceptions",
+        "shell_completion",
+        "utils"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/exceptions.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/exceptions.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/exceptions.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/exceptions.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_compat",
+        "core",
+        "globals",
+        "utils"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/parser.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/parser.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/parser.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/parser.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_utils",
+        "core",
+        "exceptions",
+        "shell_completion"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/_termui_impl.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/_termui_impl.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/_termui_impl.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/_termui_impl.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "_compat",
+        "exceptions",
+        "utils"
+      ]
+    }
+  },
+  {
+    "id": "imports:src/click/decorators.py",
+    "bucket": "navigation",
+    "category": "imports",
+    "question": "What files does src/click/decorators.py import? (direct dependencies)",
+    "unerr": {
+      "tool": "get_imports",
+      "args": {
+        "file_path": "src/click/decorators.py"
+      }
+    },
+    "baseline": {
+      "kind": "read-file",
+      "file": "src/click/decorators.py"
+    },
+    "fidelity": {
+      "kind": "majority",
+      "needles": [
+        "core",
+        "globals",
+        "utils"
+      ]
+    }
+  }
+]

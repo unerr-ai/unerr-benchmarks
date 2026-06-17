@@ -1,0 +1,22 @@
+{
+  "repo": "/absolute/path/to/your/checked-out/target-repo",
+  "baseCommit": "REPLACE_WITH_A_KNOWN_GREEN_COMMIT_SHA",
+  "setupCommand": "pnpm install --frozen-lockfile",
+  "arms": ["baseline", "unerr", "unerr-nomemory"],
+  "tasks": [
+    {
+      "id": "t1-fix-parser",
+      "title": "Fix the option parser to accept a repeated flag",
+      "prompt": "The option parser drops all but the last value of a repeated --include flag. Make repeated --include flags accumulate into an array. Keep existing single-flag behavior. Run the test suite to confirm.",
+      "breakCommand": "git revert --no-edit <SHA_OF_THE_REAL_FIX>",
+      "testCommand": "pnpm vitest run test/parser.test.ts"
+    },
+    {
+      "id": "t2-extend-parser-callers",
+      "title": "Update every caller of the parser for the new array shape",
+      "prompt": "Now that --include returns an array, update every place that reads the parsed include value so it handles the array instead of a single string. Do not miss any caller. Run the full test suite.",
+      "dependsOn": ["t1-fix-parser"],
+      "testCommand": "pnpm vitest run"
+    }
+  ]
+}

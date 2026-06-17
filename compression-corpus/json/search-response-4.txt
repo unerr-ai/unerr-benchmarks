@@ -1,0 +1,1205 @@
+{
+  "results": [
+    {
+      "key": "entity_0_8a3c",
+      "name": "symbol_0",
+      "kind": "type",
+      "file_path": "src/area_0/file_0.ts",
+      "fan_in": 38,
+      "fan_out": 18,
+      "risk_level": "high",
+      "summary": "Handles indexing for edges in subsystem 0."
+    },
+    {
+      "key": "entity_1_3acd",
+      "name": "symbol_1",
+      "kind": "function",
+      "file_path": "src/area_1/file_1.ts",
+      "fan_in": 1,
+      "fan_out": 14,
+      "risk_level": "high",
+      "summary": "Handles caching for entities in subsystem 1."
+    },
+    {
+      "key": "entity_2_a34d",
+      "name": "symbol_2",
+      "kind": "function",
+      "file_path": "src/area_2/file_2.ts",
+      "fan_in": 10,
+      "fan_out": 18,
+      "risk_level": "low",
+      "summary": "Handles routing for tokens in subsystem 2."
+    },
+    {
+      "key": "entity_3_faa6",
+      "name": "symbol_3",
+      "kind": "function",
+      "file_path": "src/area_3/file_3.ts",
+      "fan_in": 1,
+      "fan_out": 14,
+      "risk_level": "medium",
+      "summary": "Handles routing for files in subsystem 3."
+    },
+    {
+      "key": "entity_4_fd49",
+      "name": "symbol_4",
+      "kind": "type",
+      "file_path": "src/area_4/file_4.ts",
+      "fan_in": 38,
+      "fan_out": 3,
+      "risk_level": "low",
+      "summary": "Handles caching for files in subsystem 4."
+    },
+    {
+      "key": "entity_5_3714",
+      "name": "symbol_5",
+      "kind": "function",
+      "file_path": "src/area_5/file_5.ts",
+      "fan_in": 2,
+      "fan_out": 2,
+      "risk_level": "low",
+      "summary": "Handles indexing for tokens in subsystem 5."
+    },
+    {
+      "key": "entity_6_114fc",
+      "name": "symbol_6",
+      "kind": "function",
+      "file_path": "src/area_6/file_6.ts",
+      "fan_in": 27,
+      "fan_out": 17,
+      "risk_level": "high",
+      "summary": "Handles indexing for files in subsystem 6."
+    },
+    {
+      "key": "entity_7_3e9c",
+      "name": "symbol_7",
+      "kind": "interface",
+      "file_path": "src/area_7/file_7.ts",
+      "fan_in": 21,
+      "fan_out": 4,
+      "risk_level": "low",
+      "summary": "Handles routing for tokens in subsystem 7."
+    },
+    {
+      "key": "entity_8_1447f",
+      "name": "symbol_8",
+      "kind": "function",
+      "file_path": "src/area_8/file_8.ts",
+      "fan_in": 36,
+      "fan_out": 12,
+      "risk_level": "high",
+      "summary": "Handles caching for entities in subsystem 8."
+    },
+    {
+      "key": "entity_9_1095f",
+      "name": "symbol_9",
+      "kind": "function",
+      "file_path": "src/area_9/file_9.ts",
+      "fan_in": 15,
+      "fan_out": 4,
+      "risk_level": "medium",
+      "summary": "Handles parsing for entities in subsystem 9."
+    },
+    {
+      "key": "entity_10_15d08",
+      "name": "symbol_10",
+      "kind": "class",
+      "file_path": "src/area_10/file_10.ts",
+      "fan_in": 17,
+      "fan_out": 11,
+      "risk_level": "low",
+      "summary": "Handles routing for edges in subsystem 10."
+    },
+    {
+      "key": "entity_11_6b66",
+      "name": "symbol_11",
+      "kind": "class",
+      "file_path": "src/area_11/file_11.ts",
+      "fan_in": 25,
+      "fan_out": 10,
+      "risk_level": "medium",
+      "summary": "Handles caching for tokens in subsystem 11."
+    },
+    {
+      "key": "entity_12_cabd",
+      "name": "symbol_12",
+      "kind": "type",
+      "file_path": "src/area_0/file_12.ts",
+      "fan_in": 14,
+      "fan_out": 10,
+      "risk_level": "medium",
+      "summary": "Handles routing for tokens in subsystem 12."
+    },
+    {
+      "key": "entity_13_6fdc",
+      "name": "symbol_13",
+      "kind": "interface",
+      "file_path": "src/area_1/file_13.ts",
+      "fan_in": 18,
+      "fan_out": 5,
+      "risk_level": "high",
+      "summary": "Handles indexing for edges in subsystem 13."
+    },
+    {
+      "key": "entity_14_1fa0",
+      "name": "symbol_14",
+      "kind": "class",
+      "file_path": "src/area_2/file_14.ts",
+      "fan_in": 38,
+      "fan_out": 0,
+      "risk_level": "medium",
+      "summary": "Handles routing for edges in subsystem 14."
+    },
+    {
+      "key": "entity_15_e09c",
+      "name": "symbol_15",
+      "kind": "function",
+      "file_path": "src/area_3/file_15.ts",
+      "fan_in": 19,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles routing for entities in subsystem 15."
+    },
+    {
+      "key": "entity_16_13d70",
+      "name": "symbol_16",
+      "kind": "type",
+      "file_path": "src/area_4/file_16.ts",
+      "fan_in": 6,
+      "fan_out": 19,
+      "risk_level": "low",
+      "summary": "Handles caching for files in subsystem 16."
+    },
+    {
+      "key": "entity_17_ee7c",
+      "name": "symbol_17",
+      "kind": "class",
+      "file_path": "src/area_5/file_17.ts",
+      "fan_in": 18,
+      "fan_out": 0,
+      "risk_level": "high",
+      "summary": "Handles routing for edges in subsystem 17."
+    },
+    {
+      "key": "entity_18_7159",
+      "name": "symbol_18",
+      "kind": "interface",
+      "file_path": "src/area_6/file_18.ts",
+      "fan_in": 7,
+      "fan_out": 12,
+      "risk_level": "high",
+      "summary": "Handles caching for files in subsystem 18."
+    },
+    {
+      "key": "entity_19_575c",
+      "name": "symbol_19",
+      "kind": "function",
+      "file_path": "src/area_7/file_19.ts",
+      "fan_in": 37,
+      "fan_out": 5,
+      "risk_level": "medium",
+      "summary": "Handles routing for tokens in subsystem 19."
+    },
+    {
+      "key": "entity_20_1c40",
+      "name": "symbol_20",
+      "kind": "type",
+      "file_path": "src/area_8/file_20.ts",
+      "fan_in": 27,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles routing for edges in subsystem 20."
+    },
+    {
+      "key": "entity_21_5393",
+      "name": "symbol_21",
+      "kind": "type",
+      "file_path": "src/area_9/file_21.ts",
+      "fan_in": 35,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles routing for tokens in subsystem 21."
+    },
+    {
+      "key": "entity_22_5d9c",
+      "name": "symbol_22",
+      "kind": "function",
+      "file_path": "src/area_10/file_22.ts",
+      "fan_in": 6,
+      "fan_out": 10,
+      "risk_level": "medium",
+      "summary": "Handles routing for entities in subsystem 22."
+    },
+    {
+      "key": "entity_23_9de9",
+      "name": "symbol_23",
+      "kind": "type",
+      "file_path": "src/area_11/file_23.ts",
+      "fan_in": 9,
+      "fan_out": 13,
+      "risk_level": "low",
+      "summary": "Handles indexing for tokens in subsystem 23."
+    },
+    {
+      "key": "entity_24_db02",
+      "name": "symbol_24",
+      "kind": "interface",
+      "file_path": "src/area_0/file_24.ts",
+      "fan_in": 34,
+      "fan_out": 19,
+      "risk_level": "low",
+      "summary": "Handles parsing for edges in subsystem 24."
+    },
+    {
+      "key": "entity_25_c4c2",
+      "name": "symbol_25",
+      "kind": "interface",
+      "file_path": "src/area_1/file_25.ts",
+      "fan_in": 34,
+      "fan_out": 14,
+      "risk_level": "high",
+      "summary": "Handles routing for files in subsystem 25."
+    },
+    {
+      "key": "entity_26_20ec",
+      "name": "symbol_26",
+      "kind": "interface",
+      "file_path": "src/area_2/file_26.ts",
+      "fan_in": 21,
+      "fan_out": 6,
+      "risk_level": "high",
+      "summary": "Handles parsing for entities in subsystem 26."
+    },
+    {
+      "key": "entity_27_e751",
+      "name": "symbol_27",
+      "kind": "function",
+      "file_path": "src/area_3/file_27.ts",
+      "fan_in": 10,
+      "fan_out": 2,
+      "risk_level": "low",
+      "summary": "Handles parsing for edges in subsystem 27."
+    },
+    {
+      "key": "entity_28_108a6",
+      "name": "symbol_28",
+      "kind": "interface",
+      "file_path": "src/area_4/file_28.ts",
+      "fan_in": 13,
+      "fan_out": 1,
+      "risk_level": "medium",
+      "summary": "Handles indexing for tokens in subsystem 28."
+    },
+    {
+      "key": "entity_29_17efe",
+      "name": "symbol_29",
+      "kind": "interface",
+      "file_path": "src/area_5/file_29.ts",
+      "fan_in": 32,
+      "fan_out": 13,
+      "risk_level": "medium",
+      "summary": "Handles indexing for entities in subsystem 29."
+    },
+    {
+      "key": "entity_30_b2d8",
+      "name": "symbol_30",
+      "kind": "function",
+      "file_path": "src/area_6/file_30.ts",
+      "fan_in": 1,
+      "fan_out": 2,
+      "risk_level": "medium",
+      "summary": "Handles caching for files in subsystem 30."
+    },
+    {
+      "key": "entity_31_17275",
+      "name": "symbol_31",
+      "kind": "class",
+      "file_path": "src/area_7/file_31.ts",
+      "fan_in": 12,
+      "fan_out": 8,
+      "risk_level": "high",
+      "summary": "Handles caching for edges in subsystem 31."
+    },
+    {
+      "key": "entity_32_12e74",
+      "name": "symbol_32",
+      "kind": "interface",
+      "file_path": "src/area_8/file_32.ts",
+      "fan_in": 30,
+      "fan_out": 9,
+      "risk_level": "high",
+      "summary": "Handles parsing for files in subsystem 32."
+    },
+    {
+      "key": "entity_33_587e",
+      "name": "symbol_33",
+      "kind": "interface",
+      "file_path": "src/area_9/file_33.ts",
+      "fan_in": 16,
+      "fan_out": 3,
+      "risk_level": "medium",
+      "summary": "Handles routing for entities in subsystem 33."
+    },
+    {
+      "key": "entity_34_a821",
+      "name": "symbol_34",
+      "kind": "class",
+      "file_path": "src/area_10/file_34.ts",
+      "fan_in": 1,
+      "fan_out": 4,
+      "risk_level": "high",
+      "summary": "Handles parsing for entities in subsystem 34."
+    },
+    {
+      "key": "entity_35_954b",
+      "name": "symbol_35",
+      "kind": "class",
+      "file_path": "src/area_11/file_35.ts",
+      "fan_in": 6,
+      "fan_out": 18,
+      "risk_level": "low",
+      "summary": "Handles caching for edges in subsystem 35."
+    },
+    {
+      "key": "entity_36_13171",
+      "name": "symbol_36",
+      "kind": "type",
+      "file_path": "src/area_0/file_36.ts",
+      "fan_in": 16,
+      "fan_out": 0,
+      "risk_level": "high",
+      "summary": "Handles routing for files in subsystem 36."
+    },
+    {
+      "key": "entity_37_7722",
+      "name": "symbol_37",
+      "kind": "type",
+      "file_path": "src/area_1/file_37.ts",
+      "fan_in": 31,
+      "fan_out": 2,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 37."
+    },
+    {
+      "key": "entity_38_5dd9",
+      "name": "symbol_38",
+      "kind": "type",
+      "file_path": "src/area_2/file_38.ts",
+      "fan_in": 21,
+      "fan_out": 16,
+      "risk_level": "medium",
+      "summary": "Handles parsing for edges in subsystem 38."
+    },
+    {
+      "key": "entity_39_1f2c",
+      "name": "symbol_39",
+      "kind": "interface",
+      "file_path": "src/area_3/file_39.ts",
+      "fan_in": 21,
+      "fan_out": 0,
+      "risk_level": "medium",
+      "summary": "Handles routing for edges in subsystem 39."
+    },
+    {
+      "key": "entity_40_3556",
+      "name": "symbol_40",
+      "kind": "class",
+      "file_path": "src/area_4/file_40.ts",
+      "fan_in": 8,
+      "fan_out": 11,
+      "risk_level": "high",
+      "summary": "Handles indexing for edges in subsystem 40."
+    },
+    {
+      "key": "entity_41_c00f",
+      "name": "symbol_41",
+      "kind": "interface",
+      "file_path": "src/area_5/file_41.ts",
+      "fan_in": 38,
+      "fan_out": 4,
+      "risk_level": "medium",
+      "summary": "Handles routing for files in subsystem 41."
+    },
+    {
+      "key": "entity_42_16343",
+      "name": "symbol_42",
+      "kind": "type",
+      "file_path": "src/area_6/file_42.ts",
+      "fan_in": 7,
+      "fan_out": 16,
+      "risk_level": "medium",
+      "summary": "Handles parsing for files in subsystem 42."
+    },
+    {
+      "key": "entity_43_d50b",
+      "name": "symbol_43",
+      "kind": "type",
+      "file_path": "src/area_7/file_43.ts",
+      "fan_in": 19,
+      "fan_out": 3,
+      "risk_level": "low",
+      "summary": "Handles routing for files in subsystem 43."
+    },
+    {
+      "key": "entity_44_12006",
+      "name": "symbol_44",
+      "kind": "function",
+      "file_path": "src/area_8/file_44.ts",
+      "fan_in": 9,
+      "fan_out": 15,
+      "risk_level": "high",
+      "summary": "Handles indexing for files in subsystem 44."
+    },
+    {
+      "key": "entity_45_c824",
+      "name": "symbol_45",
+      "kind": "type",
+      "file_path": "src/area_9/file_45.ts",
+      "fan_in": 36,
+      "fan_out": 1,
+      "risk_level": "high",
+      "summary": "Handles parsing for edges in subsystem 45."
+    },
+    {
+      "key": "entity_46_282f",
+      "name": "symbol_46",
+      "kind": "type",
+      "file_path": "src/area_10/file_46.ts",
+      "fan_in": 18,
+      "fan_out": 7,
+      "risk_level": "low",
+      "summary": "Handles parsing for edges in subsystem 46."
+    },
+    {
+      "key": "entity_47_b090",
+      "name": "symbol_47",
+      "kind": "class",
+      "file_path": "src/area_11/file_47.ts",
+      "fan_in": 16,
+      "fan_out": 3,
+      "risk_level": "medium",
+      "summary": "Handles indexing for entities in subsystem 47."
+    },
+    {
+      "key": "entity_48_167df",
+      "name": "symbol_48",
+      "kind": "function",
+      "file_path": "src/area_0/file_48.ts",
+      "fan_in": 36,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles routing for files in subsystem 48."
+    },
+    {
+      "key": "entity_49_113ef",
+      "name": "symbol_49",
+      "kind": "type",
+      "file_path": "src/area_1/file_49.ts",
+      "fan_in": 36,
+      "fan_out": 13,
+      "risk_level": "low",
+      "summary": "Handles indexing for files in subsystem 49."
+    },
+    {
+      "key": "entity_50_147d4",
+      "name": "symbol_50",
+      "kind": "type",
+      "file_path": "src/area_2/file_50.ts",
+      "fan_in": 39,
+      "fan_out": 17,
+      "risk_level": "medium",
+      "summary": "Handles parsing for files in subsystem 50."
+    },
+    {
+      "key": "entity_51_14b84",
+      "name": "symbol_51",
+      "kind": "function",
+      "file_path": "src/area_3/file_51.ts",
+      "fan_in": 20,
+      "fan_out": 16,
+      "risk_level": "high",
+      "summary": "Handles parsing for entities in subsystem 51."
+    },
+    {
+      "key": "entity_52_10cf0",
+      "name": "symbol_52",
+      "kind": "function",
+      "file_path": "src/area_4/file_52.ts",
+      "fan_in": 26,
+      "fan_out": 6,
+      "risk_level": "low",
+      "summary": "Handles caching for files in subsystem 52."
+    },
+    {
+      "key": "entity_53_1343f",
+      "name": "symbol_53",
+      "kind": "class",
+      "file_path": "src/area_5/file_53.ts",
+      "fan_in": 6,
+      "fan_out": 0,
+      "risk_level": "medium",
+      "summary": "Handles routing for entities in subsystem 53."
+    },
+    {
+      "key": "entity_54_16553",
+      "name": "symbol_54",
+      "kind": "interface",
+      "file_path": "src/area_6/file_54.ts",
+      "fan_in": 6,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 54."
+    },
+    {
+      "key": "entity_55_cb89",
+      "name": "symbol_55",
+      "kind": "function",
+      "file_path": "src/area_7/file_55.ts",
+      "fan_in": 33,
+      "fan_out": 11,
+      "risk_level": "low",
+      "summary": "Handles indexing for files in subsystem 55."
+    },
+    {
+      "key": "entity_56_1030f",
+      "name": "symbol_56",
+      "kind": "type",
+      "file_path": "src/area_8/file_56.ts",
+      "fan_in": 39,
+      "fan_out": 10,
+      "risk_level": "medium",
+      "summary": "Handles parsing for tokens in subsystem 56."
+    },
+    {
+      "key": "entity_57_34a4",
+      "name": "symbol_57",
+      "kind": "interface",
+      "file_path": "src/area_9/file_57.ts",
+      "fan_in": 24,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles indexing for entities in subsystem 57."
+    },
+    {
+      "key": "entity_58_3996",
+      "name": "symbol_58",
+      "kind": "interface",
+      "file_path": "src/area_10/file_58.ts",
+      "fan_in": 19,
+      "fan_out": 9,
+      "risk_level": "low",
+      "summary": "Handles indexing for tokens in subsystem 58."
+    },
+    {
+      "key": "entity_59_d7a0",
+      "name": "symbol_59",
+      "kind": "class",
+      "file_path": "src/area_11/file_59.ts",
+      "fan_in": 21,
+      "fan_out": 8,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 59."
+    },
+    {
+      "key": "tgt_4_deadbeef",
+      "name": "answerEntity_4",
+      "kind": "interface",
+      "file_path": "src/area_0/file_60.ts",
+      "fan_in": 35,
+      "fan_out": 13,
+      "risk_level": "high",
+      "summary": "Handles routing for edges in subsystem 60."
+    },
+    {
+      "key": "entity_61_3309",
+      "name": "symbol_61",
+      "kind": "type",
+      "file_path": "src/area_1/file_61.ts",
+      "fan_in": 21,
+      "fan_out": 6,
+      "risk_level": "medium",
+      "summary": "Handles indexing for entities in subsystem 61."
+    },
+    {
+      "key": "entity_62_1581a",
+      "name": "symbol_62",
+      "kind": "type",
+      "file_path": "src/area_2/file_62.ts",
+      "fan_in": 26,
+      "fan_out": 10,
+      "risk_level": "high",
+      "summary": "Handles parsing for entities in subsystem 62."
+    },
+    {
+      "key": "entity_63_1731f",
+      "name": "symbol_63",
+      "kind": "class",
+      "file_path": "src/area_3/file_63.ts",
+      "fan_in": 37,
+      "fan_out": 17,
+      "risk_level": "medium",
+      "summary": "Handles routing for files in subsystem 63."
+    },
+    {
+      "key": "entity_64_16c14",
+      "name": "symbol_64",
+      "kind": "type",
+      "file_path": "src/area_4/file_64.ts",
+      "fan_in": 0,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles indexing for files in subsystem 64."
+    },
+    {
+      "key": "entity_65_5659",
+      "name": "symbol_65",
+      "kind": "class",
+      "file_path": "src/area_5/file_65.ts",
+      "fan_in": 15,
+      "fan_out": 12,
+      "risk_level": "low",
+      "summary": "Handles indexing for entities in subsystem 65."
+    },
+    {
+      "key": "entity_66_16b49",
+      "name": "symbol_66",
+      "kind": "type",
+      "file_path": "src/area_6/file_66.ts",
+      "fan_in": 33,
+      "fan_out": 6,
+      "risk_level": "high",
+      "summary": "Handles indexing for tokens in subsystem 66."
+    },
+    {
+      "key": "entity_67_1452c",
+      "name": "symbol_67",
+      "kind": "type",
+      "file_path": "src/area_7/file_67.ts",
+      "fan_in": 32,
+      "fan_out": 14,
+      "risk_level": "high",
+      "summary": "Handles indexing for edges in subsystem 67."
+    },
+    {
+      "key": "entity_68_253e",
+      "name": "symbol_68",
+      "kind": "type",
+      "file_path": "src/area_8/file_68.ts",
+      "fan_in": 30,
+      "fan_out": 16,
+      "risk_level": "low",
+      "summary": "Handles caching for entities in subsystem 68."
+    },
+    {
+      "key": "entity_69_169ff",
+      "name": "symbol_69",
+      "kind": "class",
+      "file_path": "src/area_9/file_69.ts",
+      "fan_in": 23,
+      "fan_out": 17,
+      "risk_level": "high",
+      "summary": "Handles caching for tokens in subsystem 69."
+    },
+    {
+      "key": "entity_70_fde3",
+      "name": "symbol_70",
+      "kind": "interface",
+      "file_path": "src/area_10/file_70.ts",
+      "fan_in": 2,
+      "fan_out": 12,
+      "risk_level": "high",
+      "summary": "Handles caching for tokens in subsystem 70."
+    },
+    {
+      "key": "entity_71_3712",
+      "name": "symbol_71",
+      "kind": "class",
+      "file_path": "src/area_11/file_71.ts",
+      "fan_in": 30,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles routing for tokens in subsystem 71."
+    },
+    {
+      "key": "entity_72_10432",
+      "name": "symbol_72",
+      "kind": "type",
+      "file_path": "src/area_0/file_72.ts",
+      "fan_in": 2,
+      "fan_out": 16,
+      "risk_level": "medium",
+      "summary": "Handles routing for entities in subsystem 72."
+    },
+    {
+      "key": "entity_73_9182",
+      "name": "symbol_73",
+      "kind": "function",
+      "file_path": "src/area_1/file_73.ts",
+      "fan_in": 14,
+      "fan_out": 16,
+      "risk_level": "medium",
+      "summary": "Handles parsing for files in subsystem 73."
+    },
+    {
+      "key": "entity_74_e041",
+      "name": "symbol_74",
+      "kind": "type",
+      "file_path": "src/area_2/file_74.ts",
+      "fan_in": 24,
+      "fan_out": 8,
+      "risk_level": "high",
+      "summary": "Handles indexing for tokens in subsystem 74."
+    },
+    {
+      "key": "entity_75_1642a",
+      "name": "symbol_75",
+      "kind": "class",
+      "file_path": "src/area_3/file_75.ts",
+      "fan_in": 29,
+      "fan_out": 3,
+      "risk_level": "high",
+      "summary": "Handles routing for tokens in subsystem 75."
+    },
+    {
+      "key": "entity_76_14410",
+      "name": "symbol_76",
+      "kind": "class",
+      "file_path": "src/area_4/file_76.ts",
+      "fan_in": 24,
+      "fan_out": 0,
+      "risk_level": "low",
+      "summary": "Handles indexing for entities in subsystem 76."
+    },
+    {
+      "key": "entity_77_60f5",
+      "name": "symbol_77",
+      "kind": "type",
+      "file_path": "src/area_5/file_77.ts",
+      "fan_in": 9,
+      "fan_out": 15,
+      "risk_level": "high",
+      "summary": "Handles indexing for tokens in subsystem 77."
+    },
+    {
+      "key": "entity_78_388e",
+      "name": "symbol_78",
+      "kind": "type",
+      "file_path": "src/area_6/file_78.ts",
+      "fan_in": 16,
+      "fan_out": 19,
+      "risk_level": "high",
+      "summary": "Handles caching for tokens in subsystem 78."
+    },
+    {
+      "key": "entity_79_8455",
+      "name": "symbol_79",
+      "kind": "interface",
+      "file_path": "src/area_7/file_79.ts",
+      "fan_in": 15,
+      "fan_out": 8,
+      "risk_level": "medium",
+      "summary": "Handles caching for edges in subsystem 79."
+    },
+    {
+      "key": "entity_80_17629",
+      "name": "symbol_80",
+      "kind": "interface",
+      "file_path": "src/area_8/file_80.ts",
+      "fan_in": 16,
+      "fan_out": 7,
+      "risk_level": "low",
+      "summary": "Handles routing for files in subsystem 80."
+    },
+    {
+      "key": "entity_81_11209",
+      "name": "symbol_81",
+      "kind": "class",
+      "file_path": "src/area_9/file_81.ts",
+      "fan_in": 5,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles parsing for tokens in subsystem 81."
+    },
+    {
+      "key": "entity_82_12b46",
+      "name": "symbol_82",
+      "kind": "type",
+      "file_path": "src/area_10/file_82.ts",
+      "fan_in": 4,
+      "fan_out": 13,
+      "risk_level": "low",
+      "summary": "Handles routing for tokens in subsystem 82."
+    },
+    {
+      "key": "entity_83_1657c",
+      "name": "symbol_83",
+      "kind": "function",
+      "file_path": "src/area_11/file_83.ts",
+      "fan_in": 21,
+      "fan_out": 12,
+      "risk_level": "high",
+      "summary": "Handles indexing for files in subsystem 83."
+    },
+    {
+      "key": "entity_84_982c",
+      "name": "symbol_84",
+      "kind": "function",
+      "file_path": "src/area_0/file_84.ts",
+      "fan_in": 18,
+      "fan_out": 0,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 84."
+    },
+    {
+      "key": "entity_85_e5e",
+      "name": "symbol_85",
+      "kind": "function",
+      "file_path": "src/area_1/file_85.ts",
+      "fan_in": 15,
+      "fan_out": 15,
+      "risk_level": "low",
+      "summary": "Handles routing for files in subsystem 85."
+    },
+    {
+      "key": "entity_86_bb2f",
+      "name": "symbol_86",
+      "kind": "type",
+      "file_path": "src/area_2/file_86.ts",
+      "fan_in": 26,
+      "fan_out": 4,
+      "risk_level": "high",
+      "summary": "Handles indexing for edges in subsystem 86."
+    },
+    {
+      "key": "entity_87_ff86",
+      "name": "symbol_87",
+      "kind": "class",
+      "file_path": "src/area_3/file_87.ts",
+      "fan_in": 1,
+      "fan_out": 6,
+      "risk_level": "high",
+      "summary": "Handles parsing for tokens in subsystem 87."
+    },
+    {
+      "key": "entity_88_af86",
+      "name": "symbol_88",
+      "kind": "type",
+      "file_path": "src/area_4/file_88.ts",
+      "fan_in": 29,
+      "fan_out": 2,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 88."
+    },
+    {
+      "key": "entity_89_143a5",
+      "name": "symbol_89",
+      "kind": "interface",
+      "file_path": "src/area_5/file_89.ts",
+      "fan_in": 1,
+      "fan_out": 9,
+      "risk_level": "medium",
+      "summary": "Handles routing for files in subsystem 89."
+    },
+    {
+      "key": "entity_90_13ab7",
+      "name": "symbol_90",
+      "kind": "function",
+      "file_path": "src/area_6/file_90.ts",
+      "fan_in": 7,
+      "fan_out": 19,
+      "risk_level": "high",
+      "summary": "Handles caching for entities in subsystem 90."
+    },
+    {
+      "key": "entity_91_f358",
+      "name": "symbol_91",
+      "kind": "function",
+      "file_path": "src/area_7/file_91.ts",
+      "fan_in": 24,
+      "fan_out": 18,
+      "risk_level": "low",
+      "summary": "Handles routing for edges in subsystem 91."
+    },
+    {
+      "key": "entity_92_93b2",
+      "name": "symbol_92",
+      "kind": "function",
+      "file_path": "src/area_8/file_92.ts",
+      "fan_in": 10,
+      "fan_out": 8,
+      "risk_level": "medium",
+      "summary": "Handles routing for tokens in subsystem 92."
+    },
+    {
+      "key": "entity_93_7906",
+      "name": "symbol_93",
+      "kind": "type",
+      "file_path": "src/area_9/file_93.ts",
+      "fan_in": 23,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles caching for tokens in subsystem 93."
+    },
+    {
+      "key": "entity_94_d9ea",
+      "name": "symbol_94",
+      "kind": "interface",
+      "file_path": "src/area_10/file_94.ts",
+      "fan_in": 5,
+      "fan_out": 10,
+      "risk_level": "low",
+      "summary": "Handles caching for entities in subsystem 94."
+    },
+    {
+      "key": "entity_95_6b67",
+      "name": "symbol_95",
+      "kind": "type",
+      "file_path": "src/area_11/file_95.ts",
+      "fan_in": 17,
+      "fan_out": 14,
+      "risk_level": "high",
+      "summary": "Handles routing for entities in subsystem 95."
+    },
+    {
+      "key": "entity_96_25a6",
+      "name": "symbol_96",
+      "kind": "function",
+      "file_path": "src/area_0/file_96.ts",
+      "fan_in": 38,
+      "fan_out": 17,
+      "risk_level": "low",
+      "summary": "Handles caching for tokens in subsystem 96."
+    },
+    {
+      "key": "entity_97_383d",
+      "name": "symbol_97",
+      "kind": "interface",
+      "file_path": "src/area_1/file_97.ts",
+      "fan_in": 15,
+      "fan_out": 2,
+      "risk_level": "high",
+      "summary": "Handles indexing for files in subsystem 97."
+    },
+    {
+      "key": "entity_98_10232",
+      "name": "symbol_98",
+      "kind": "interface",
+      "file_path": "src/area_2/file_98.ts",
+      "fan_in": 21,
+      "fan_out": 14,
+      "risk_level": "medium",
+      "summary": "Handles caching for entities in subsystem 98."
+    },
+    {
+      "key": "entity_99_7a87",
+      "name": "symbol_99",
+      "kind": "interface",
+      "file_path": "src/area_3/file_99.ts",
+      "fan_in": 35,
+      "fan_out": 7,
+      "risk_level": "low",
+      "summary": "Handles routing for entities in subsystem 99."
+    },
+    {
+      "key": "entity_100_17bee",
+      "name": "symbol_100",
+      "kind": "function",
+      "file_path": "src/area_4/file_100.ts",
+      "fan_in": 9,
+      "fan_out": 2,
+      "risk_level": "high",
+      "summary": "Handles indexing for tokens in subsystem 100."
+    },
+    {
+      "key": "entity_101_16f17",
+      "name": "symbol_101",
+      "kind": "type",
+      "file_path": "src/area_5/file_101.ts",
+      "fan_in": 34,
+      "fan_out": 9,
+      "risk_level": "high",
+      "summary": "Handles indexing for entities in subsystem 101."
+    },
+    {
+      "key": "entity_102_6f6e",
+      "name": "symbol_102",
+      "kind": "type",
+      "file_path": "src/area_6/file_102.ts",
+      "fan_in": 29,
+      "fan_out": 7,
+      "risk_level": "high",
+      "summary": "Handles routing for files in subsystem 102."
+    },
+    {
+      "key": "entity_103_1ccc",
+      "name": "symbol_103",
+      "kind": "function",
+      "file_path": "src/area_7/file_103.ts",
+      "fan_in": 14,
+      "fan_out": 2,
+      "risk_level": "low",
+      "summary": "Handles indexing for tokens in subsystem 103."
+    },
+    {
+      "key": "entity_104_71a",
+      "name": "symbol_104",
+      "kind": "interface",
+      "file_path": "src/area_8/file_104.ts",
+      "fan_in": 32,
+      "fan_out": 16,
+      "risk_level": "high",
+      "summary": "Handles indexing for entities in subsystem 104."
+    },
+    {
+      "key": "entity_105_2e77",
+      "name": "symbol_105",
+      "kind": "function",
+      "file_path": "src/area_9/file_105.ts",
+      "fan_in": 4,
+      "fan_out": 19,
+      "risk_level": "low",
+      "summary": "Handles caching for files in subsystem 105."
+    },
+    {
+      "key": "entity_106_145ea",
+      "name": "symbol_106",
+      "kind": "interface",
+      "file_path": "src/area_10/file_106.ts",
+      "fan_in": 27,
+      "fan_out": 18,
+      "risk_level": "medium",
+      "summary": "Handles caching for tokens in subsystem 106."
+    },
+    {
+      "key": "entity_107_fee6",
+      "name": "symbol_107",
+      "kind": "function",
+      "file_path": "src/area_11/file_107.ts",
+      "fan_in": 6,
+      "fan_out": 1,
+      "risk_level": "medium",
+      "summary": "Handles parsing for entities in subsystem 107."
+    },
+    {
+      "key": "entity_108_46ad",
+      "name": "symbol_108",
+      "kind": "function",
+      "file_path": "src/area_0/file_108.ts",
+      "fan_in": 4,
+      "fan_out": 14,
+      "risk_level": "low",
+      "summary": "Handles routing for edges in subsystem 108."
+    },
+    {
+      "key": "entity_109_18503",
+      "name": "symbol_109",
+      "kind": "function",
+      "file_path": "src/area_1/file_109.ts",
+      "fan_in": 17,
+      "fan_out": 19,
+      "risk_level": "low",
+      "summary": "Handles caching for entities in subsystem 109."
+    },
+    {
+      "key": "entity_110_e55a",
+      "name": "symbol_110",
+      "kind": "type",
+      "file_path": "src/area_2/file_110.ts",
+      "fan_in": 28,
+      "fan_out": 2,
+      "risk_level": "low",
+      "summary": "Handles routing for tokens in subsystem 110."
+    },
+    {
+      "key": "entity_111_6c67",
+      "name": "symbol_111",
+      "kind": "function",
+      "file_path": "src/area_3/file_111.ts",
+      "fan_in": 1,
+      "fan_out": 10,
+      "risk_level": "high",
+      "summary": "Handles indexing for tokens in subsystem 111."
+    },
+    {
+      "key": "entity_112_10198",
+      "name": "symbol_112",
+      "kind": "interface",
+      "file_path": "src/area_4/file_112.ts",
+      "fan_in": 7,
+      "fan_out": 1,
+      "risk_level": "medium",
+      "summary": "Handles parsing for edges in subsystem 112."
+    },
+    {
+      "key": "entity_113_45a0",
+      "name": "symbol_113",
+      "kind": "type",
+      "file_path": "src/area_5/file_113.ts",
+      "fan_in": 8,
+      "fan_out": 12,
+      "risk_level": "high",
+      "summary": "Handles routing for files in subsystem 113."
+    },
+    {
+      "key": "entity_114_f88",
+      "name": "symbol_114",
+      "kind": "function",
+      "file_path": "src/area_6/file_114.ts",
+      "fan_in": 27,
+      "fan_out": 5,
+      "risk_level": "low",
+      "summary": "Handles caching for entities in subsystem 114."
+    },
+    {
+      "key": "entity_115_fb19",
+      "name": "symbol_115",
+      "kind": "type",
+      "file_path": "src/area_7/file_115.ts",
+      "fan_in": 29,
+      "fan_out": 12,
+      "risk_level": "medium",
+      "summary": "Handles routing for files in subsystem 115."
+    },
+    {
+      "key": "entity_116_9ff9",
+      "name": "symbol_116",
+      "kind": "class",
+      "file_path": "src/area_8/file_116.ts",
+      "fan_in": 7,
+      "fan_out": 15,
+      "risk_level": "high",
+      "summary": "Handles caching for edges in subsystem 116."
+    },
+    {
+      "key": "entity_117_fd5a",
+      "name": "symbol_117",
+      "kind": "function",
+      "file_path": "src/area_9/file_117.ts",
+      "fan_in": 23,
+      "fan_out": 18,
+      "risk_level": "high",
+      "summary": "Handles caching for edges in subsystem 117."
+    },
+    {
+      "key": "entity_118_5f89",
+      "name": "symbol_118",
+      "kind": "class",
+      "file_path": "src/area_10/file_118.ts",
+      "fan_in": 21,
+      "fan_out": 19,
+      "risk_level": "low",
+      "summary": "Handles indexing for files in subsystem 118."
+    },
+    {
+      "key": "entity_119_4e45",
+      "name": "symbol_119",
+      "kind": "type",
+      "file_path": "src/area_11/file_119.ts",
+      "fan_in": 30,
+      "fan_out": 10,
+      "risk_level": "high",
+      "summary": "Handles indexing for entities in subsystem 119."
+    }
+  ],
+  "total": 120
+}

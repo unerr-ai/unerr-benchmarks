@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "description": "Frozen compression corpus (S0/T0.3-T0.4). Hash-pinned fixtures across 3 categories, n>=5 each. mustSurvive is a JS RegExp source the fidelity probe (T0.4) checks against the compressed output.",
+  "generator": "generate-fixtures.mjs",
+  "categories": {
+    "shell": "large shell outputs (build logs, diffs, kubectl yaml, test results)",
+    "file-read": "large code file / entity reads",
+    "json": "large JSON tool responses (search_code-style result arrays)"
+  },
+  "fixtures": [
+    {
+      "id": "build-log-fatal",
+      "category": "shell",
+      "path": "shell/build-log-fatal.txt",
+      "bytes": 72175,
+      "sha256": "d09149f659ff3e8ca4697bfa51f8284697c01c5bc5b57c72e2125fc808da1d27",
+      "mustSurvive": "FATAL: type error TS2345 in src/proxy/wire-cap\\.ts",
+      "task": "why did the type check fail"
+    },
+    {
+      "id": "build-log-eslint",
+      "category": "shell",
+      "path": "shell/build-log-eslint.txt",
+      "bytes": 53996,
+      "sha256": "b76d59fdc541cbf3d6c1af79f17d8a141ea7ac22b9cb6d82fa754192feec998c",
+      "mustSurvive": "FATAL: 1 error \\(no-unused-vars\\) in src/intelligence/recon\\.ts",
+      "task": "which lint error broke the build"
+    },
+    {
+      "id": "git-diff-large",
+      "category": "shell",
+      "path": "shell/git-diff-large.txt",
+      "bytes": 33754,
+      "sha256": "320db4721e7df7a3893859203469e0edabd981c78a9419da880aea1ca139ed20",
+      "mustSurvive": "diff --git a/src/module_0/component_0\\.ts",
+      "task": "what changed in module_0 component_0"
+    },
+    {
+      "id": "kubectl-yaml",
+      "category": "shell",
+      "path": "shell/kubectl-yaml.txt",
+      "bytes": 11176,
+      "sha256": "3a6b0669334a1c0ad4f38dbbacb9cc59b8b24e0849eeb57faf1ba4dbd526f197",
+      "mustSurvive": "kind: Pod",
+      "task": "list the pods and their kind"
+    },
+    {
+      "id": "test-results-fail",
+      "category": "shell",
+      "path": "shell/test-results-fail.txt",
+      "bytes": 41995,
+      "sha256": "43506802fcf0d043141017b5408d1d76153800381039886ca651f469cf4e5637",
+      "mustSurvive": "FAIL src/__tests__/fleet-reporter\\.test\\.ts > reports machine snapshot",
+      "task": "which test failed in the fleet reporter suite"
+    },
+    {
+      "id": "source-file-0",
+      "category": "file-read",
+      "path": "file-read/source-file-0.txt",
+      "bytes": 13909,
+      "sha256": "e5447803a2102af88c625af047d59ecb3484ba93f7a0f6f8bf947f333ed4a437",
+      "mustSurvive": "export async function criticalHandler_0\\(",
+      "task": "find the criticalHandler_0 request handler"
+    },
+    {
+      "id": "source-file-1",
+      "category": "file-read",
+      "path": "file-read/source-file-1.txt",
+      "bytes": 13906,
+      "sha256": "2ad383f8b3fb97e8995559c6df0eb5da3942ad4f89006cc406848738b8681c02",
+      "mustSurvive": "export async function criticalHandler_1\\(",
+      "task": "find the criticalHandler_1 request handler"
+    },
+    {
+      "id": "source-file-2",
+      "category": "file-read",
+      "path": "file-read/source-file-2.txt",
+      "bytes": 13893,
+      "sha256": "64986c6239887277a2afa6c0618003c468dc8ddc6d5608646234e5c44b59e345",
+      "mustSurvive": "export async function criticalHandler_2\\(",
+      "task": "find the criticalHandler_2 request handler"
+    },
+    {
+      "id": "source-file-3",
+      "category": "file-read",
+      "path": "file-read/source-file-3.txt",
+      "bytes": 13910,
+      "sha256": "18bbce0cceb214da4285b832d6a55b17335313980bd59bbbfb02018c9d0383b9",
+      "mustSurvive": "export async function criticalHandler_3\\(",
+      "task": "find the criticalHandler_3 request handler"
+    },
+    {
+      "id": "source-file-4",
+      "category": "file-read",
+      "path": "file-read/source-file-4.txt",
+      "bytes": 13912,
+      "sha256": "5199b7cdce70058b796b8082596f49cd09941c3817832b453f4321817faa8078",
+      "mustSurvive": "export async function criticalHandler_4\\(",
+      "task": "find the criticalHandler_4 request handler"
+    },
+    {
+      "id": "search-response-0",
+      "category": "json",
+      "path": "json/search-response-0.txt",
+      "bytes": 32639,
+      "sha256": "07689c326558a7c1a06c449c5dd32bc58c38e71d736adb106c0d47f4d94fa8ff",
+      "mustSurvive": "\"name\":\\s*\"answerEntity_0\"",
+      "task": "locate the answerEntity_0 entity in the results"
+    },
+    {
+      "id": "search-response-1",
+      "category": "json",
+      "path": "json/search-response-1.txt",
+      "bytes": 32719,
+      "sha256": "fad6c0b333be9c4235334c9c04e999fa48e9aafc24cd5d19dc0e45d9ff042ce6",
+      "mustSurvive": "\"name\":\\s*\"answerEntity_1\"",
+      "task": "locate the answerEntity_1 entity in the results"
+    },
+    {
+      "id": "search-response-2",
+      "category": "json",
+      "path": "json/search-response-2.txt",
+      "bytes": 32646,
+      "sha256": "7a9b44f8fd0d5cdbf761784c07f5535f22ad9bedbff1f54e18631c682c313e2f",
+      "mustSurvive": "\"name\":\\s*\"answerEntity_2\"",
+      "task": "locate the answerEntity_2 entity in the results"
+    },
+    {
+      "id": "search-response-3",
+      "category": "json",
+      "path": "json/search-response-3.txt",
+      "bytes": 32715,
+      "sha256": "7e6407f707d69aca40838bd7bea446f0e05a8223915d37fc4df1e7fa222e3ffd",
+      "mustSurvive": "\"name\":\\s*\"answerEntity_3\"",
+      "task": "locate the answerEntity_3 entity in the results"
+    },
+    {
+      "id": "search-response-4",
+      "category": "json",
+      "path": "json/search-response-4.txt",
+      "bytes": 32717,
+      "sha256": "dc07abcaf3e9d4f66b70919ed92bb1a231ed6ff032e03da37c8d40636aeca527",
+      "mustSurvive": "\"name\":\\s*\"answerEntity_4\"",
+      "task": "locate the answerEntity_4 entity in the results"
+    }
+  ]
+}

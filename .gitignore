@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Benchmark run output (regeneratable; never committed)
+**/out/
+results/runs/
+*.log
+
+# Cloned target repos used as fixtures (regeneratable)
+**/hono-run/out/
+**/worktrees/
+
+# OS / editor
+.DS_Store
+.idea/*
+!.idea/.gitignore
