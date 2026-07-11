@@ -15,6 +15,9 @@ results/runs/
 .idea/*
 !.idea/.gitignore
 
+# benchmark result snapshots (regeneratable; only older values right now)
+benchmark-results/
+
 # unerr local artifacts
 .unerr
 

@@ -1,3 +1,0 @@
-[run-instance] econ run starting (repo=/testbed, timeout=1800s)
-[run-instance] econ exit=0
-[run-instance] sessionID=ses_0d85f966dffeXyRwzMHGvLy6u9

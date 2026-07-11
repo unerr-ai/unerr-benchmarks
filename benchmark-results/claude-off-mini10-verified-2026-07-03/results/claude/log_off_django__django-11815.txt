@@ -1,3 +1,0 @@
-[run-instance] claude -p starting (mode=off, repo=/testbed, model=opus)
-[run-instance] claude -p exit=0
-UNERR_TELEMETRY {"mode":"off","model":"claude-opus-4-8","turns":4,"in_tokens":2783,"cached_in":68645,"cache_creation":6259,"out_tokens":580,"usd":0.1253,"tool_calls":3,"mcp_tool_calls":0,"tools":{"Bash":1,"Read":1,"Edit":1}}
