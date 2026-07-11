@@ -73,6 +73,42 @@ def _run_json(script: Path, args: list[str]) -> dict:
         return {}
 
 
+def _apply_cross_session_totals(telemetry: dict, tier_cost_db: dict) -> dict:
+    """Correct the headline turns/usd for multi-session runs (S7b).
+
+    econ-telemetry.py parses ONLY the events.jsonl stream, which — when econ
+    restarts sessions mid-run for a context-fill checkpoint — reflects the
+    LAST session alone (django-11964 reported $0.0155/5 turns from telemetry
+    vs the DB's real 8 sessions/116 messages/$0.304). tier_cost_db (built from
+    opencode.db, which persists every session) is the source of truth for the
+    across-all-sessions totals. When it shows more than one session, or its
+    usd_upstream exceeds the last session's, promote its `messages`/
+    `usd_upstream` to the headline `turns`/`usd`, keeping the last-session
+    figures under `turns_last_session`/`usd_last_session` so both remain
+    inspectable. No-op (unchanged telemetry) for the single-session case,
+    where the two sources already agree.
+    """
+    if not isinstance(tier_cost_db, dict) or tier_cost_db.get("error"):
+        return telemetry
+    sessions = tier_cost_db.get("sessions")
+    db_usd_upstream = tier_cost_db.get("usd_upstream")
+    last_usd_upstream = telemetry.get("usd_upstream") or 0.0
+    multi_session = isinstance(sessions, (int, float)) and sessions > 1
+    db_exceeds_last = (
+        isinstance(db_usd_upstream, (int, float)) and db_usd_upstream > last_usd_upstream
+    )
+    if not (multi_session or db_exceeds_last):
+        return telemetry
+    telemetry["turns_last_session"] = telemetry.get("turns", 0)
+    telemetry["usd_last_session"] = telemetry.get("usd", 0.0)
+    telemetry["turns"] = tier_cost_db.get("messages", telemetry.get("turns", 0))
+    if isinstance(db_usd_upstream, (int, float)):
+        telemetry["usd"] = db_usd_upstream
+    telemetry["usd_source"] = "tier_cost_db_multi_session"
+    telemetry["multi_session_corrected"] = True
+    return telemetry
+
+
 def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
                    label: str, out_dir: Path) -> tuple[str, dict]:
     """Build + run one instance, return (patch, meta). Empty patch on failure."""
@@ -128,6 +164,7 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
     telemetry = _run_json(TELEMETRY_PY, [str(events)]) if events.is_file() else {}
     tiercost_args = ["--db", str(db)] + (["--session", sid] if sid else [])
     tier_cost_db = _run_json(TIERCOST_PY, tiercost_args) if db.is_file() else {}
+    telemetry = _apply_cross_session_totals(telemetry, tier_cost_db)
 
     meta = {
         "instance_id": iid,

@@ -26,6 +26,7 @@ Worker.__init__ and worker-entrypoint.sh.
 """
 from __future__ import annotations
 
+import base64
 import glob
 import json
 import os
@@ -47,6 +48,15 @@ import urllib.request
 # ModuleNotFoundError (this is the "resolve rc=1 in ~1s" the smoke hit). Mirrors the
 # single-machine entrypoint's PY=/work/.venv/bin/python.
 VENV_PY = os.environ.get("VENV_PY", "/work/.venv/bin/python")
+
+# Size caps for the per-instance artifact sync (S7b): events.jsonl/err.txt ride
+# the /complete POST as plain text, opencode.db as base64 — bounded so one
+# instance's transcript can't balloon the coordinator's queue.db unbounded.
+# Typical sizes observed on the fullresolve path: events.jsonl 50KB-1.3MB,
+# err.txt 4-16KB, opencode.db 0.4-5MB — these caps cover the normal case and
+# only truncate/skip pathological outliers.
+MAX_ARTIFACT_TEXT_BYTES = 5_000_000
+MAX_ARTIFACT_DB_BYTES = 8_000_000
 
 
 def _int_env(name: str, default: int) -> int:
@@ -189,8 +199,12 @@ class Worker:
         report_text = ""
         resolved = False
         error: str | None = None
+        artifacts: dict = {}
+        # Computed before the try so `finally` can always read the instance's
+        # raw transcript prior to scratch cleanup, regardless of which branch
+        # (success/timeout/exception) this run took.
+        run_dir = os.path.join(scratch, self.run_id)
         try:
-            run_dir = os.path.join(scratch, self.run_id)
             preds_path = os.path.join(run_dir, "preds.json")
             meta_path = os.path.join(run_dir, "meta.jsonl")
 
@@ -213,6 +227,11 @@ class Worker:
         except Exception as e:  # noqa: BLE001 — convert to /fail below (unless abandoned)
             error = f"{type(e).__name__}: {str(e)[:500]}"
         finally:
+            # Read the raw transcript (events.jsonl/err.txt/opencode.db) while
+            # it still exists on the ephemeral fly VM — S7b: the distributed
+            # path has no synced volume, so anything not sent to the
+            # coordinator here vanishes with scratch below.
+            artifacts = self._read_artifacts(run_dir, iid)
             stop.set()
             hb.join(timeout=10)
             shutil.rmtree(scratch, ignore_errors=True)
@@ -228,7 +247,7 @@ class Worker:
             self._post_fail(iid, error or "resolve produced no patch")
             self.log(f"{iid}: reported /fail ({error or 'empty patch'})")
         else:
-            self._post_complete(iid, patch, report_text, meta_text, resolved)
+            self._post_complete(iid, patch, report_text, meta_text, resolved, artifacts)
             self.log(f"{iid}: reported /complete resolved={resolved}")
 
     # ── resolve step (shell out to the arm's runner) ─────────────────────────
@@ -284,6 +303,47 @@ class Worker:
         except Exception as e:  # noqa: BLE001
             self.log(f"{iid}: could not parse report.json ({e})")
             return False, ""
+
+    # ── per-instance artifact sync (S7b: events.jsonl/err.txt/opencode.db) ───
+    def _read_artifacts(self, run_dir: str, iid: str) -> dict:
+        """Read the instance's raw transcript out of run-benchmark.py's
+        artifact dir (run_dir/artifacts/<iid>/ — same layout the single-
+        machine fullresolve path leaves on disk) so it can ride the /complete
+        POST. Bounded by MAX_ARTIFACT_TEXT_BYTES/MAX_ARTIFACT_DB_BYTES; a
+        missing or oversized file yields None for that key rather than
+        failing the instance."""
+        art_dir = os.path.join(run_dir, "artifacts", iid)
+
+        def _read_text(name: str) -> str | None:
+            path = os.path.join(art_dir, name)
+            if not os.path.isfile(path):
+                return None
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+            except OSError:
+                return None
+            if len(data) > MAX_ARTIFACT_TEXT_BYTES:
+                data = data[-MAX_ARTIFACT_TEXT_BYTES:]
+            return data.decode("utf-8", "replace")
+
+        db_path = os.path.join(art_dir, "opencode.db")
+        db_b64 = None
+        if os.path.isfile(db_path):
+            try:
+                if os.path.getsize(db_path) <= MAX_ARTIFACT_DB_BYTES:
+                    with open(db_path, "rb") as f:
+                        db_b64 = base64.b64encode(f.read()).decode("ascii")
+                else:
+                    self.log(f"{iid}: opencode.db too large to sync — skipping")
+            except OSError:
+                db_b64 = None
+
+        return {
+            "events_jsonl": _read_text("events.jsonl"),
+            "err_txt": _read_text("err.txt"),
+            "db_b64": db_b64,
+        }
 
     def _find_report(self, grade_cwd: str, iid: str, model_name: str | None) -> str | None:
         # logs/run_evaluation/<run_id>/<model>/<instance_id>/report.json
@@ -350,7 +410,9 @@ class Worker:
 
     # ── report back to the coordinator ───────────────────────────────────────
     def _post_complete(self, iid: str, patch: str, report_json: str,
-                       meta_json: str, resolved: bool) -> None:
+                       meta_json: str, resolved: bool,
+                       artifacts: dict | None = None) -> None:
+        artifacts = artifacts or {}
         self._request("/complete", {
             "instance_id": iid,
             "worker_id": self.worker_id,
@@ -358,6 +420,11 @@ class Worker:
             "report_json": report_json,
             "meta_json": meta_json,
             "resolved": bool(resolved),
+            # S7b: the per-instance transcript, synced here because the
+            # distributed worker has no volume that survives the machine.
+            "events_jsonl": artifacts.get("events_jsonl"),
+            "err_txt": artifacts.get("err_txt"),
+            "db_b64": artifacts.get("db_b64"),
         }, max_attempts=8)
 
     def _post_fail(self, iid: str, error: str) -> None:

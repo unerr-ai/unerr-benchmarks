@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   patch           TEXT,                               -- model_patch
   report_json     TEXT,                               -- per-instance swebench report
   meta_json       TEXT,                               -- cost/telemetry record
+  events_jsonl    TEXT,                               -- S7b: raw agent event stream
+  err_txt         TEXT,                               -- S7b: raw agent stderr transcript
+  db_b64          TEXT,                               -- S7b: base64 opencode.db (bounded, may be absent)
   completed_by    TEXT,
   completed_at    INTEGER                             -- epoch s
 );

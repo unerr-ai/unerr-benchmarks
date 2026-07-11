@@ -25,7 +25,14 @@ older meta records lack them and are treated as 0/None/{}. tier_cost_db is
 the SQLite session-DB per-tier reader's output (econ-tier-cost.py) — it
 captures the executor tier's token volume, which the stream cannot see, and
 is preferred over telemetry.by_tier when present and error-free (see
-_effective_by_tier).
+_effective_by_tier). When a run restarts sessions (context-fill checkpoints),
+telemetry.turns/usd would otherwise reflect only the LAST session; run-
+benchmark.py's _apply_cross_session_totals already corrects the headline
+telemetry.turns/usd to the across-all-sessions totals in that case (from
+tier_cost_db.messages/usd_upstream), stashing the last-session-only figures
+under telemetry.turns_last_session/usd_last_session and flagging
+telemetry.multi_session_corrected=true. No change needed here — report.py
+reads the already-corrected headline fields.
 
 --grade-report is the JSON written by swebench.harness.run_evaluation
 (top-level "resolved_ids"/"unresolved_ids"/... lists). An instance is

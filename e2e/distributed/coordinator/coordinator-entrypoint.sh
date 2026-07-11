@@ -157,7 +157,7 @@ done
 log "aggregating results from $DB_PATH (run_id=$RUN_ID)"
 mkdir -p "$RUNDIR" "$GRADE_DIR"
 AGG_SUMMARY="$("$PY" - "$DB_PATH" "$RUN_ID" "$RUNDIR" "$GRADE_DIR" "$ARM" <<'PYEOF'
-import json, pathlib, sqlite3, sys
+import base64, json, pathlib, sqlite3, sys
 
 db_path, run_id, rundir, grade_dir, arm = sys.argv[1:6]
 rundir = pathlib.Path(rundir)
@@ -171,6 +171,7 @@ con.close()
 preds = {}
 counts = {}
 meta_lines = []
+n_artifacts = 0
 for row in rows:
     counts[row["status"]] = counts.get(row["status"], 0) + 1
     if row["status"] != "done":
@@ -181,6 +182,26 @@ for row in rows:
         "model_name_or_path": arm,
         "model_patch": row["patch"] or "",
     }
+    # S7b: write back the per-instance transcript synced over /complete,
+    # mirroring the single-machine fullresolve layout (results/<label>/
+    # artifacts/<iid>/) so a distributed near-miss stays reconstructable.
+    row_keys = row.keys()
+    events_jsonl = row["events_jsonl"] if "events_jsonl" in row_keys else None
+    err_txt = row["err_txt"] if "err_txt" in row_keys else None
+    db_b64 = row["db_b64"] if "db_b64" in row_keys else None
+    if events_jsonl or err_txt or db_b64:
+        art_dir = rundir / "artifacts" / iid
+        art_dir.mkdir(parents=True, exist_ok=True)
+        if events_jsonl:
+            (art_dir / "events.jsonl").write_text(events_jsonl, encoding="utf-8")
+        if err_txt:
+            (art_dir / "err.txt").write_text(err_txt, encoding="utf-8")
+        if db_b64:
+            try:
+                (art_dir / "opencode.db").write_bytes(base64.b64decode(db_b64))
+            except (ValueError, TypeError):
+                pass
+        n_artifacts += 1
     if row["report_json"]:
         try:
             report = json.loads(row["report_json"])
@@ -199,7 +220,10 @@ with (rundir / "meta.jsonl").open("w", encoding="utf-8") as fh:
     for line in meta_lines:
         fh.write(line.rstrip("\n") + "\n")
 
-print(json.dumps({"counts": counts, "n_preds": len(preds), "n_meta": len(meta_lines)}))
+print(json.dumps({
+    "counts": counts, "n_preds": len(preds), "n_meta": len(meta_lines),
+    "n_artifacts": n_artifacts,
+}))
 PYEOF
 )"
 log "aggregate summary: $AGG_SUMMARY"

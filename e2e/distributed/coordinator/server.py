@@ -183,24 +183,36 @@ class Queue:
         report_json: Any,
         meta_json: Any,
         resolved: Any,
+        events_jsonl: Optional[str] = None,
+        err_txt: Optional[str] = None,
+        db_b64: Optional[str] = None,
     ) -> dict[str, bool]:
         """Idempotent completion upsert: mark `done` and store the results.
 
         Accepted even if the lease already expired — at-least-once delivery plus
         an idempotent overwrite makes a double-run effectively-once.
+
+        events_jsonl/err_txt/db_b64 (S7b) are the instance's raw transcript —
+        optional, since the worker bounds/omits them (see worker-loop.py
+        _read_artifacts) — stored verbatim so coordinator-entrypoint.sh can
+        write them back out under results/<label>/artifacts/<iid>/ at drain.
         """
         now = int(time.time())
         resolved_int = _as_int_bool(resolved)
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE tasks SET status='done', patch=?, report_json=?, "
-                "  meta_json=?, resolved=?, completed_by=?, completed_at=? "
+                "  meta_json=?, resolved=?, events_jsonl=?, err_txt=?, db_b64=?, "
+                "  completed_by=?, completed_at=? "
                 "WHERE instance_id=?",
                 (
                     patch,
                     _as_json_text(report_json),
                     _as_json_text(meta_json),
                     resolved_int,
+                    events_jsonl,
+                    err_txt,
+                    db_b64,
                     worker_id,
                     now,
                     instance_id,
@@ -371,6 +383,9 @@ class Handler(BaseHTTPRequestHandler):
             body.get("report_json"),
             body.get("meta_json"),
             body.get("resolved"),
+            body.get("events_jsonl"),
+            body.get("err_txt"),
+            body.get("db_b64"),
         )
 
     def _post_fail(self, body: dict[str, Any]) -> dict[str, Any]:
