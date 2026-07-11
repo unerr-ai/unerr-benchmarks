@@ -1,0 +1,18 @@
+# Minimal RUNNABLE image to verify the toolbox + unerr work, WITHOUT pulling a
+# multi-GB SWE-bench instance image. Grafts the toolbox onto a small Debian
+# Python base (same family as the real instance images) and seeds a tiny git
+# repo at /testbed so preflight's git ls-files / file_read have real input.
+#
+#   docker build -f Dockerfile.smoke -t unerr-codex-smoke .
+#   docker run --rm -e REPO_DIR=/testbed unerr-codex-smoke /opt/toolbox/preflight.sh
+FROM python:3.11-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=unerr-codex-toolbox /opt/toolbox /opt/toolbox
+ENV PATH=/opt/toolbox/node/bin:/opt/toolbox/bin:$PATH
+RUN mkdir -p /testbed && cd /testbed && git init -q \
+ && git config user.email t@t && git config user.name t \
+ && printf 'def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n' > calc.py \
+ && printf '# sample repo\nused only to smoke-test unerr inside the container\n' > README.md \
+ && git add -A && git commit -qm init
+WORKDIR /testbed

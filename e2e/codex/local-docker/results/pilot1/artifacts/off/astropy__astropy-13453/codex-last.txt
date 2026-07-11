@@ -1,0 +1,12 @@
+Fixed.
+
+`ascii.html` now respects `formats` when writing tables by applying the column formats before HTML cell generation, and it also propagates the format to split cells from multidimensional columns.
+
+Changed files:
+- [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py)
+- [astropy/io/ascii/tests/test_html.py](/testbed/astropy/io/ascii/tests/test_html.py)
+
+Verification:
+- `python -m pytest astropy/io/ascii/tests/test_html.py -q` passed: `11 passed, 16 skipped`
+
+If you want, I can also help turn this into a polished GitHub issue report or draft the PR description.

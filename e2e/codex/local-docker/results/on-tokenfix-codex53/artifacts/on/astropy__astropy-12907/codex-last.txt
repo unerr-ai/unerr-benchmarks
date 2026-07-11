@@ -1,0 +1,19 @@
+Yes, this is a real bug, and it came from nested `CompoundModel` handling in `&`.
+
+I fixed it by preserving the right-hand subtree matrix instead of overwriting it with ones in [`astropy/modeling/separable.py`](/testbed/astropy/modeling/separable.py:245):
+- `cright[-right.shape[0]:, -right.shape[1]:] = 1`
+- changed to
+- `cright[-right.shape[0]:, -right.shape[1]:] = right`
+
+I also added a regression test in [`astropy/modeling/tests/test_separable.py`](/testbed/astropy/modeling/tests/test_separable.py:153):
+- `test_nested_and_compound_separability_matrix`
+- covers `models.Pix2Sky_TAN() & (models.Linear1D(10) & models.Linear1D(5))`
+- asserts the expected lower-right identity block (separable linear models)
+
+Verification:
+- `python -m pytest -q astropy/modeling/tests/test_separable.py`
+- Result: `12 passed`
+
+unerr-save: intent fix nested CompoundModel separability_matrix bug and add regression test
+unerr-save: decision kept fix minimal to ndarray-right branch in _cstack to avoid broader behavior drift
+unerr-save: note wrn|e:astropy.modeling.separable._cstack|-|when right operand is ndarray from nested CompoundModel, do not collapse dependency block to ones; preserve subtree matrix

@@ -1,0 +1,3 @@
+Yes, that’s a bug, not an interpretation issue. Astropy’s tracker has the same reproducer in issue `#12906`, and the issue was closed by `#12907`. The Astropy 8.0.0 changelog explicitly says the fix was for “the separability of a `CompoundModel` where another `CompoundModel` is on the right hand side of the `&` operator.” ([github.com](https://github.com/astropy/astropy/issues/12906?utm_source=openai))
+
+So if you’re seeing this behavior, you’re likely on an Astropy release older than the fix. The practical workaround is to flatten the compound model manually, or upgrade to a version that includes `#12907`. ([github.com](https://github.com/astropy/astropy/issues/12906?utm_source=openai))

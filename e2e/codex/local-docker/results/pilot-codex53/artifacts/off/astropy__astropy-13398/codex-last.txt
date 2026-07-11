@@ -1,0 +1,15 @@
+Yes, this approach is likely to be well received if framed as a **topocentric observed-frame path** rather than a change to generic `ITRS->ITRS` semantics.
+
+What looks strong:
+- Doing `ITRS <-> (AltAz, HADec)` via explicit topocentric subtraction/addition is physically intuitive.
+- Avoiding an `ITRS->ITRS` time-hop for nearby Earth-fixed vectors addresses the common “lost in SSB translation” confusion directly.
+- The matrix-based conversion is clean and testable.
+
+What to tighten before PR:
+1. Be explicit in docs that this path assumes Earth-fixed positions and treats input ITRS vectors as time-invariant for observed transforms.
+2. Add round-trip tests for both `AltAz` and `HADec`, including near-zenith and horizon edge cases.
+3. Verify behavior with differentials/velocities (or explicitly state unsupported behavior).
+4. Add/refine refraction handling for `AltAz` (at least ensure parity with existing behavior when pressure is nonzero).
+5. Keep existing `ITRS->ITRS` behavior unchanged; scope this to observed-frame transforms only.
+
+If you want, I can help you turn this into a PR-ready design note + test checklist.

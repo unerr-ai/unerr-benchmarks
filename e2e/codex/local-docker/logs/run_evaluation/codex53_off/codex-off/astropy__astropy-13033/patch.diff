@@ -1,0 +1,46 @@
+diff --git a/astropy/timeseries/core.py b/astropy/timeseries/core.py
+index c279f35f8..d405b1cbb 100644
+--- a/astropy/timeseries/core.py
++++ b/astropy/timeseries/core.py
+@@ -76,6 +76,15 @@ class BaseTimeSeries(QTable):
+ 
+             elif self.colnames[:len(required_columns)] != required_columns:
+ 
++                if (len(self.colnames) < len(required_columns)
++                        and self.colnames == required_columns[:len(self.colnames)]):
++                    missing_columns = required_columns[len(self.colnames):]
++                    missing = "', '".join(missing_columns)
++                    plural = 's' if len(missing_columns) > 1 else ''
++                    raise ValueError(
++                        "{} object is invalid - missing required column{} '{}'"
++                        .format(self.__class__.__name__, plural, missing))
++
+                 raise ValueError("{} object is invalid - expected '{}' "
+                                  "as the first column{} but found '{}'"
+                                  .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))
+diff --git a/astropy/timeseries/tests/test_sampled.py b/astropy/timeseries/tests/test_sampled.py
+index bcc06d929..0e8af8539 100644
+--- a/astropy/timeseries/tests/test_sampled.py
++++ b/astropy/timeseries/tests/test_sampled.py
+@@ -396,6 +396,21 @@ def test_required_columns():
+                                  "'time' as the first column but found 'banana'")
+ 
+ 
++def test_required_columns_missing():
++
++    ts = TimeSeries(time=INPUT_TIME,
++                    data=[[10, 2, 3], [4, 5, 6]],
++                    names=['a', 'b'])
++
++    ts = ts.copy()
++    ts._required_columns = ['time', 'a']
++
++    with pytest.raises(ValueError) as exc:
++        ts.remove_columns(['a', 'b'])
++    assert exc.value.args[0] == ("TimeSeries object is invalid - missing "
++                                 "required column 'a'")
++
++
+ @pytest.mark.parametrize('cls', [BoxLeastSquares, LombScargle])
+ def test_periodogram(cls):
+ 

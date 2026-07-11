@@ -1,0 +1,15 @@
+# Build context for fly-remote/fullresolve/Dockerfile is this dir (e2e/codex).
+# The Dockerfile COPYs only: local-docker/{run-benchmark.py,Dockerfile.instance,
+# Dockerfile.toolbox,context}, report-runs.py, fly-remote/fullresolve/entrypoint.sh.
+# Everything below is local-only noise that would bloat the remote-builder upload.
+**/.venv
+**/__pycache__
+**/.unerr
+**/.codex
+local-docker/logs
+local-docker/results
+local-docker/grading
+fly-remote/out
+fly-remote/**/out
+**/*.log
+.DS_Store

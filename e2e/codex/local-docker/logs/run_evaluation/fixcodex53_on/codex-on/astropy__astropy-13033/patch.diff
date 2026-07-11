@@ -1,0 +1,40 @@
+diff --git a/astropy/timeseries/core.py b/astropy/timeseries/core.py
+index c279f35f8..27985a1cc 100644
+--- a/astropy/timeseries/core.py
++++ b/astropy/timeseries/core.py
+@@ -76,6 +76,15 @@ class BaseTimeSeries(QTable):
+ 
+             elif self.colnames[:len(required_columns)] != required_columns:
+ 
++                missing_columns = [column for column in required_columns
++                                   if column not in self.colnames]
++
++                if self.colnames[0] == required_columns[0] and missing_columns:
++                    missing_plural = 's' if len(missing_columns) > 1 else ''
++                    raise ValueError("{} object is invalid - missing required column{} '{}'"
++                                     .format(self.__class__.__name__, missing_plural,
++                                             "', '".join(missing_columns)))
++
+                 raise ValueError("{} object is invalid - expected '{}' "
+                                  "as the first column{} but found '{}'"
+                                  .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))
+diff --git a/astropy/timeseries/tests/test_sampled.py b/astropy/timeseries/tests/test_sampled.py
+index bcc06d929..aa982ce54 100644
+--- a/astropy/timeseries/tests/test_sampled.py
++++ b/astropy/timeseries/tests/test_sampled.py
+@@ -395,6 +395,15 @@ def test_required_columns():
+     assert exc.value.args[0] == ("TimeSeries object is invalid - expected "
+                                  "'time' as the first column but found 'banana'")
+ 
++    # Check that missing required columns are reported clearly when the first
++    # required column is still present.
++    ts_with_extra_required = TimeSeries(time=INPUT_TIME, data={'flux': [1, 2, 3]})
++    ts_with_extra_required._required_columns = ['time', 'flux']
++
++    with pytest.raises(ValueError) as exc:
++        ts_with_extra_required.remove_column('flux')
++    assert exc.value.args[0] == "TimeSeries object is invalid - missing required column 'flux'"
++
+ 
+ @pytest.mark.parametrize('cls', [BoxLeastSquares, LombScargle])
+ def test_periodogram(cls):

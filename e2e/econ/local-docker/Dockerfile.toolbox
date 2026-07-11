@@ -1,0 +1,34 @@
+# Relocatable econ toolbox image: the VENDORED local glibc econ binary + its
+# config + plugins + the in-container driver. The binary is glibc-linked
+# (linux-x64-baseline) because it execs inside the Debian SWE-bench instance
+# images — a musl build would fail there with a missing-loader ENOENT.
+#
+# The final stage is `FROM scratch` holding ONLY /opt/toolbox, so it is a clean
+# `COPY --from` source. Dockerfile.instance grafts /opt/toolbox onto each
+# official SWE-bench instance image.
+#
+# SINGLE-ARM: unerr is compiled INTO econ, so there is NO Node, NO npm install,
+# NO unerr tarball, NO entitlement minter — econ is one self-contained binary.
+# Contrast codex's toolbox (Node + Codex CLI + unerr via npm).
+#
+# Build context = ./context (populated by run.sh's vendor step):
+#   - vendor/opencode          the LOCAL linux-x64-baseline-musl econ build
+#   - vendor/opencode.json     econ tier-routing config
+#   - vendor/dot-opencode/     econ plugins (may be empty)
+#   - run-instance.sh          the in-container driver
+
+FROM alpine AS build
+ENV TOOLBOX=/opt/toolbox
+RUN mkdir -p "$TOOLBOX"
+
+COPY vendor/opencode        "$TOOLBOX/opencode"
+COPY vendor/opencode.json   "$TOOLBOX/opencode.json"
+# run.sh always creates vendor/dot-opencode/ (even empty) so this COPY never
+# fails when the econ repo has no .opencode/ checked out.
+COPY vendor/dot-opencode/   "$TOOLBOX/.opencode/"
+COPY run-instance.sh        "$TOOLBOX/run-instance.sh"
+RUN chmod +x "$TOOLBOX/opencode" "$TOOLBOX/run-instance.sh"
+
+# Minimal carrier image — only the toolbox, nothing else.
+FROM scratch
+COPY --from=build /opt/toolbox /opt/toolbox

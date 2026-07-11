@@ -1,0 +1,18 @@
+Yes, likely, if you frame it as a new convenience transform for topocentric observed coordinates rather than as a change to ITRS itself.
+
+What makes this plausible is that Astropy already has direct observed-frame transforms for [`ICRS <-> AltAz/HADec`](/testbed/astropy/coordinates/builtin_frames/icrs_observed_transforms.py#L22) and [`CIRS <-> AltAz/HADec`](/testbed/astropy/coordinates/builtin_frames/cirs_observed_transforms.py#L22), so a direct ITRS route would fit the existing pattern. The current docs for [`AltAz`](/testbed/astropy/coordinates/builtin_frames/altaz.py#L37) and [`HADec`](/testbed/astropy/coordinates/builtin_frames/hadec.py#L37) already emphasize that `pressure=0` gives the numerically stable topocentric interpretation.
+
+The main caution is your wording and scope:
+- I would not present this as “ITRS is time invariant” in general.
+- I would present it as “for ITRS -> observed transforms, use the local topocentric position directly and do not route through the geocentric aberration path.”
+- I would avoid introducing a general-purpose ITRS self-transform rule based only on changing `obstime`.
+
+The user-facing problem you’re targeting is real and already captured in the regression test comments around [`test_straight_overhead`](/testbed/astropy/coordinates/tests/test_intermediate_transformations.py#L774), which explicitly says the geocentric-vs-topocentric distinction is why the current workaround is nonintuitive.
+
+One practical point: if you want this to be broadly accepted, I would land it first for the non-refracting case only:
+- `pressure=0` / topocentric only.
+- Clear docs that this path is for local horizontal/equatorial coordinates of nearby objects.
+- A regression test that compares the direct ITRS path against the current CIRS-based route in the `pressure=0` case.
+- A round-trip test for `ITRS -> AltAz/HADec -> ITRS`.
+
+If you want, I can help you turn this into a tighter issue comment or PR summary that will read well to maintainers.

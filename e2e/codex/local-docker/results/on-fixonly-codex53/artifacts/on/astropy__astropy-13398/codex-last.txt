@@ -1,0 +1,19 @@
+Yes, this is likely a receptive PR direction, especially if you frame it as fixing a long-standing usability trap for near-Earth targets.
+
+What looks strong in your approach:
+- Keeps the transform in Earth-fixed geometry (ITRS/topocentric) instead of forcing an unintended geocentric+aberration path.
+- Matches user mental model for satellites/aircraft/mountains.
+- Avoids the pathological “ITRS drift to SSB wake” behavior from time-shifting via ITRS->ITRS.
+
+What to lock down before opening PR:
+- Explicit semantics: document that ITRS positions are treated as Earth-fixed and effectively time-invariant in these transforms.
+- Differentials/velocities: verify behavior (or explicitly disallow/ignore) so no silent wrong proper-motion-like results.
+- Refraction: at least preserve existing AltAz refraction behavior (or clearly state why omitted in first pass).
+- Frame attrs: robust handling when `location`/`obstime` are `None` on either side.
+- Regression tests:
+1. Overhead/topocentric case (current pain point).
+2. Round-trip `ITRS -> AltAz/HADec -> ITRS`.
+3. Different `obstime` on source/target frames (assert new intended behavior).
+4. Comparison against existing path for far-field celestial objects (to show no unexpected breakage where old behavior was intended).
+
+If you present it as “correct Earth-fixed observed transforms for local targets, with clear obstime semantics,” maintainers should engage seriously.

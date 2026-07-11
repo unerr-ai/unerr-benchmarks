@@ -1,0 +1,45 @@
+diff --git a/astropy/timeseries/core.py b/astropy/timeseries/core.py
+index c279f35f8..1dc31f07c 100644
+--- a/astropy/timeseries/core.py
++++ b/astropy/timeseries/core.py
+@@ -76,6 +76,17 @@ class BaseTimeSeries(QTable):
+ 
+             elif self.colnames[:len(required_columns)] != required_columns:
+ 
++                if (len(self.colnames) < len(required_columns) and
++                        self.colnames == required_columns[:len(self.colnames)]):
++                    missing_columns = ', '.join("'{}'".format(column)
++                                                for column in required_columns[len(self.colnames):])
++                    missing_column_label = 'column' if len(required_columns) - len(self.colnames) == 1 else 'columns'
++                    missing_verb = 'is' if len(required_columns) - len(self.colnames) == 1 else 'are'
++                    raise ValueError("{} object is invalid - expected '{}' "
++                                     "as the first column{} but required {} {} {} missing"
++                                     .format(self.__class__.__name__, required_columns[0], plural,
++                                             missing_column_label, missing_columns, missing_verb))
++
+                 raise ValueError("{} object is invalid - expected '{}' "
+                                  "as the first column{} but found '{}'"
+                                  .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))
+diff --git a/astropy/timeseries/tests/test_common.py b/astropy/timeseries/tests/test_common.py
+index c873ac655..2c0717781 100644
+--- a/astropy/timeseries/tests/test_common.py
++++ b/astropy/timeseries/tests/test_common.py
+@@ -60,6 +60,18 @@ class CommonTimeSeriesTests:
+             ts.remove_columns(ts.colnames)
+         assert 'TimeSeries object is invalid' in exc.value.args[0]
+ 
++    def test_missing_required_column_message(self):
++        ts = self.series.copy()
++        ts['d'] = [1, 2, 3]
++        ts._required_columns = ts.colnames[:]
++
++        with pytest.raises(ValueError) as exc:
++            ts.remove_column('d')
++
++        assert exc.value.args[0] == (
++            f"{self.series.__class__.__name__} object is invalid - expected "
++            f"'{self.time_attr}' as the first columns but required column 'd' is missing")
++
+     def test_join(self):
+         ts_other = self.series.copy()
+         ts_other.add_row(self._row)

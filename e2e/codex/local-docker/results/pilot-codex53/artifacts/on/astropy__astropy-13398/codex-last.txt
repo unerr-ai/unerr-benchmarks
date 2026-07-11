@@ -1,0 +1,19 @@
+Yes, this is likely receptive if you frame it as a correctness fix for near-Earth targets and preserve existing celestial-source behavior.
+
+Suggested PR framing:
+1. Define scope explicitly: `ITRS <-> AltAz` and `ITRS <-> HADec` for Earth-fixed/topocentric use cases (satellites, aircraft, terrain).
+2. State the core rule: do not perform `ITRS->ITRS` obstime synchronization in this path; treat the input ITRS vector as Earth-fixed and time-invariant for the transform itself.
+3. Keep transforms purely geometric in ITRS/topocentric space (subtract observer ITRS, rotate, add back on inverse).
+4. Add regression tests that demonstrate improvement over current behavior for nearby objects and preserve expected round-trips.
+5. Add clear docs note on geocentric vs topocentric aberration and when this path is the right one.
+6. If refraction is currently expected in `AltAz`, either include it now or explicitly defer with a follow-up issue and test markers.
+
+What maintainers will likely scrutinize:
+1. Backward-compatibility for existing `AltAz` users.
+2. Whether finite-difference velocity behavior remains sane with the new transform path.
+3. Explicit tests for `obstime=None` and differing frame obstimes.
+4. Consistency with `test_straight_overhead()` and whether that workaround can be retired or simplified.
+
+unerr-save: intent Evaluate direct ITRS<->AltAz/HADec approach and PR receptiveness
+unerr-save: decision Frame as near-Earth correctness fix with strict scope and regression tests
+unerr-save: note dec|p:|+|Maintainers are most likely to accept if celestial-source behavior is explicitly unchanged and near-field regressions are proven with tests

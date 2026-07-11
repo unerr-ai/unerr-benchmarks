@@ -1,0 +1,85 @@
+# Distributed SWE-bench fleet image — ONE image serves BOTH roles.
+#
+# The coordinator and the workers run from the same image; the role is chosen at
+# `flyctl machine run` time via an --entrypoint override (coordinator-entrypoint.sh
+# vs worker-entrypoint.sh). Nothing here bakes a role, a dockerd data-root, or a
+# volume — those are runtime concerns (the worker's boot.sh puts the data-root on
+# ephemeral rootfs; the coordinator gets the fleet's one small volume at /data).
+#
+# Sibling of e2e/econ/fly-remote/fullresolve/Dockerfile — same python:3.12-slim
+# base, same swebench venv, same DinD tooling. It differs only in WHAT it vendors:
+# the arm's local-docker pipeline PLUS the shared distributed scripts.
+#
+# BUILD CONTEXT = e2e/  (the common ancestor of econ/ and distributed/, so every
+# COPY below resolves in one image). run-distributed.sh builds it on fly's remote
+# builder with `--dockerfile e2e/distributed/Dockerfile.dist e2e`. e2e/.dockerignore
+# trims the heavy siblings (out/, results/, .venv, other arms) from the upload; the
+# vendored econ binary under econ/local-docker/context/vendor/ is KEPT (the launcher
+# populates it just before the build, exactly like run.sh does).
+#
+# The /work/* target paths below are the COPY CONTRACT that Slices A/B/C/D wrote
+# comments against (e.g. econ entrypoint.sh sources BOOT_LIB=/work/lib/boot.sh) —
+# do not move them without updating those consumers.
+
+FROM python:3.12-slim-bookworm
+
+# dockerd + CLI (the engine each worker drives in-VM), git + jq for the harness/beacons.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      docker.io git curl ca-certificates procps iproute2 jq \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Grading + dataset deps in a venv (the swebench harness pulls a heavy tree).
+# aiohttp = the coordinator queue server; requests = the worker HTTP client;
+# swebench + datasets = per-worker in-place resolve/grade. One venv, both roles.
+RUN python -m venv /work/.venv \
+ && /work/.venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /work/.venv/bin/pip install --no-cache-dir "swebench>=4.1" datasets aiohttp requests
+
+# ── arm pipeline (econ) — mirror the single-machine Dockerfile's layout ────────
+# run-benchmark.py builds each instance image with context = its own dir
+# (/work/local-docker), so keep that subtree intact there; the toolbox build
+# context is /work/local-docker/context (holds the vendored binary).
+COPY econ/local-docker/run-benchmark.py    /work/local-docker/run-benchmark.py
+COPY econ/local-docker/Dockerfile.instance /work/local-docker/Dockerfile.instance
+COPY econ/local-docker/Dockerfile.toolbox  /work/local-docker/Dockerfile.toolbox
+COPY econ/local-docker/context             /work/local-docker/context
+# Cost/telemetry helpers live one level up from run-benchmark.py; report.py imports
+# them, so keep the same /work layout the single-machine image + report.py expect.
+COPY econ/econ-telemetry.py                /work/econ-telemetry.py
+COPY econ/econ-tier-cost.py                /work/econ-tier-cost.py
+COPY econ/report.py                        /work/report.py
+
+# ── distributed scripts — the /work COPY contract (PLAN §2) ────────────────────
+# Shared DinD+toolbox boot lib (Slice A), sourced by BOTH entrypoints.
+COPY distributed/lib/boot.sh               /work/lib/boot.sh
+# Worker role (Slice C): claim/resolve/grade/report loop + its entrypoint.
+COPY distributed/worker/worker-loop.py         /work/distributed/worker/worker-loop.py
+COPY distributed/worker/worker-entrypoint.sh   /work/distributed/worker/worker-entrypoint.sh
+# Coordinator role (Slice B/D): queue server, schema, aggregation entrypoint.
+COPY distributed/coordinator/server.py                 /work/distributed/coordinator/server.py
+COPY distributed/coordinator/schema.sql                /work/distributed/coordinator/schema.sql
+COPY distributed/coordinator/coordinator-entrypoint.sh /work/distributed/coordinator/coordinator-entrypoint.sh
+# Shared tools (Slice E/D): suite resolver + per-instance report merge.
+COPY distributed/tools/suite.py            /work/distributed/tools/suite.py
+COPY distributed/tools/merge-reports.py    /work/distributed/tools/merge-reports.py
+
+RUN chmod +x \
+      /work/lib/boot.sh \
+      /work/local-docker/context/run-instance.sh \
+      /work/distributed/worker/worker-entrypoint.sh \
+      /work/distributed/coordinator/coordinator-entrypoint.sh
+
+# run-benchmark.py builds each instance image with context = /work/local-docker,
+# which holds the vendored binary (tens of MB). Dockerfile.instance COPYs NOTHING
+# from that context (only `COPY --from=unerr-econ-toolbox`), so ignore the whole
+# context — else it streams to dockerd on every instance build. Only read when
+# local-docker is the build context; the toolbox build (context=local-docker/context)
+# still sees vendor/.
+RUN printf '*\n' > /work/local-docker/.dockerignore
+
+# NO ENTRYPOINT: the role is supplied at `flyctl machine run --entrypoint …` time.
+# The default CMD fails loudly if a machine is launched without that override,
+# instead of hanging on an unconfigured role.
+CMD ["bash", "-lc", "echo 'dist image: launch with --entrypoint /work/distributed/{coordinator/coordinator-entrypoint.sh,worker/worker-entrypoint.sh}' >&2; exit 64"]

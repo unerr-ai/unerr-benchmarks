@@ -1,0 +1,16 @@
+Adjusted `TimeSeries` required-column validation so missing non-leading required columns now raise a clear error instead of the misleading first-column mismatch.
+
+Updated:
+- [core.py](/testbed/astropy/timeseries/core.py):77  
+  Added a missing-required-columns branch in `_check_required_columns` for cases where the first required column is still present (e.g. `time`), but later required columns are removed.
+- [test_sampled.py](/testbed/astropy/timeseries/tests/test_sampled.py):399  
+  Added `test_required_columns_missing_non_time` to reproduce the reported scenario and assert the new message:
+  `TimeSeries object is invalid - missing required column 'flux'`.
+
+Validation run:
+- `pytest -q astropy/timeseries/tests/test_sampled.py -k required_columns` -> `2 passed`
+- `pytest -q astropy/timeseries/tests/test_sampled.py::test_required_columns astropy/timeseries/tests/test_sampled.py::test_required_columns_missing_non_time astropy/timeseries/tests/test_common.py::TestTimeSeries::test_required_after_stacking astropy/timeseries/tests/test_common.py::TestBinnedTimeSeries::test_required_after_stacking` -> `4 passed`
+
+unerr-save: intent fix misleading TimeSeries required-column exception on remove_column
+unerr-save: decision prefer targeted missing-column message only when first required column still present
+unerr-save: note dec|e:BaseTimeSeries._check_required_columns|+|When required prefix mismatch is due to a missing non-leading required column, raise a missing-required-column error instead of first-column mismatch wording.

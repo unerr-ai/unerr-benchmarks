@@ -1,0 +1,6 @@
+unerr-save: intent fix html ascii formats support and add regression test
+
+- Fixed `Table.write(..., format="html", formats=...)` in [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py) by applying the writer’s column formats before HTML cell stringification.
+- Also preserved a parent column’s format when HTML splits multidimensional columns, so that path keeps behaving consistently.
+- Added a regression test in [astropy/io/ascii/tests/test_html.py](/testbed/astropy/io/ascii/tests/test_html.py) that compares HTML output with `formats=` against the same table with the format set directly on the column.
+- Verified with `python -m pytest astropy/io/ascii/tests/test_html.py`.

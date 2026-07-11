@@ -1,0 +1,8 @@
+unerr-save: intent fix misleading missing-required-column exception in TimeSeries
+The shared validator in [`astropy/timeseries/core.py`](/testbed/astropy/timeseries/core.py#L76) now distinguishes a true column-order mismatch from the case where a required trailing column was removed. In the latter case it raises a message that says the required column(s) are missing instead of reporting the first remaining column as if it were the problem.
+
+I also added a regression test in [`astropy/timeseries/tests/test_common.py`](/testbed/astropy/timeseries/tests/test_common.py#L63) that exercises the missing-required-column path for both `TimeSeries` and `BinnedTimeSeries`.
+
+Validation:
+- `python -m py_compile /testbed/astropy/timeseries/core.py /testbed/astropy/timeseries/tests/test_common.py`
+- Full `pytest` execution was not available in this environment because the base interpreter is missing Astropy runtime deps (`erfa`).

@@ -1,0 +1,17 @@
+Implemented a fix for the misleading `TimeSeries` error when a non-first required column is missing.
+
+### What changed
+- Updated required-column validation in [core.py](/testbed/astropy/timeseries/core.py) so it now raises a clear missing-column error when the first required column is present but later required columns are absent.
+- Added a regression test in [test_sampled.py](/testbed/astropy/timeseries/tests/test_sampled.py) covering:
+  - `_required_columns = ['time', 'flux']`
+  - `remove_column('flux')`
+  - expected message: `TimeSeries object is invalid - missing required column 'flux'`
+
+### Verification
+- Ran:
+  - `pytest -q astropy/timeseries/tests/test_sampled.py -k required_columns` → `1 passed`
+  - `pytest -q astropy/timeseries/tests/test_sampled.py::test_empty_initialization_invalid astropy/timeseries/tests/test_binned.py::test_empty_initialization_invalid` → `2 passed`
+
+unerr-save: intent fix TimeSeries required-column error message for missing non-first column
+unerr-save: decision prefer a targeted missing-column branch when first required column matches · blocker misleading generic mismatch text for missing later required columns · resolution detect missing required columns and emit explicit message
+unerr-save: note dec|e:BaseTimeSeries._check_required_columns|+|when first required column still matches, report missing required columns explicitly instead of first-column mismatch

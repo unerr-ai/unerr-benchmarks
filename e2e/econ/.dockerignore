@@ -1,0 +1,16 @@
+# Docker build context = e2e/econ (both fly-remote/Dockerfile [smoke] and
+# fly-remote/fullresolve/Dockerfile). Keep the secret and local artifacts OUT of
+# the context uploaded to fly's remote builder.
+#
+# NOTE: local-docker/ and local-docker/context/vendor/ are NOT excluded — the
+# fullresolve toolbox build needs the vendored musl binary under
+# local-docker/context/vendor/. fly-remote/vendor/ is intentionally NOT excluded
+# either: the smoke Dockerfile COPYs fly-remote/vendor/opencode, so excluding it
+# would break the smoke build.
+.env.local
+results/
+__pycache__/
+*.pyc
+fly-remote/out/
+fly-remote/fullresolve/out/
+.gitignore

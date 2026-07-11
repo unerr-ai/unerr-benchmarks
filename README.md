@@ -3,11 +3,17 @@
 > **Relationship to `unerr-cli`.** This repo holds the benchmark and A/B
 > harnesses only. It was split out of the main [`unerr-cli`](https://github.com/unerr-ai/unerr-cli)
 > repo so that benchmark output and large cloned fixtures never bloat the
-> product tree. Some harnesses (e.g. `lib/harness.ts`, the Track 1 / 1.5
-> deterministic runs) load unerr's intelligence modules from a built
+> product tree. Some harnesses (e.g. `internal/lib/harness.ts`, the
+> `internal/navigation/` deterministic runs) load unerr's intelligence modules from a built
 > `unerr-cli` checkout — clone `unerr-cli` as a sibling directory and
 > `pnpm run build` it first. Run everything with [`tsx`](https://github.com/privatenumber/tsx).
 > Generated output (`**/out/`, cloned target repos, run logs) is git-ignored.
+
+**The headline benchmark is end-to-end:** `e2e/` runs the same coding agent ± unerr on
+standard [SWE-bench](https://www.swebench.com/) instances and measures **resolve rate +
+total $ + turns** — the complete cost picture. Per-capability verticals (navigation token
+savings, localization accuracy, context compression) live in `internal/` and are
+deterministic and CI-friendly; they feed into the headline `e2e/` claim.
 
 **Does unerr actually cut the tokens an AI agent spends reading code — and how does
 it compare to the other tools that claim the same?** This suite answers both with
@@ -56,8 +62,8 @@ Where unerr is **not** ahead: listing a file's direct imports is graphify's home
 (its `imports_from` edges), and unerr's Python extraction is currently thinner than its
 JS/TS extraction — see [Limitations](#limitations--what-this-does-not-claim). Both are
 stated plainly in the per-repo reports
-([`track1.5-commander.js.md`](results/track1.5-commander.js.md),
-[`track1.5-click.md`](results/track1.5-click.md)), because a comparison you can't lose is
+([`head-to-head-commander.js.md`](results/head-to-head-commander.js.md),
+[`head-to-head-click.md`](results/head-to-head-click.md)), because a comparison you can't lose is
 a comparison no one believes.
 
 ---
@@ -69,13 +75,13 @@ number that matters to you.
 
 ```bash
 # head-to-head on any repo: clones it shallowly, builds each tool's graph, runs the corpus
-tsx benchmarks/track1.5-headtohead/run.ts tj/commander.js
-tsx benchmarks/track1.5-headtohead/run.ts pallets/click
+tsx internal/navigation/head-to-head.ts tj/commander.js
+tsx internal/navigation/head-to-head.ts pallets/click
 # arms whose CLI isn't installed are skipped, never faked:
 #   graphify → uv tool install graphifyy      rtk → cargo install --git https://github.com/rtk-ai/rtk
 ```
 
-Output → `benchmarks/results/track1.5-<repo>.{md,json}`. The `.md` is the human report
+Output → `results/head-to-head-<repo>.{md,json}`. The `.md` is the human report
 (committed to this repo); the `.json` is the raw rollup (regenerable, git-ignored).
 
 **Versions pinned in the runs above:** unerr (this build) · graphify 0.8.18 · RTK 0.40.0
@@ -103,7 +109,7 @@ unerr's tools group into three theses, each tested separately:
 |---|---|---|
 | **Navigation** | `search_code`, `get_entity`, `get_references`, `file_connections` | one graph query replaces many grep + read cycles |
 | **Compression** | `file_outline`, `file_read`, `fetch_url` | the same answer in far fewer tokens, fidelity intact |
-| **Prevention** | notes, facts, markers, blast-radius signals | a signal that fires prevents a wasted edit/turn (Track 3) |
+| **Prevention** | notes, facts, markers, blast-radius signals | a signal that fires prevents a wasted edit/turn (e2e A/B) |
 
 ---
 
@@ -130,23 +136,23 @@ token matrix.
 
 ---
 
-## The tracks
+## The benchmarks
 
-Tracks 1 and 1.5 are deterministic — no LLM, no network, no daemon — and CI-friendly.
-Tracks 2 and 3 extend to navigation accuracy and full end-to-end A/B.
+`internal/navigation/` benchmarks are deterministic — no LLM, no network, no daemon — and
+CI-friendly. `e2e/` is the full end-to-end run.
 
-### Track 1 — Deterministic token deltas (unerr vs naive baseline)
+### Token-delta benchmark — deterministic navigation savings (`internal/navigation/token-delta.ts`)
 
 Boots an in-memory graph, indexes the target repo with the production indexer,
 auto-derives a task corpus from the repo's own graph, and compares **real baseline
 tokens vs. real unerr tokens** per task with fidelity checks.
 
 ```bash
-tsx benchmarks/track1-deterministic/run.ts [repoPath] [--per N] [--tasks-day N]
+tsx internal/navigation/token-delta.ts [repoPath] [--per N] [--tasks-day N]
 # defaults: current repo · 8 tasks/category · 40 ops/day for the projection
 ```
 
-Output → `benchmarks/results/track1-<repo>.{md,json}`.
+Output → `results/token-delta-<repo>.{md,json}`.
 
 **Baseline model (fairness is the whole point).** The baseline models a *disciplined*
 grep+Read agent and under-counts wherever there is doubt, so the measured saving is a
@@ -163,7 +169,7 @@ lower bound:
 grep *output* the agent sees. A real agent typically reads more files, which would only
 widen the gap.
 
-### Track 1.5 — Head-to-head (unerr vs graphify vs RTK vs naive)
+### Head-to-head benchmark — unerr vs graphify vs RTK vs naive (`internal/navigation/head-to-head.ts`)
 
 The [Results at a glance](#results-at-a-glance) table. Every arm answers the **same**
 frozen corpus, scored with the **same** o200k_base tokenizer and the **same** fidelity
@@ -193,24 +199,24 @@ answered. The per-query columns measure graphify in its *cheapest-to-build* AST 
 (`update`); its richest mode adds the cost above.
 
 Full per-repo breakdowns (per-category token matrix, fidelity, provenance):
-[`track1.5-commander.js.md`](results/track1.5-commander.js.md) ·
-[`track1.5-click.md`](results/track1.5-click.md).
+[`head-to-head-commander.js.md`](results/head-to-head-commander.js.md) ·
+[`head-to-head-click.md`](results/head-to-head-click.md).
 
-### Track 2 — Navigation accuracy (localization)
+### Navigation-accuracy probe — localization (`internal/navigation/localization.ts`)
 
 Token savings only matter if the agent still lands on the right code. Given a query whose
 gold answer is a known file, this measures whether unerr surfaces it in the top-k and at
 what token cost vs. grep.
 
 ```bash
-tsx benchmarks/track2-localization/run.ts [repoPath] [--n N]
+tsx internal/navigation/localization.ts [repoPath] [--n N]
 ```
 
 Reports top-1/3/5 hit rate and mean tokens-to-localize. The runnable version uses the
 repo's own graph as gold; swap `localGoldSet()` for SWE-bench Verified gold-patch files
 (or RepoBench-R) to source gold externally — scoring is identical.
 
-### Track 3 — End-to-end A/B (requires Docker + API budget)
+### End-to-end total-bill benchmark (`e2e/`) — requires Docker + API budget
 
 The strongest claim: the **same agent + model** run twice on
 [SWE-bench Verified Mini (50)](https://www.swebench.com/) — once with built-in grep/read
@@ -221,10 +227,18 @@ come from "failing faster." The agent runs happen outside this repo; the scoring
 report are ready to consume the resulting trajectories.
 
 ```bash
-tsx benchmarks/track3-e2e-ab/run.ts <baseline.jsonl> <treatment.jsonl>
+tsx e2e/common/scoring/swe-effi.ts <baseline.jsonl> <treatment.jsonl>
 ```
 
-See [`track3-e2e-ab/README.md`](track3-e2e-ab/README.md) for the full protocol and cost notes.
+See `e2e/codex/local-docker/` for the full protocol and Docker runner, and `e2e/codex/fly-remote/`
+for the Fly.io remote variant. The `e2e/econ/` arm covers the team's econ-coding-agent.
+Both arms share scoring via `e2e/common/`.
+
+**External anchor.** This benchmark reports a *paired ±unerr delta*, not an absolute
+leaderboard rank — compare the Codex arm against the published **Codex-scaffold** score
+(GPT-5.3-Codex ≈ 85% on full Verified, June 2026). A dated snapshot of current
+SWE-bench Verified / Pro / Mini scores for the frontier models, with the
+scaffold-matters caveat, is kept in [`e2e/REFERENCE-SCORES.md`](e2e/REFERENCE-SCORES.md).
 
 ---
 
@@ -246,8 +260,8 @@ Where this suite is bounded:
   reflects returning *less information*, not a tighter answer.
 - **The tokenizer is exact for GPT-4o / 4.1 / o-series and a ~±5–10% approximation for
   Claude** (Anthropic's is proprietary). The *percentage* is robust to this because both
-  sides use the same encoder, so a constant bias cancels in the ratio. Track 3 sidesteps
-  it by reading real `usage` from the provider API.
+  sides use the same encoder, so a constant bias cancels in the ratio. The `e2e/` benchmark
+  sidesteps it by reading real `usage` from the provider API.
 - **RTK is a different tier** — a command-output compressor, not a code-navigation engine.
   It shows the compression-only ceiling: a useful tier reference, not a like-for-like rival.
 
@@ -275,16 +289,29 @@ Agentless/Moatless (localization accuracy),
 [RepoBench](https://arxiv.org/abs/2306.03091) /
 [CrossCodeEval](https://arxiv.org/abs/2310.11248) (retrieval quality, no LLM).
 
+Current published scores for the frontier coding models (SWE-bench Verified / Pro /
+Mini), kept as a dated cross-reference for the `e2e/` runs, live in
+[`e2e/REFERENCE-SCORES.md`](e2e/REFERENCE-SCORES.md).
+
 ## Layout
 
 ```
-benchmarks/
-  lib/         tokenizer · pricing (appendix only) · metrics · report · in-process harness
-  track1-deterministic/   token-delta benchmark + baseline model + corpus
-  track1.5-headtohead/    same-corpus comparison vs graphify · RTK · naive
-  track2-localization/    navigation-accuracy probe
-  track3-e2e-ab/          SWE-Effi scoring + A/B protocol
-  results/                generated reports (.md committed · .json git-ignored)
+internal/
+  lib/                   tokenizer · pricing (appendix only) · metrics · report · in-process harness
+  navigation/
+    token-delta.ts       token-delta benchmark + baseline model + corpus
+    head-to-head.ts      same-corpus comparison vs graphify · RTK · naive
+    localization.ts      navigation-accuracy probe
+  compression/           fetch-bulk A/B + corpus (corpus/ nested inside)
+  live-ab/               single-repo live A/B (claude-driver, metrics-reader)
+e2e/                     end-to-end total-bill benchmark (unerr + coding agent on SWE-bench)
+  common/
+    scoring/             SWE-Effi scorer + A/B protocol
+  codex/
+    local-docker/        Codex + local Docker runner
+    fly-remote/          Codex + Fly.io remote runner
+  econ/                  team's econ-coding-agent arm
+results/                 generated reports (.md committed · .json git-ignored)
 ```
 
 ## Appendix: illustrative cost translation

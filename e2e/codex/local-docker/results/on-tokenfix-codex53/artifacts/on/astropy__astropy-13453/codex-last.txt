@@ -1,0 +1,18 @@
+Implemented and verified a fix for the HTML writer so `formats=` is honored.
+
+Changed files:
+- [html.py](/testbed/astropy/io/ascii/html.py)
+- [test_html.py](/testbed/astropy/io/ascii/tests/test_html.py)
+
+What changed:
+- In `HTML.write`, set `self.data.cols` and call `self.data._set_col_formats()` before generating cell strings, so format specs/functions are applied in the HTML path.
+- For expanded multidimensional columns, propagate the parent column format when creating split columns.
+- Added regression test `test_write_table_html_formats` to confirm `ascii.write(..., format="html", formats=...)` affects output values.
+
+Validation:
+- `pytest -q astropy/io/ascii/tests/test_html.py` → `10 passed, 16 skipped`
+- Reproduced your example and confirmed HTML now includes formatted values like `1.24e-24` / `3.23e-15`.
+
+unerr-save: intent fix ascii HTML writer to apply formats= and add regression coverage
+unerr-save: decision set data.cols + call _set_col_formats() in HTML.write before iter_str_vals
+unerr-save: note fct|e:HTML.write|+|HTML writer bypassed BaseData.str_vals formatting pipeline; explicit _set_col_formats is required

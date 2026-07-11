@@ -1,0 +1,52 @@
+# Relocatable toolbox image: Node + Claude Code CLI + unerr + entitlement minter.
+#
+# Parallel to e2e/codex/local-docker/Dockerfile.toolbox, but ships the Claude
+# Code CLI (@anthropic-ai/claude-code) instead of Codex. Tag is
+# `unerr-claude-toolbox` so it coexists with the codex toolbox.
+#
+# The final stage is `FROM scratch` holding ONLY /opt/toolbox, so it is a clean
+# `COPY --from` source. Dockerfile.instance grafts /opt/toolbox onto each
+# official SWE-bench instance image (which has the repo + test env but no Node).
+#
+# Build context = ./context, populated by build-toolbox.sh with:
+#   - unerr-ai-unerr-*.tgz   (pnpm pack of THIS unerr-cli checkout)
+#   - dev-entitlement.mjs    (offline Pro-token minter, zero-dep, node-only)
+#   - run-instance.sh        (the in-container driver — Claude variant)
+#   - preflight.sh / mcp-healthcheck.mjs / lib.sh
+
+FROM node:24-bookworm-slim AS build
+ENV TOOLBOX=/opt/toolbox
+# build-essential + python3 so native deps (better-sqlite3) compile from source
+# when prebuild-install finds no matching binary (libc detection fails on slim).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl xz-utils git ca-certificates build-essential python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Relocatable Node pinned to the BASE image's exact version, so native modules
+# (compiled against the base node here) run on this node in the instance image.
+RUN mkdir -p "$TOOLBOX" \
+ && NODE_VER="$(node -v)" \
+ && ARCH="$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')" \
+ && curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${ARCH}.tar.xz" \
+    | tar -xJ -C /opt \
+ && mv "/opt/node-${NODE_VER}-linux-${ARCH}" "$TOOLBOX/node"
+ENV PATH=$TOOLBOX/node/bin:$PATH
+
+# Claude Code CLI (npm) + unerr (local tarball) into the toolbox prefix.
+# npm (not pnpm) so cozo-node / better-sqlite3 install scripts run and pull
+# their prebuilt linux-x64 binaries (glibc — matches the Debian instance images).
+COPY unerr-ai-unerr-*.tgz /tmp/unerr.tgz
+RUN npm config set prefix "$TOOLBOX" \
+ && npm install -g @anthropic-ai/claude-code /tmp/unerr.tgz \
+ && rm -f /tmp/unerr.tgz
+
+COPY dev-entitlement.mjs  $TOOLBOX/dev-entitlement.mjs
+COPY mcp-healthcheck.mjs  $TOOLBOX/mcp-healthcheck.mjs
+COPY lib.sh               $TOOLBOX/lib.sh
+COPY run-instance.sh      $TOOLBOX/run-instance.sh
+COPY preflight.sh         $TOOLBOX/preflight.sh
+RUN chmod +x $TOOLBOX/run-instance.sh $TOOLBOX/preflight.sh
+
+# Minimal carrier image — only the toolbox, nothing else.
+FROM scratch
+COPY --from=build /opt/toolbox /opt/toolbox

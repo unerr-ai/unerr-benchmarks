@@ -1,0 +1,11 @@
+unerr-save: intent fix misleading TimeSeries required-column failure and add regression test
+unerr-save: note semantic|f:astropy/timeseries/core.py|+|missing later required columns now produce an explicit error
+
+Changed the required-column validation so a prefix-preserving removal now reports the missing required column(s) instead of reusing the first surviving column name.
+
+- In [`astropy/timeseries/core.py`](/testbed/astropy/timeseries/core.py), `_check_required_columns` now special-cases the “required prefix is intact, but the table is too short” path and raises `ValueError: ... missing required column 'flux'` for your example.
+- In [`astropy/timeseries/tests/test_sampled.py`](/testbed/astropy/timeseries/tests/test_sampled.py), I added a regression test that removes a non-time required column after setting `_required_columns = ['time', 'flux']`.
+
+Verification:
+- `python -m py_compile astropy/timeseries/core.py astropy/timeseries/tests/test_sampled.py`
+- I could not run pytest here because `pytest` is not installed in this environment, and the base interpreter also lacks `numpy`.

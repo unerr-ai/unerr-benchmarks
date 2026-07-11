@@ -1,0 +1,5 @@
+I checked this and found a matching GitHub issue already exists, `astropy/astropy#13235`, and it is closed. citeturn0search0
+
+The current code still does the auto-view in one place, `Table._convert_data_to_col` in [astropy/table/table.py](\/testbed\/astropy\/table\/table.py#L1242), and the regression test still assumes the old behavior in [astropy/table/tests/test_mixin.py](\/testbed\/astropy\/table\/tests\/test_mixin.py#L700). That means this is still a live behavior in the branch, but the discussion is already tracked upstream.
+
+If you want, I can draft the deprecation warning and the follow-up test changes.

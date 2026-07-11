@@ -1,0 +1,15 @@
+Yes, this is a bug, and your diagnosis is correct.
+
+Root cause: in `&` composition, when the right-hand side is a nested `CompoundModel`, `_cstack` was dropping its computed separability structure and writing `1`s instead, which makes the nested block look fully coupled.
+
+I patched it here:
+- [separable.py](/testbed/astropy/modeling/separable.py:245)
+
+And added a regression test using your exact nested pattern:
+- [test_separable.py](/testbed/astropy/modeling/tests/test_separable.py:152)
+
+Validation:
+- `pytest -q /testbed/astropy/modeling/tests/test_separable.py`
+- Result: `12 passed`
+
+After the fix, `separability_matrix(m.Pix2Sky_TAN() & cm)` matches the expected matrix (same as the unnested equivalent).

@@ -1,0 +1,10 @@
+Yes, I think the core idea is likely to be received well, but I would frame it a bit more narrowly: as making the topocentric ITRS path first-class, not as redefining ITRS in general. Astropy’s current ITRS docs already describe exactly this workflow for near-Earth objects, and they explicitly say that transforming geocentric ITRS to topocentric ITRS, AltAz, or HADec via `transform_to` includes the geocenter-vs-surface aberration difference. That is the same user-facing pain point you are trying to remove. ([docs.astropy.org](https://docs.astropy.org/en/latest/api/astropy.coordinates.ITRS.html))
+
+One strong signal in your favor: this exact issue was opened as #13355 and is shown as closed via #13398, which suggests maintainers were receptive to the direction. ([github.com](https://github.com/astropy/astropy/issues/13355))
+
+What I would recommend for the PR:
+- Keep the message focused on ergonomics and discoverability for topocentric ITRS, not a semantic change to all ITRS transforms. ([docs.astropy.org](https://docs.astropy.org/en/latest/api/astropy.coordinates.ITRS.html))
+- Preserve existing geocentric ITRS behavior where possible, and document the new direct path clearly.
+- Add tests for round-tripping ITRS <-> AltAz/HADec, including the near-horizon/overhead cases and any refraction path you decide to support. The docs already note refraction and other limits, so that would fit the existing story. ([docs.astropy.org](https://docs.astropy.org/en/latest/api/astropy.coordinates.ITRS.html))
+
+If you want, I can help you turn your current draft into a tighter issue/PR description that matches Astropy’s existing terminology and reduces the chance of pushback.

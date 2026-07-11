@@ -1,0 +1,18 @@
+Yes, this is a bug, and your diagnosis is correct.
+
+I fixed it in `_cstack` so nested right-hand compound matrices are preserved instead of being replaced by ones:
+
+- [separable.py](/testbed/astropy/modeling/separable.py:245)
+
+I also added a regression test for your exact nested case:
+
+- [test_separable.py](/testbed/astropy/modeling/tests/test_separable.py:138)
+
+Validation:
+- `pytest -q astropy/modeling/tests/test_separable.py` passed (`12 passed`)
+- Reproducer now returns:
+  `[[True, True, False, False], [True, True, False, False], [False, False, True, False], [False, False, False, True]]`
+
+unerr-save: intent fix nested CompoundModel separability_matrix behavior for & composition
+unerr-save: decision use right submatrix in _cstack ndarray branch to preserve nested separability semantics
+unerr-save: note fct|e:astropy.modeling.separable._cstack|+|When right operand is a precomputed separability matrix, assign that matrix into the right block instead of filling with ones.

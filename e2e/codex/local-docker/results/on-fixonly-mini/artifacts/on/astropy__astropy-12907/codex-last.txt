@@ -1,0 +1,7 @@
+Yes, that’s a bug, not something you’re missing. The exact nested-compound case you showed was reported in astropy issue `#12906`, and the project later marked it fixed in `#12907`; the changelog calls out a fix for separability when a `CompoundModel` appears on the right-hand side of `&`. citeturn3search0turn4search0
+
+Current astropy tests also cover nested compound cases like `rot & (sh1 & sh2)` and `((rot & sh1) & sh2)`, expecting the block-diagonal structure you’d intuitively want, so the nested form should behave the same as the flattened one. citeturn5search0
+
+If you’re still seeing the bad matrix, you’re likely on an astropy release before that fix. The practical workaround on older versions is to flatten the `&` chain, or upgrade to a release that includes `#12907`. citeturn3search0turn4search0
+
+unerr-save: note fct|p:|~|Astropy fixed nested RHS CompoundModel separability in #12907

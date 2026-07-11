@@ -1,0 +1,24 @@
+[econ-gate-spike] plugin loaded
+[econ-status] plugin loaded
+[econ-output-trim] plugin loaded
+[econ-recon-inject] plugin loaded
+[econ-executor-validate] plugin loaded
+[econ-governance-gate] plugin loaded
+[econ-checkpoint] engine load failed (checkpoint disabled): Cannot find module '/testbed/packages/code-intelligence/src/checkpoint.ts' from '/testbed/.opencode/plugins/econ-checkpoint.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ:meter] {"tool":"read","raw_tokens":84,"returned_tokens":84,"ratio":1}
+[econ:meter] {"tool":"read","raw_tokens":74,"returned_tokens":74,"ratio":1}
+[econ:meter] {"tool":"read","raw_tokens":73,"returned_tokens":73,"ratio":1}
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-output-trim] 'read' output trimmed: 14011 → 2849 tokens
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'

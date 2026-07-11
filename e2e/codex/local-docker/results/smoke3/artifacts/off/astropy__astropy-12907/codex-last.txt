@@ -1,0 +1,9 @@
+Fixed. The bug was in `_cstack()` in [`astropy/modeling/separable.py`](./astropy/modeling/separable.py#L245): when the right-hand operand was already a computed separability matrix, the code discarded it and filled the block with `1`s. That breaks nested `CompoundModel`s like `Pix2Sky_TAN() & (Linear1D() & Linear1D())`.
+
+What changed:
+- Preserved the right-hand ndarray contents instead of replacing them with an all-ones block.
+- Added a regression test for the nested case in [`astropy/modeling/tests/test_separable.py`](./astropy/modeling/tests/test_separable.py#L153).
+
+Verification:
+- `python -m pytest astropy/modeling/tests/test_separable.py` passes.
+- The nested example now returns the expected matrix.

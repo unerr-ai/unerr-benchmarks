@@ -1,0 +1,11 @@
+# econ SMOKE runner — minimal app config.
+#
+# Used ONLY by run.sh's `flyctl deploy --build-only --config this-file` to give
+# flyctl the app name without it trying to rebuild config from (nonexistent)
+# machines. The actual machine is launched by `flyctl machine run` with explicit
+# flags (region, vm size, env) — NOT from this file. No [http_service]: this is
+# a one-shot batch job, not a server. No [[services]]: no ports exposed.
+app = "unerr-bench-econ"
+primary_region = "iad"
+
+[build]

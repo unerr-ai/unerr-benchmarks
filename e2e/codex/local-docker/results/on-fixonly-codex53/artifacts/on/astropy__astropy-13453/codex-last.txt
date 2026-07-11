@@ -1,0 +1,12 @@
+Fixed the HTML writer to honor `formats` and added a regression test.
+
+- Applied formats in HTML write path before rendering values in [`astropy/io/ascii/html.py`](/testbed/astropy/io/ascii/html.py:357).
+- Ensured multi-dimensional split columns inherit the original column format in [`astropy/io/ascii/html.py`](/testbed/astropy/io/ascii/html.py:432).
+- Added regression test `test_write_table_html_formats` in [`astropy/io/ascii/tests/test_html.py`](/testbed/astropy/io/ascii/tests/test_html.py:623).
+
+Validation:
+- `pytest -q astropy/io/ascii/tests/test_html.py -k "formats or fill_values"`: 6 passed
+- `pytest -q astropy/io/ascii/tests/test_html.py`: 10 passed, 16 skipped
+
+unerr-save: intent fix ascii.html writer to apply formats during HTML output
+unerr-save: decision apply formats in HTML.write instead of calling _set_col_formats (requires self.data.cols)

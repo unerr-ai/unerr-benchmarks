@@ -1,0 +1,11 @@
+unerr-save: intent fix HTML ASCII formatting support
+unerr-save: decision reuse the shared format hook instead of duplicating logic
+unerr-save: note procedural|f:astropy/io/ascii/html.py|+|HTML.write must seed self.data.cols before _set_col_formats
+
+unerr found that `HTML.write` was bypassing the shared ASCII formatting path. I updated [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py#L351) so the HTML writer now sets `self.data.cols`, applies `_set_col_formats()`, and carries the source column format onto split multidimensional subcolumns.
+
+I also added a regression test in [astropy/io/ascii/tests/test_html.py](/testbed/astropy/io/ascii/tests/test_html.py#L639) that checks `formats` is respected for HTML output.
+
+Verified with:
+- `pytest astropy/io/ascii/tests/test_html.py -q`
+- `python -m pytest astropy/io/ascii/tests/test_connect.py -q`

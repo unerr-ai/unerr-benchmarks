@@ -1,0 +1,21 @@
+Yes, this is a bug, and your diagnosis is correct.
+
+I fixed it in `_cstack` so nested right-hand matrices are preserved instead of being replaced by ones, which was causing false coupling in nested `CompoundModel` separability.
+
+Changed:
+- [separable.py](/testbed/astropy/modeling/separable.py)
+- [test_separable.py](/testbed/astropy/modeling/tests/test_separable.py)
+
+What was wrong:
+- In `_cstack`, when `right` was already a computed separability matrix (common in nested compounds), this line used `= 1` for the whole block instead of embedding `right`.
+
+Validation:
+- Added regression test `test_nested_compoundmodel_separability`.
+- Ran: `python -m pytest astropy/modeling/tests/test_separable.py -q`
+- Result: `12 passed`
+- Repro now returns the expected matrix:
+  `[[ True  True False False], [ True  True False False], [False False  True False], [False False False  True]]`
+
+unerr-save: intent Fix nested CompoundModel separability_matrix behavior in modeling
+unerr-save: decision Use computed right matrix in _cstack instead of ones fill
+unerr-save: note fct|e:_cstack|+|When right operand is ndarray from nested compound, embed it directly or separability is overstated

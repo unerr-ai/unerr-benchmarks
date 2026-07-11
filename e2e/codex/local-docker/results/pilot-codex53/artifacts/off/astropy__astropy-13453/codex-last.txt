@@ -1,0 +1,15 @@
+Implemented a fix for this bug in the workspace and added regression tests.
+
+Changed:
+- HTML writer now applies `formats` by wiring HTML write path into the same format setup used by other ASCII writers:
+  - [`astropy/io/ascii/html.py`](/testbed/astropy/io/ascii/html.py)
+- Multicolumn HTML writing now preserves the source column format on split subcolumns:
+  - [`astropy/io/ascii/html.py`](/testbed/astropy/io/ascii/html.py)
+- Added tests covering both standard and multicolumn HTML formatting behavior:
+  - [`astropy/io/ascii/tests/test_html.py`](/testbed/astropy/io/ascii/tests/test_html.py)
+
+Validation:
+- Ran: `python -m pytest -q astropy/io/ascii/tests/test_html.py -k "formats or fill_values"`
+- Result: `7 passed, 20 deselected`
+
+This now reproduces your expected HTML output (`1.24e-24`, `3.23e-15`) when `formats={"a": ...}` is supplied.

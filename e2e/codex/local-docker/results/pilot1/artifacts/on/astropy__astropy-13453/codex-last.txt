@@ -1,0 +1,12 @@
+Fixed: HTML ASCII output now respects `formats` for both scalar and multidimensional columns.
+
+- In [/testbed/astropy/io/ascii/html.py](file:///testbed/astropy/io/ascii/html.py), the HTML writer now:
+  - binds `self.data.cols` so the existing ASCII formatting machinery can run,
+  - applies `self.data._set_col_formats()` before rendering rows,
+  - copies the resolved format onto split subcolumns in the multidimensional branch.
+- In [/testbed/astropy/io/ascii/tests/test_html.py](file:///testbed/astropy/io/ascii/tests/test_html.py), I added a regression test that checks formatted scalar and 2-D columns in HTML output.
+
+Validation:
+- `python -m pytest astropy/io/ascii/tests/test_html.py -k 'formats or raw_html_write or fill_values'`
+- Result: `6 passed, 2 skipped`
+

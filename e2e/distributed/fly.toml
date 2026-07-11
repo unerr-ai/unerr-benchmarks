@@ -1,0 +1,23 @@
+# Distributed SWE-bench runner — minimal app config for the fleet app.
+#
+# Sibling of e2e/econ/fly-remote/fullresolve/fly.toml. Used ONLY by
+# run-distributed.sh's `flyctl deploy --build-only --config this-file` so flyctl
+# knows the app name without trying to rebuild config from (nonexistent) machines
+# on a fresh app. The actual coordinator + worker machines are launched by
+# `flyctl machine run` with explicit flags (vm size, volume, env, per-role
+# entrypoint override, `fleet=<label>` metadata) — NOT from this file.
+#
+# NO [http_service] on purpose: the coordinator's HTTP endpoint is reached over
+# fly's private 6PN network at `<machine_id>.vm.<app>.internal:8080`, which needs
+# no service config. An [http_service] would publish it to the public edge AND
+# autostart machines — exactly what a work-queue fleet must NOT do. NO [mounts] /
+# [[vm]] here either; those are `flyctl machine run` flags (they differ per role:
+# coordinator = shared-cpu-1x + 1 volume, workers = shared-cpu-8x + no volume).
+#
+# App name is the FIXED `unerr-bench-dist`; each run is scoped by the `fleet=<LABEL>`
+# machine metadata (LABEL doubles as RUN_ID), so teardown targets one run's machines.
+app = "unerr-bench-dist"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.dist"

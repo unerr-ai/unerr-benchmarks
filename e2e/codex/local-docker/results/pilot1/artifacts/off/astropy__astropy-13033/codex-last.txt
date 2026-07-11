@@ -1,0 +1,9 @@
+Implemented the fix in [`/testbed/astropy/timeseries/core.py#L76`](file:///testbed/astropy/timeseries/core.py#L76). `_check_required_columns()` now detects the case where the table still has the correct leading columns but is missing one or more later required columns, and raises a message like `missing required column 'flux'` instead of reporting `time` again.
+
+Added a regression test in [`/testbed/astropy/timeseries/tests/test_sampled.py#L385`](file:///testbed/astropy/timeseries/tests/test_sampled.py#L385) that reproduces the reported case by requiring both `time` and `flux`, then removing `flux`.
+
+Checks:
+- `python -m pytest /testbed/astropy/timeseries/tests/test_sampled.py -k required_columns`
+- direct `BinnedTimeSeries` sanity check confirmed the same missing-column message through the shared base class
+
+One unrelated environment issue showed up when running the full `test_binned.py` file: a leap-second/`astropy.time` warning path is failing in this setup, but it does not affect this change.

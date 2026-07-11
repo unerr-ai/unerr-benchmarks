@@ -1,0 +1,8 @@
+unerr-save: intent fix nested CompoundModel separability and add regression coverage
+It was a bug.
+
+The failure is in `_cstack` in [`astropy/modeling/separable.py`]( /testbed/astropy/modeling/separable.py ): when the right child is already an `ndarray` separability matrix, the code was dropping that matrix and filling the block with ones instead. That only shows up for nested `CompoundModel`s, which is why your flat examples worked and the nested one did not.
+
+I fixed it by copying the right-hand matrix through unchanged, and added a regression test for the exact nested case in [`astropy/modeling/tests/test_separable.py`]( /testbed/astropy/modeling/tests/test_separable.py ). The targeted test module now passes.
+
+If you want, I can also run a broader `astropy.modeling` test subset to check for any knock-on effects.

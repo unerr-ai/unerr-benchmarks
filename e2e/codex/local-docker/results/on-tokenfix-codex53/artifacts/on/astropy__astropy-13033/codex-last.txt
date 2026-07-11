@@ -1,0 +1,13 @@
+Implemented a focused fix for the misleading required-column exception and added regression coverage.
+
+- Updated [`_check_required_columns` in core.py](/testbed/astropy/timeseries/core.py:77) to emit a missing-required-columns error when the first required column is still present but later required columns are gone.
+- Added regression test [`test_required_columns_remove_extra_required_column`](/testbed/astropy/timeseries/tests/test_sampled.py:399) for the reported `TimeSeries` scenario (`_required_columns = ['time', 'a']`, then removing `'a'`).
+
+Validation (delegated to a read-only sub-agent):
+- `pytest -q astropy/timeseries/tests/test_sampled.py -k required_columns` -> `2 passed, 24 deselected`
+- `pytest -q astropy/timeseries/tests/test_sampled.py::test_required_columns_remove_extra_required_column` -> `1 passed`
+- Observed existing runtime warning about NumPy binary compatibility; no test failures.
+
+unerr-save: intent Fix misleading TimeSeries required-column exception and add regression test
+unerr-save: decision Prefer explicit missing-required-columns messaging when first required column still matches
+unerr-save: note fct|f:astropy/timeseries/core.py|+|_check_required_columns now reports missing required columns for non-leading required-column removals instead of echoing found first column

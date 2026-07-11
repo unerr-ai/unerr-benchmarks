@@ -1,0 +1,43 @@
+diff --git a/astropy/timeseries/core.py b/astropy/timeseries/core.py
+index c279f35f8..f7a700490 100644
+--- a/astropy/timeseries/core.py
++++ b/astropy/timeseries/core.py
+@@ -76,6 +76,17 @@ class BaseTimeSeries(QTable):
+ 
+             elif self.colnames[:len(required_columns)] != required_columns:
+ 
++                if (len(self.colnames) < len(required_columns)
++                        and self.colnames == required_columns[:len(self.colnames)]):
++                    missing_columns = required_columns[len(self.colnames):]
++                    missing_plural = 's' if len(missing_columns) > 1 else ''
++                    missing_columns = "', '".join(missing_columns)
++
++                    raise ValueError("{} object is invalid - missing required column{} "
++                                     "'{}'"
++                                     .format(self.__class__.__name__, missing_plural,
++                                             missing_columns))
++
+                 raise ValueError("{} object is invalid - expected '{}' "
+                                  "as the first column{} but found '{}'"
+                                  .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))
+diff --git a/astropy/timeseries/tests/test_sampled.py b/astropy/timeseries/tests/test_sampled.py
+index bcc06d929..d981e2059 100644
+--- a/astropy/timeseries/tests/test_sampled.py
++++ b/astropy/timeseries/tests/test_sampled.py
+@@ -385,6 +385,16 @@ def test_required_columns():
+     assert exc.value.args[0] == ("TimeSeries object is invalid - expected "
+                                  "'time' as the first column but found 'a'")
+ 
++    ts_flux = TimeSeries(time=INPUT_TIME,
++                         data=[[99.9, 99.8, 99.7]],
++                         names=['flux'])
++    ts_flux._required_columns = ['time', 'flux']
++
++    with pytest.raises(ValueError) as exc:
++        ts_flux.remove_column('flux')
++    assert exc.value.args[0] == ("TimeSeries object is invalid - missing required "
++                                 "column 'flux'")
++
+     with pytest.raises(ValueError) as exc:
+         ts.copy().remove_columns(['time', 'a'])
+     assert exc.value.args[0] == ("TimeSeries object is invalid - expected "

@@ -1,0 +1,14 @@
+# Per-instance image: the official SWE-bench environment + the grafted toolbox.
+# One thin layer on top of an image that already has the repo at base_commit.
+#
+#   docker build -f Dockerfile.instance \
+#     --build-arg INSTANCE_IMAGE=swebench/sweb.eval.x86_64.<id>:latest \
+#     -t unerr-codex-run:<id> .
+#
+# `COPY --from=unerr-codex-toolbox` references the locally-built toolbox image
+# (see build-toolbox.sh) — no network, just a cached layer copy.
+
+ARG INSTANCE_IMAGE
+FROM ${INSTANCE_IMAGE}
+COPY --from=unerr-codex-toolbox /opt/toolbox /opt/toolbox
+ENV PATH=/opt/toolbox/node/bin:/opt/toolbox/bin:${PATH}

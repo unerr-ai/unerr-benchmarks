@@ -1,0 +1,19 @@
+Implemented a fix for the misleading `TimeSeries` exception when required columns are missing.
+
+### What changed
+- Updated required-column validation to detect the specific case where the current columns are a valid prefix of required columns but one or more required trailing columns are missing.
+- In that case, it now raises:
+  - `"TimeSeries object is invalid - missing required column '...'"` (or `columns` for plural)
+- Kept existing behavior/messages for true first-column mismatch cases.
+
+### Files updated
+- [core.py](/testbed/astropy/timeseries/core.py)
+- [test_sampled.py](/testbed/astropy/timeseries/tests/test_sampled.py)
+
+### Added regression test
+- New test `test_required_columns_missing` in [test_sampled.py](/testbed/astropy/timeseries/tests/test_sampled.py) verifies the new missing-required-column message.
+
+### Verification run
+- `python -m pytest -q astropy/timeseries/tests/test_sampled.py -k required_columns` passed (`2 passed`)
+- `python -m pytest -q astropy/timeseries/tests/test_common.py -k required_after_stacking` passed
+- `python -m pytest -q astropy/timeseries/tests/test_binned.py -k empty_initialization_invalid` passed

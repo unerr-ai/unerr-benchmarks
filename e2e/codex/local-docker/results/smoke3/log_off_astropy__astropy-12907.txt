@@ -1,0 +1,3 @@
+[run-instance] codex login: ok (apikey)
+[run-instance] codex exec starting (mode=off, model=gpt-5.4-mini, repo=/testbed)
+[run-instance] codex exec exit=0

@@ -14,3 +14,9 @@ results/runs/
 .DS_Store
 .idea/*
 !.idea/.gitignore
+
+# unerr local artifacts
+.unerr
+
+# local secrets (subscription token etc.) — never commit
+.env.local

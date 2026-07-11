@@ -1,0 +1,3 @@
+# run.sh vendors the local musl econ binary + config + plugins here before the
+# fly build — not source, regenerated each run.
+context/vendor/

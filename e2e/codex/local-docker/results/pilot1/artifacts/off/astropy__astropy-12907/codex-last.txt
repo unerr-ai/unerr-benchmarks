@@ -1,0 +1,14 @@
+Yes, this is a bug.
+
+The issue is in [`astropy/modeling/separable.py`]( /testbed/astropy/modeling/separable.py#L219 ), where `_cstack()` handled a nested right-hand compound model incorrectly by filling its block with ones instead of copying the actual separability matrix. That collapses the structure of nested `&` models and produces the over-connected matrix you saw.
+
+I fixed it by preserving the right-hand matrix:
+
+- [`astropy/modeling/separable.py`]( /testbed/astropy/modeling/separable.py#L243 ) now copies `right` into the stacked block instead of writing `1`s.
+- Added a regression test for your exact nested example in [`astropy/modeling/tests/test_separable.py`]( /testbed/astropy/modeling/tests/test_separable.py#L153 ).
+
+Validation:
+- `python -m pytest astropy/modeling/tests/test_separable.py` passes
+- The nested case now returns the expected block-diagonal matrix
+
+If you want, I can also add a symmetric test for a nested compound model on the left branch to lock in both directions.

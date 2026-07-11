@@ -1,0 +1,23 @@
+[run-instance] econ run starting (repo=/testbed, timeout=1800s)
+/opt/toolbox/run-instance.sh: line 64:    29 Killed                  timeout "$ECON_TIMEOUT" "$TOOLBOX/opencode" run --format json --dir "$REPO_DIR" --dangerously-skip-permissions "$PROBLEM" > "$OUT/events.jsonl" 2> "$OUT/err.txt"
+[run-instance] econ exit=137
+[econ.err] [econ-gate-spike] plugin loaded
+[econ.err] [econ-status] plugin loaded
+[econ.err] [econ-output-trim] plugin loaded
+[econ.err] [econ-recon-inject] plugin loaded
+[econ.err] [econ-executor-validate] plugin loaded
+[econ.err] [econ-governance-gate] plugin loaded
+[econ.err] [econ-checkpoint] engine load failed (checkpoint disabled): Cannot find module '/testbed/packages/code-intelligence/src/checkpoint.ts' from '/testbed/.opencode/plugins/econ-checkpoint.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ:meter] {"tool":"search","raw_tokens":2855,"returned_tokens":2855,"ratio":1}
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ:meter] {"tool":"search","raw_tokens":1600,"returned_tokens":1600,"ratio":1}
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[econ.err] [econ-recon-inject] graph init failed: Cannot find module '/testbed/packages/code-intelligence/src/index.ts' from '/testbed/.opencode/plugins/econ-recon-inject.js'
+[run-instance] sessionID=ses_0d83f7b9bffeGRbyncSuEsvTw2

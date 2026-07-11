@@ -1,0 +1,7 @@
+Yes. I found the exact request in Astropy’s issue history, and it was already accepted: issue `#13355` was closed by PR `#13398`, and the `v5.2` changelog says that PR added a topocentric ITRS frame with direct transforms to and from `AltAz` and `HADec`. citeturn2view0turn6view0
+
+The earlier discussion also shows this was not a rejected idea in principle. Related issues `#10230`, `#10356`, and `#10983` were all about the topocentric-vs-geocentric aberration problem and the limitations of the existing observed-frame path. citeturn12search0turn2view1turn12search2turn2view4
+
+So my read is: if you are asking whether maintainers would be receptive, the answer is yes, and in fact the exact approach already landed upstream. If you are preparing a patch against an older branch or a fork, submit it, but frame it as a follow-on implementation/test/refraction cleanup rather than a brand-new conceptual pitch. citeturn2view0turn6view0
+
+unerr-save: note fct|p:|+|Astropy previously accepted direct topocentric ITRS<->AltAz/HADec transforms in #13398, so similar proposals should be framed as follow-on work

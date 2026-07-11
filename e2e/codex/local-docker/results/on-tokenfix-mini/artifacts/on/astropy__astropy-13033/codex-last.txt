@@ -1,0 +1,13 @@
+unerr-save: intent fix misleading TimeSeries missing-required-column error
+unerr-save: decision special-case truncated required-column prefixes as missing columns
+unerr-save: note procedural|f:astropy/timeseries/tests/test_sampled.py|+|Use a direct instance mutation rather than copy() when testing ad-hoc _required_columns overrides.
+
+Changed the shared validator in [`/testbed/astropy/timeseries/core.py`](/testbed/astropy/timeseries/core.py) so a truncated-but-valid required-column prefix now raises `missing required column ...` instead of the misleading first-column mismatch message.
+
+Added a regression in [`/testbed/astropy/timeseries/tests/test_sampled.py`](/testbed/astropy/timeseries/tests/test_sampled.py) that matches the reported case: `TimeSeries(time=..., data={'flux': ...})`, set `_required_columns = ['time', 'flux']`, then remove `flux`.
+
+Verification:
+- `python -m pytest astropy/timeseries/tests/test_sampled.py -k test_required_columns -q` passed.
+- `python -m pytest astropy/timeseries/tests/test_common.py -k required_after_stacking -q` passed.
+
+The old first-column error is still used for real ordering mismatches; only the “required column removed, prefix still matches” case changed.

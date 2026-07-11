@@ -1,0 +1,24 @@
+Yes, likely receptive, if you frame it narrowly.
+
+The part that will land well is the user-facing improvement: a direct `ITRS <-> AltAz/HADec` path removes the “go through CIRS and subtract the observer first” workaround that the docs currently teach for the overhead case. The existing docs already show that pattern as the correct fix for topocentric objects, which is a good sign that the pain point is real. See the current workaround in [`common_errors.rst`](/testbed/docs/coordinates/common_errors.rst#L35) and the corresponding regression test in [`test_intermediate_transformations.py`](/testbed/astropy/coordinates/tests/test_intermediate_transformations.py#L784).
+
+The main caveats I’d expect maintainers to raise are:
+
+- Don’t present this as changing ITRS semantics globally.
+  - The current `ITRS` machinery still participates in time-dependent transform paths through the frame graph, so I would avoid describing ITRS as “time invariant” in general.
+  - I would instead say: “for direct observed-frame transforms, treat the source ITRS vector as a topocentric/geometric vector and adopt the target frame’s `obstime`.”
+
+- Refraction needs a clear story.
+  - `AltAz` and `HADec` are documented as refraction-aware when `pressure != 0`.
+  - A pure matrix-based ITRS path will be geometric only unless you explicitly apply the same atmospheric correction logic as the current route.
+  - If you leave refraction out initially, that should be explicit in the PR.
+
+- You’ll need parity tests against the current accepted behavior.
+  - Round-trip `ITRS -> AltAz -> ITRS` and `ITRS -> HADec -> ITRS`
+  - Agreement with the current `CIRS -> observed` route for representative cases
+  - The straight-overhead case from [`test_intermediate_transformations.py`](/testbed/astropy/coordinates/tests/test_intermediate_transformations.py#L784)
+  - Cases with and without distance, since nearby objects are exactly where this matters
+
+The existing direct observed-frame code shows the style the project already accepts for these transforms in [`icrs_observed_transforms.py`](/testbed/astropy/coordinates/builtin_frames/icrs_observed_transforms.py#L22), and the `CIRS -> observed` implementation in [`cirs_observed_transforms.py`](/testbed/astropy/coordinates/builtin_frames/cirs_observed_transforms.py#L22) is the right reference for topocentric handling.
+
+My recommendation: submit it as a PR, but describe it as a new direct topocentric transform path, not as a reinterpretation of ITRS itself. If you want, I can help you tighten the issue text or draft the PR description so it anticipates the likely review questions.

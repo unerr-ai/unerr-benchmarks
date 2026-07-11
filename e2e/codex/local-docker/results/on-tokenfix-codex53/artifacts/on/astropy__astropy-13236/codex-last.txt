@@ -1,0 +1,18 @@
+Implemented with parallel delegation and consolidated the result.
+
+Changes made:
+- Added `FutureWarning` in [`astropy/table/table.py`](/testbed/astropy/table/table.py:1244) within the structured-ndarray auto-conversion branch in `Table._convert_data_to_col`.
+- Message tells users to wrap structured ndarrays in `Column` to preserve current behavior, and that future behavior will add structured ndarrays as `Column` directly.
+- Kept current behavior (`data.view(NdarrayMixin)` + `data_is_mixin = True`) unchanged for now.
+- Updated [`astropy/table/tests/test_mixin.py`](/testbed/astropy/table/tests/test_mixin.py:700) `test_ndarray_mixin` to assert `FutureWarning` for:
+  - `Table([a], names=['a'])`
+  - `t['b'] = b`
+  - `t['c'] = c`
+- Kept no-warning path for already-`NdarrayMixin` input (`t['d'] = d`).
+
+Validation:
+- Ran `python -m pytest astropy/table/tests/test_mixin.py -k ndarray_mixin` -> `1 passed`.
+- A full run of `astropy/table/tests/test_mixin.py` still has one unrelated failure (`test_skycoord_representation`, `TypeError: concatenate() got an unexpected keyword argument 'dtype'`).
+
+unerr-save: intent Add FutureWarning + tests for structured ndarray auto-NdarrayMixin path
+unerr-save: decision Keep current conversion behavior but deprecate direct structured ndarray input with explicit guidance

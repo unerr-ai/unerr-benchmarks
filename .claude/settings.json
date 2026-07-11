@@ -1,0 +1,166 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-bash"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-read"
+          }
+        ]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-grep"
+          }
+        ]
+      },
+      {
+        "matcher": "Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-glob"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-write"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|mcp__unerr__file_edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-edit"
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook pre-webfetch"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-read"
+          }
+        ]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-grep"
+          }
+        ]
+      },
+      {
+        "matcher": "Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-glob"
+          }
+        ]
+      },
+      {
+        "matcher": "WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-websearch"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-write"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|mcp__unerr__file_edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook post-edit"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook session-start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook prompt-submit"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook stop"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/jaswanth/Library/pnpm/unerr hook subagent-stop"
+          }
+        ]
+      }
+    ]
+  }
+}

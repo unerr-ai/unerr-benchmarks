@@ -1,0 +1,12 @@
+[run-instance] entitlement: k-dev-local (offline pro)
+[run-instance] unerrd: up
+[run-instance] unerr install codex: ok
+[run-instance] codex exec starting (mode=on, model=gpt-5.4-mini, repo=/testbed)
+[run-instance] codex exec exit=1
+[codex.err] 2026-06-28T05:33:35.793833Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:36.821998Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:37.896108Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:39.203039Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:40.833621Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:43.478770Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+[codex.err] 2026-06-28T05:33:47.682759Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses

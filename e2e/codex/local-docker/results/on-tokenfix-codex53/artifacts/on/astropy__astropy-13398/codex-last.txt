@@ -1,0 +1,25 @@
+Implemented the direct `ITRS <-> AltAz/HADec` path using a pure ITRS topocentric matrix transform, and added targeted tests.
+
+- Updated [cirs_observed_transforms.py](/testbed/astropy/coordinates/builtin_frames/cirs_observed_transforms.py):
+  - Added direct transform registrations:
+    - `ITRS -> AltAz/HADec`
+    - `AltAz/HADec -> ITRS`
+  - Implemented `_itrs_to_observed_mat()` using `WGS84` geodetic lon/lat + left-handed frame handling (AltAz/HADec).
+  - Direct transforms now stay in ITRS (topocentric subtraction/addition + matrix rotate), with no CIRS intermediate in these direct edges.
+
+- Updated [test_icrs_observed_transformations.py](/testbed/astropy/coordinates/tests/test_icrs_observed_transformations.py):
+  - Added `test_itrs_altaz_consistency()`
+  - Added `test_itrs_hadec_consistency()`
+  - Both assert direct edge registration and invariance-style behavior across differing observed-frame `obstime`.
+  - Switched new test times to explicit ISO timestamps (e.g. `2010-01-01T03:00:00`) to avoid leap-second auto-update warnings from time arithmetic in this environment.
+
+Validation run:
+- `python -m pytest astropy/coordinates/tests/test_icrs_observed_transformations.py -k "test_itrs_altaz_consistency or test_itrs_hadec_consistency" -q`
+- Result: `2 passed, 2 deselected`
+
+Note:
+- There are unrelated pre-existing/unrelated working tree changes (`.gitignore`, `.codex/`, `AGENTS.md`, `large.fits`) that I did not modify.
+
+unerr-save: intent implement direct pure-ITRS AltAz/HADec transforms plus targeted regression tests
+unerr-save: decision replaced CIRS-mediated direct edges with topocentric ITRS matrix mapping
+unerr-save: note dec|f:astropy/coordinates/builtin_frames/cirs_observed_transforms.py|+|Direct ITRS<->AltAz/HADec now uses WGS84-based local rotation matrices and avoids CIRS in these edge functions

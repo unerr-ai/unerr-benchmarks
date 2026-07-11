@@ -1,0 +1,15 @@
+Implemented the deprecation path for structured `ndarray` auto-conversion to `NdarrayMixin`.
+
+- Added a `FutureWarning` in [`astropy/table/table.py`](/testbed/astropy/table/table.py:1242) inside `Table._convert_data_to_col` when a structured `ndarray` is implicitly view-cast to `NdarrayMixin`.
+- Updated [`astropy/table/tests/test_mixin.py`](/testbed/astropy/table/tests/test_mixin.py:714) `test_ndarray_mixin` to assert the warning for plain structured arrays while keeping current behavior unchanged.
+
+Validation:
+- `pytest -q astropy/table/tests/test_mixin.py -k ndarray_mixin` passed (`1 passed`).
+- `pytest -q astropy/io/misc/asdf/tags/table/tests/test_table.py -k ndarray_mixin` had all selected tests skipped in this environment.
+
+1. If you want, I can now do the actual 5.2 behavior flip (remove the conversion block and update tests to expect `Column`).
+2. I can also add a `docs/changes/table/*.rst` fragment for this deprecation.
+
+unerr-save: intent Add FutureWarning for structured ndarray auto-conversion to NdarrayMixin
+unerr-save: decision Keep conversion behavior for now and enforce warning via tests · blocker unerr_track intent call timed out · resolution proceeded with direct unerr graph/edit tools
+unerr-save: note dec|e:Table._convert_data_to_col|+|Structured ndarray auto-cast now emits FutureWarning mentioning Astropy 5.2 and Column(...) wrap path

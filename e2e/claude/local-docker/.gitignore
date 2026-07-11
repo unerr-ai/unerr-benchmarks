@@ -1,0 +1,12 @@
+# Staged at build time by build-toolbox.sh (packed from your unerr-cli checkout)
+context/unerr-ai-unerr-*.tgz
+# Run outputs
+results/
+logs/
+# Python / build cruft
+__pycache__/
+.venv/
+build/
+vendor/
+# Subscription token minted by auth-bootstrap.sh — never commit
+.env.local

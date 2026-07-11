@@ -1,0 +1,21 @@
+Implemented a fix so HTML output now honors `formats` in ASCII table writes, and added a regression test.
+
+### Changes
+- Applied column formats in HTML writer path before string conversion:
+  - [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py):349
+- Wired HTML writer data columns (`self.data.cols`) so format application works in this code path:
+  - [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py):351
+- Preserved format behavior for split multidimensional HTML columns:
+  - [astropy/io/ascii/html.py](/testbed/astropy/io/ascii/html.py):431
+- Added regression test for `formats` with HTML output:
+  - [astropy/io/ascii/tests/test_html.py](/testbed/astropy/io/ascii/tests/test_html.py):623
+
+### Verification
+Ran:
+`python -m pytest astropy/io/ascii/tests/test_html.py -k "write_table_html_formats or write_table_html_fill_values or multicolumn_table_html_fill_values or multi_column_write_table_html_fill_values_masked"`
+
+Result: 6 passed, 0 failed.
+
+unerr-save: intent fix html writer to apply formats during ascii html output
+unerr-save: decision use BaseData._set_col_formats in HTML.write after setting data cols
+unerr-save: note fct|e:astropy.io.ascii.html.HTML.write|+|HTML.write bypassed BaseData.str_vals so formats were never applied unless explicitly set in this path

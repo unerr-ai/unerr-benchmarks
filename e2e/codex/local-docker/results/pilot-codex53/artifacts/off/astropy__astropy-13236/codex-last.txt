@@ -1,0 +1,12 @@
+Implemented the deprecation step for structured `ndarray` auto-conversion.
+
+### Changes made
+- Added a `FutureWarning` at the structured-array auto-conversion site in [`table.py`](/testbed/astropy/table/table.py:1244), with guidance to use `Column(...)` and noting the behavior change in Astropy 5.2.
+- Kept current behavior unchanged for now (still converts to `NdarrayMixin`).
+- Scoped the warning to plain `np.ndarray`/`np.recarray` inputs to avoid warning on unrelated internal array-like paths.
+
+- Updated [`test_mixin.py`](/testbed/astropy/table/tests/test_mixin.py:715) to explicitly expect this warning when structured arrays are added directly.
+
+### Verification
+- Ran: `python -m pytest astropy/table/tests/test_mixin.py -k ndarray_mixin -q`  
+  Result: `1 passed`

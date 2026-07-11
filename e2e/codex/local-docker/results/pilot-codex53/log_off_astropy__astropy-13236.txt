@@ -1,0 +1,4 @@
+[run-instance] codex login: ok (apikey)
+[run-instance] codex exec starting (mode=off, model=gpt-5.3-codex, repo=/testbed)
+[run-instance] codex exec exit=0
+UNERR_TELEMETRY {"mode":"off","model":"gpt-5.3-codex","turns":1,"in_tokens":456548,"cached_in":409472,"out_tokens":5413,"usd":0.0328,"tool_calls":18,"mcp_tool_calls":0,"tools":{"command_execution":18}}

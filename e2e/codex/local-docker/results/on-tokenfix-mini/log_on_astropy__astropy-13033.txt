@@ -1,0 +1,7 @@
+[run-instance] entitlement: k-dev-local (offline pro)
+[run-instance] unerrd: up
+[run-instance] unerr install codex: ok
+[run-instance] codex login: ok (apikey)
+[run-instance] codex exec starting (mode=on, model=gpt-5.4-mini, repo=/testbed)
+[run-instance] codex exec exit=0
+UNERR_TELEMETRY {"mode":"on","model":"gpt-5.4-mini","turns":1,"in_tokens":1567397,"cached_in":1520768,"out_tokens":9616,"usd":0.0689,"tool_calls":19,"mcp_tool_calls":18,"tools":{"mcp_tool_call":18,"command_execution":1}}

@@ -1,0 +1,9 @@
+# Batch A/B job — no HTTP service. Built by fly's remote builder; run as a
+# one-shot machine by run.sh. App name is a placeholder run.sh can override.
+app = "unerr-bench-ab"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# No [http_service]/[[services]] — this image is a job, not a server.

@@ -1,0 +1,19 @@
+This looks like a sensible deprecation path.
+
+My take:
+- The auto-conversion is now more legacy compatibility than core behavior.
+- If structured `Column` serialization is fixed by `#12644`, the main reason to force `NdarrayMixin` disappears.
+- A `FutureWarning` first is the right move, because silent behavior changes on table construction are user-visible and potentially breaking.
+
+I’d recommend:
+- Warn only for the exact structured-`np.ndarray` case that is currently auto-viewed as `NdarrayMixin`.
+- Point users to `Column(data)` if they want the current `Column` behavior explicitly.
+- Keep the warning focused on the semantic change, not on `NdarrayMixin` internals.
+- Add tests for:
+  - warning emission now,
+  - `Column` explicitly wrapping the same structured array,
+  - the eventual no-transform behavior.
+
+One thing to verify before removing the branch entirely is whether any downstream unified I/O code still depends on `NdarrayMixin` as a sentinel for this class of input. If not, I’d support removing the transform in the next minor release cycle.
+
+If you want, I can turn this into a polished GitHub issue or draft the exact warning text and implementation plan.

@@ -1,0 +1,13 @@
+Implemented the deprecation path you described.
+
+- Added a `FutureWarning` in [`astropy/table/table.py`](/testbed/astropy/table/table.py:1242) where structured `ndarray` inputs are auto-converted to `NdarrayMixin`.
+- Warning message tells users to wrap input in `Column(...)` and states behavior will change in Astropy 5.2.
+- Updated [`astropy/table/tests/test_mixin.py`](/testbed/astropy/table/tests/test_mixin.py:714) to assert this warning for the three structured-array insertion paths.
+
+Validation run:
+- `pytest -q astropy/table/tests/test_mixin.py -k ndarray_mixin` passed (`1 passed`).
+
+I did not run the full test suite.
+
+unerr-save: intent Add FutureWarning for structured ndarray auto-conversion to NdarrayMixin
+unerr-save: decision keep current conversion behavior for now · resolution deprecate with FutureWarning and test assertions

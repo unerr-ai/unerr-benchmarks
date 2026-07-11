@@ -1,0 +1,56 @@
+{
+  "summaries": {
+    "smoke4|on|gpt-5.4-mini": {
+      "n": 1,
+      "no_tel_count": 0,
+      "mean_turns": 1,
+      "total_in_tokens": 35933,
+      "mean_in_tokens": 35933,
+      "total_cached_in": 0,
+      "mean_cached_in": 0,
+      "total_out_tokens": 2505,
+      "mean_out_tokens": 2505,
+      "total_usd": 0.014,
+      "mean_usd": 0.014,
+      "mean_tool_calls": 0,
+      "mean_mcp_tool_calls": 0,
+      "unerrd_up_rate": 1.0,
+      "install_ok_rate": 1.0,
+      "patch_nonzero_rate": 0.0
+    },
+    "smoke4|off|gpt-5.4-mini": {
+      "n": 1,
+      "no_tel_count": 0,
+      "mean_turns": 1,
+      "total_in_tokens": 558735,
+      "mean_in_tokens": 558735,
+      "total_cached_in": 526720,
+      "mean_cached_in": 526720,
+      "total_out_tokens": 6258,
+      "mean_out_tokens": 6258,
+      "total_usd": 0.0337,
+      "mean_usd": 0.0337,
+      "mean_tool_calls": 22,
+      "mean_mcp_tool_calls": 0,
+      "unerrd_up_rate": 0.0,
+      "install_ok_rate": 0.0,
+      "patch_nonzero_rate": 1.0
+    }
+  },
+  "deltas": {
+    "smoke4|gpt-5.4-mini": {
+      "label": "smoke4",
+      "model": "gpt-5.4-mini",
+      "n_on": 1,
+      "n_off": 1,
+      "delta_turns": 0,
+      "delta_turns_pct": 0.0,
+      "delta_in_tokens": -522802,
+      "delta_in_tokens_pct": -93.56886538341074,
+      "delta_usd": -0.019700000000000002,
+      "delta_usd_pct": -58.456973293768556,
+      "mcp_calls_on": 0,
+      "unerrd_up_rate_on": 1.0
+    }
+  }
+}
