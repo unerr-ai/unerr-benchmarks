@@ -1,0 +1,42 @@
+# Build context for e2e/distributed/Dockerfile.dist is THIS dir (e2e/) — the
+# common ancestor of econ/ and distributed/, so both COPY subtrees resolve. Trim
+# everything the image does NOT COPY so the remote-builder upload stays small.
+#
+# Only builds that use e2e/ as their context read this file. The single-machine
+# arm builds use a subdir context (e2e/econ, e2e/codex, e2e/claude) and read their
+# OWN per-arm .dockerignore, so this file does not affect them.
+#
+# KEEP: econ/local-docker/{run-benchmark.py,Dockerfile.*,context (incl. vendor/)},
+#       econ/{report.py,econ-telemetry.py,econ-tier-cost.py}, distributed/**.
+
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.log
+**/.env
+**/.env.local
+**/node_modules
+**/.unerr
+**/.DS_Store
+
+# heavy per-run artifacts (never COPYed into the image)
+**/out/
+**/results/
+**/reports/
+**/logs/
+**/grading/
+**/*.tgz
+
+# other arms are not part of the econ fleet image
+claude/
+codex/
+
+# EXCEPTION to the `**/node_modules` rule above: the econ toolbox vendors econ's
+# `.opencode/` as `vendor/dot-opencode/`, and its `.opencode/tool/*.ts` project
+# tools `import "@opencode-ai/plugin"` — a workspace dep that lives ONLY under
+# `.opencode/node_modules/`. If it's stripped, opencode aborts the whole session
+# at startup (UnknownError → econ exit=1, 0 turns, empty patch). Re-include just
+# THIS node_modules tree (all other node_modules stay excluded to keep uploads
+# small). Negations must come AFTER `**/node_modules` (last match wins).
+!**/dot-opencode/node_modules
+!**/dot-opencode/node_modules/**
