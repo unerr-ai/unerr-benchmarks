@@ -55,6 +55,41 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   fall back to the `bench-ctl` commands below — nothing about the fleet depends on the launcher
   process staying alive.
 
+### Dedicated conductor (opt-in — `DEDICATED_CONDUCTOR=1`)
+The conductor (`minimax/minimax-m3`, a 428B MoE) is served from Fireworks **serverless** by
+default, whose shared TPM limits throttle us (`429`/`503`) above ~2 parallel resolves. Setting
+`DEDICATED_CONDUCTOR=1` brings up an **ephemeral Fireworks dedicated-GPU deployment** (8× B300 288GB
+FP4 — Fireworks' recommended default shape for minimax-m3; pinned id `bench-conductor`) for the
+duration of the run and flips the shared `econ-litellm`
+gateway to it — a dedicated deployment has *no shared rate limits*, so the whole fleet can run in
+parallel.
+
+```bash
+# one-time: ship the gateway image that can do the flip (adds infra/litellm/econ-entrypoint.sh)
+cd ../../../econ-coding-agent/infra/litellm && fly deploy -a econ-litellm
+
+# then any distributed run can opt in:
+cd e2e/distributed
+MACHINES=25 ARM=econ LABEL=full-dedicated DEDICATED_CONDUCTOR=1 ./run-distributed.sh
+```
+
+- **Cost:** ~**$96/hr** while up (8× B300 @ $12/GPU-hr), billed per-GPU-second, **$0 when deleted**.
+  This is a concurrency/reliability play, not a cost cut — raw conductor spend goes *up* vs serverless.
+- **Ephemeral + safe:** the deployment is created after the coordinator (before workers) and deleted
+  by a `trap` (`cleanup_dedicated`) on **any** exit — normal end, error, or `Ctrl-C` — so a mid-run
+  abort can never orphan the $96/hr GPU. The teardown also unsets the gateway secret, reverting the
+  conductor to serverless for the next run.
+- **How the flip works (drift-safe):** the committed `infra/litellm/config.yaml` stays serverless
+  (the OL-8.B2 drift test is untouched). The runner sets a `CONDUCTOR_DEPLOYMENT_PATH` fly secret;
+  the gateway's `econ-entrypoint.sh` rewrites *only the conductor's upstream line*, in the container's
+  config copy, at startup. Secret unset → back to serverless. No per-run image rebuild.
+- **Exclusive:** flagged runs assume sole use of the shared gateway (they flip it for everyone). Don't
+  run a second benchmark against `econ-litellm` while a `DEDICATED_CONDUCTOR=1` run is live.
+- **Verification:** after the flip the runner probes `/health/liveliness` and `/v1/model/info`; a
+  `WARN: could not confirm conductor routing` means the gateway image lacks the flip wrapper (do the
+  one-time deploy above) — otherwise you'd pay for an unused GPU. Manual control:
+  `./fireworks-conductor.sh {up|status|print-path|down}`.
+
 ## 3. Monitor
 ```bash
 tools/bench-ctl.sh distributed-status LABEL   # fleet machines (role+state) + coordinator progress

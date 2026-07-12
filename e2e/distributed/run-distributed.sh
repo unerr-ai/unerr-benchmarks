@@ -19,6 +19,7 @@
 #   MACHINES=2 ARM=econ LABEL=dist-smoke TASKS="django__django-11880,django__django-11951,django__django-11790" ./run-distributed.sh
 #   MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
 #   MACHINES=25 ARM=econ LABEL=full-verified ./run-distributed.sh          # SUITE defaults to full Verified
+#   MACHINES=25 ARM=econ LABEL=full-ded DEDICATED_CONDUCTOR=1 ./run-distributed.sh  # ephemeral dedicated-GPU conductor (see README §2); ~$80/hr while up
 #   DESTROY_ONLY=1 LABEL=dist-smoke ./run-distributed.sh                   # just tear a fleet down
 #
 # Prereqs: flyctl logged in (token auto-read from ~/.fly/config.yml); econ built
@@ -41,6 +42,17 @@ MACHINES="${MACHINES:-}"                    # REQUIRED (unless DESTROY_ONLY) —
 DESTROY_ONLY="${DESTROY_ONLY:-0}"           # 1 = only tear down the fleet named by LABEL, then exit
 IMAGE="${IMAGE:-}"                          # reuse a prior built image ref (skip the remote build)
 CAMPAIGN="${CAMPAIGN:-}"                    # pins one image across all tranches of a multi-run campaign
+
+# Dedicated conductor (OPT-IN, default off): when 1, bring up an ephemeral Fireworks
+# dedicated-GPU deployment for the conductor tier for THIS run and flip the shared
+# econ-litellm gateway to it (via a fly secret the gateway's econ-entrypoint.sh reads),
+# then tear both down at teardown. Escapes serverless rate-limiting (429/503 above ~2
+# parallel). Costs ~$80/hr while up (8x B200) — billed only during the run. One-time:
+# deploy the gateway with infra/litellm/econ-entrypoint.sh before the first flagged run.
+DEDICATED_CONDUCTOR="${DEDICATED_CONDUCTOR:-0}"
+GATEWAY_APP="${GATEWAY_APP:-econ-litellm}"
+GATEWAY_HEALTH_URL="${GATEWAY_HEALTH_URL:-https://$GATEWAY_APP.fly.dev/health/liveliness}"
+CONDUCTOR_SECRET="${CONDUCTOR_SECRET:-CONDUCTOR_DEPLOYMENT_PATH}"
 
 # worker sizing (shared-cpu-8x / 16GB — SWE-bench env images + DinD need the room)
 MEM="${MEM:-16384}"
@@ -148,6 +160,32 @@ for v in vs:
       flyctl volume destroy "$v" -a "$APP" --yes 2>&1 | tail -1 || true
     done
   fi
+}
+
+# ── dedicated-conductor lifecycle (only acts when DEDICATED_CONDUCTOR=1) ──────
+# cleanup_dedicated is idempotent + trap-driven so a mid-run abort can never orphan
+# the ~$80/hr Fireworks deployment: it unsets the gateway secret (reverting the
+# conductor to serverless) and deletes the deployment (stops billing).
+FW="$HERE/fireworks-conductor.sh"
+CLEANED=0
+cleanup_dedicated() {
+  [ "$DEDICATED_CONDUCTOR" = "1" ] || return 0
+  [ "$CLEANED" = "1" ] && return 0
+  CLEANED=1
+  log "dedicated conductor: reverting gateway secret + deleting deployment (idempotent)"
+  flyctl secrets unset "$CONDUCTOR_SECRET" -a "$GATEWAY_APP" 2>&1 | tail -1 || true
+  bash "$FW" down || true
+}
+# best-effort routing proof: does the gateway now advertise the dedicated path? A
+# NO means the gateway image lacks the flip wrapper → you'd pay for an unused GPU.
+verify_gateway_flip() {                     # verify_gateway_flip <dedicated-model-path>
+  local dep_id info p
+  dep_id="${1##*/deployments/}"
+  for p in /v1/model/info /model/info; do
+    info="$(curl -s --max-time 10 -H "Authorization: Bearer $LITELLM_API_KEY" "https://$GATEWAY_APP.fly.dev$p" 2>/dev/null || true)"
+    printf '%s' "$info" | grep -q "deployments/$dep_id" && return 0
+  done
+  return 1
 }
 
 # ── DESTROY_ONLY: nuke the fleet named by LABEL and exit ──────────────────────
@@ -432,6 +470,36 @@ for _ in $(seq 1 60); do
   printf '%s' "$ST" | grep -qi started && { echo "    $ST"; break; }
   sleep 5
 done
+
+# ── dedicated conductor: bring up the GPU + flip the gateway (opt-in) ──────────
+# Done AFTER the coordinator is up but BEFORE any worker starts resolving (workers
+# make conductor calls the moment they claim a task), so the gateway is flipped and
+# healthy first. The traps are set BEFORE `up` so even a failed bring-up is torn down.
+if [ "$DEDICATED_CONDUCTOR" = "1" ]; then
+  echo "==> DEDICATED_CONDUCTOR=1 — bringing up ephemeral Fireworks conductor deployment (~\$80/hr while up)"
+  trap 'cleanup_dedicated; exit 130' INT
+  trap 'cleanup_dedicated; exit 143' TERM
+  trap 'cleanup_dedicated' EXIT
+  bash "$FW" up || { echo "dedicated conductor: deployment did not come up — aborting"; destroy_fleet; exit 1; }
+  DPATH="$(bash "$FW" print-path)"
+  echo "==> flipping gateway $GATEWAY_APP conductor -> dedicated (secret $CONDUCTOR_SECRET); gateway restarts"
+  flyctl secrets set "$CONDUCTOR_SECRET=$DPATH" -a "$GATEWAY_APP" >/dev/null \
+    || { echo "failed to set gateway secret — aborting"; destroy_fleet; exit 1; }
+  echo "==> waiting for gateway health after restart ($GATEWAY_HEALTH_URL)"
+  gw_ok=0; code=""
+  for _ in $(seq 1 40); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GATEWAY_HEALTH_URL" 2>/dev/null || true)"
+    [ "$code" = "200" ] && { gw_ok=1; echo "    gateway healthy"; break; }
+    sleep 6
+  done
+  [ "$gw_ok" = "1" ] || echo "    WARN: gateway health not confirmed (last code=${code:-none}) — proceeding"
+  if verify_gateway_flip "$DPATH"; then
+    echo "    verified: gateway conductor now routes to the dedicated deployment"
+  else
+    echo "    WARN: could not confirm conductor routing to the dedicated deployment —"
+    echo "          is the gateway built with infra/litellm/econ-entrypoint.sh? deploy it once, else you pay for an unused GPU"
+  fi
+fi
 
 # ── create N WORKER machines, PACED (burst 3 then sleep) ──────────────────────
 # Machines API create is ~1 req/s (burst 3) per app → burst 3, sleep 3; retry
