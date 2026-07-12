@@ -99,4 +99,5 @@ log "sessionID=${SID:-<none>}"
 git add -A >/dev/null 2>&1 || true
 git -C "$REPO_DIR" diff --cached -- . \
   ':(exclude)opencode.json' ':(exclude).opencode' \
-  ':(exclude)opencode.db' ':(exclude)AGENTS.md'
+  ':(exclude)opencode.db' ':(exclude)AGENTS.md' \
+  ':(exclude)repro_issue.*'

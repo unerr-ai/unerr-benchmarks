@@ -225,7 +225,7 @@ for r in rows:
     # Exclude econ's own footprint defensively, in case it drops config files
     # into the repo (it shouldn't — unerr is compiled in, not installed, so
     # there's no daemon socket / entitlement / MCP config to strip here).
-    local diff_excludes=( ':(exclude).opencode' ':(exclude)opencode.json' ':(exclude).unerr' )
+    local diff_excludes=( ':(exclude).opencode' ':(exclude)opencode.json' ':(exclude).unerr' ':(exclude)repro_issue.*' )
     git add -A >/dev/null 2>&1 || true
     local patch_file="$inst_dir/patch.diff"
     git diff --cached -- . "${diff_excludes[@]}" > "$patch_file"
