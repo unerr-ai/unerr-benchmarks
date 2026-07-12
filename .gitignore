@@ -21,5 +21,12 @@ benchmark-results/
 # unerr local artifacts
 .unerr
 
+# Python bytecode cache (regeneratable; produced by coordinator/worker at runtime)
+__pycache__/
+*.pyc
+
+# Vendored agent binaries (build artifacts, >100MB; never commit — regenerate from the agent repo)
+**/vendor/opencode
+
 # local secrets (subscription token etc.) — never commit
 .env.local

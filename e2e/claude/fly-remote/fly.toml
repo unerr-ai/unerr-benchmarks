@@ -1,8 +1,0 @@
-# Minimal fly config for the Claude preflight app. Used only as build/deploy
-# context; the machine is launched explicitly by run.sh (flyctl machine run) and
-# is NOT auto-destroyed — it holds open for reuse.
-app = "unerr-bench-claude"
-primary_region = "iad"
-
-[build]
-  dockerfile = "Dockerfile"

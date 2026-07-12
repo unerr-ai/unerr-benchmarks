@@ -1,0 +1,138 @@
+{
+  "$schema": "./packages/opencode/opencode.schema.json",
+
+  // econ conductor tier (S1.1) — the 'Engineer' role (docs/design/models.md, Part II).
+  // The conductor is DeepSeek V4 Flash: a cheap, fast, agentic OSS engineer that plans the job,
+  // decides each step, and carries the working context for every turn by default. 1M-token context
+  // keeps the prompt cache warm across turns and the bill tiny ($0.14/$0.28 per M). Chosen because
+  // OpenRouter's routing API confirms Fireworks fronts deepseek-v4-flash (BYOK-served → billed to our
+  // own account), whereas it does NOT front qwen3.7-plus or minimax-m3 — both were live-tested and
+  // fell back to OR-credit billing, hitting the 402 wall. A live run requires OPENROUTER_API_KEY.
+  "default_agent": "conductor",
+
+  // econ small_model (S8.3) — the 'Assistant' role. Cheap stateless model for incidental tasks
+  // (title generation, summaries). Pinned to the executor/Assistant tier (gpt-oss-20b) so
+  // housekeeping never pays conductor/oracle rates.
+  "small_model": "openrouter/openai/gpt-oss-20b",
+
+  // econ top-level default model — the fallback for any agent with no model pinned.
+  // MUST be an econ tier: without it, OpenCode's defaultModel() (provider.ts:1897) falls back to
+  // the last recently-used model or the top of the OpenRouter models.dev catalog — which surfaced
+  // an unsupported model (e.g. Nano Banana Pro, an image model) on the native build/plan agents.
+  // Pinned to the conductor tier so every fallback lands on a supported econ model.
+  "model": "openrouter/deepseek/deepseek-v4-flash",
+
+  "agent": {
+    // Disable OpenCode's native primary agents so the Tab switcher only cycles econ's tiers.
+    // build/plan are hardcoded in src/agent/agent.ts and ship model-less; leaving them enabled
+    // put "build · <default model>" in the switcher and let it resolve to an unsupported model.
+    "build": { "disable": true },
+    "plan": { "disable": true },
+    "conductor": {
+      "model": "openrouter/deepseek/deepseek-v4-flash",
+      "description": "econ default conductor — the 'Engineer' (MODEL_SELECTION §1): DeepSeek V4 Flash, cheap+fast agentic OSS workhorse for everyday coding turns; plans, decides, holds context (S1.1). Fireworks-served on OpenRouter so BYOK bills our own account; 1M ctx, $0.14/$0.28 per M.",
+      "mode": "primary"
+    },
+    "oracle": {
+      "model": "openrouter/z-ai/glm-5.2",
+      "description": "econ oracle tier — the 'Expert' (MODEL_SELECTION §1): GLM 5.2, top open-weight coding score (SWE-bench Pro 62.1); called rarely for high-risk turns (S3.2, escalateAbove=70)",
+      "mode": "primary"
+    },
+    "reasoner": {
+      "model": "openrouter/z-ai/glm-5.2",
+      "description": "econ reasoner tier: shares the oracle model (GLM 5.2) for now, so hard steps (S3.7 hardStep) route straight to the Expert — 3 distinct models total (MODEL_SELECTION §1 pins no reasoner role). Kept as a separate tier slot so a cheaper CoT model can be swapped in later to re-separate it from oracle.",
+      "mode": "primary",
+      "hidden": true
+    },
+    "executor": {
+      "model": "openrouter/openai/gpt-oss-20b",
+      "description": "econ executor tier — the 'Assistant' (MODEL_SELECTION §1): gpt-oss-20b (US-made, ~3.6B active MoE, fast on CPU) for delegable chores — recon/lint/docstrings (S4.1); spawned per-task via the task tool, returns a digest",
+      "mode": "subagent"
+    }
+  },
+
+  // econ safe permission defaults (S8.3 hardening). Read-only tools are allowed; mutating,
+  // network, and out-of-project actions require confirmation or are denied. Precedence is
+  // last-match-wins (findLast in src/permission/index.ts), so the bash wildcard is first and the
+  // specific deny patterns that override it come after. Loosen per-project as trust is established.
+  "permission": {
+    "read": "allow",
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "lsp": "allow",
+    "todowrite": "allow",
+    "question": "allow",
+    "task": "allow",
+    "edit": "ask",
+    "webfetch": "ask",
+    "websearch": "ask",
+    "doom_loop": "ask",
+    "skill": "ask",
+    "external_directory": "deny",
+    "bash": {
+      // Reading/searching/listing code goes through econ's read tools, never bash — so `ls`/`cat`
+      // are intentionally NOT allowed here (they fall to the "*" ask, which a denial then bounces
+      // back to the model so it switches to read/search). bash stays for running things only.
+      "*": "ask",
+      "pwd": "allow",
+      "git status": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git push*": "ask",
+      "curl *": "ask",
+      "wget *": "ask",
+      "sudo *": "deny",
+      "rm -rf *": "deny",
+      "rm -fr *": "deny"
+    }
+  },
+
+  // econ loop-on-deny — a denied tool call is returned to the model as feedback so it recovers
+  // (e.g. a gated bash read → switch to read/search) instead of dead-ending the turn with no
+  // output. Without this, processor.ts breaks the agent loop on the first deny (shouldBreak).
+  "experimental": {
+    "continue_loop_on_deny": true,
+    "redirect_bash_reads": true
+  },
+
+  // econ OpenRouter provider — the always-available global baseline. openrouter is a first-class
+  // built-in provider; we override only its display name + key env var and pin the three tier
+  // model IDs so they resolve regardless of the upstream models.dev catalog.
+  //
+  // Fireworks BYOK routing: each model carries options.provider so OpenRouter prefers our
+  // Fireworks endpoint (BYOK bills our own Fireworks account, sidestepping the OR credit/prompt
+  // wall). This lands verbatim at providerOptions.openrouter.provider in the request body
+  // (config model.options → mergeOptions in session/llm/request.ts → ProviderTransform.providerOptions
+  // → { openrouter: options }, read by @openrouter/ai-sdk-provider). allow_fallbacks:true is a hard
+  // requirement: OpenRouter's routing API confirms Fireworks fronts deepseek-v4-flash, gpt-oss-20b,
+  // and glm-5.2 (all three tiers) — so every tier is BYOK-served and billed to our own account.
+  // Fallback stays on so a tier degrades to another provider instead of erroring. Live-tested:
+  // gpt-oss-20b routes through Fireworks BYOK on zero OR credits; qwen3.7-plus and minimax-m3 did NOT
+  // (no Fireworks endpoint on OpenRouter) and hit the 402 wall — the conductor was moved to
+  // deepseek-v4-flash (Fireworks-served, 1M ctx, $0.14/$0.28 per M).
+  "provider": {
+    "openrouter": {
+      "name": "OpenRouter",
+      "env": ["OPENROUTER_API_KEY"],
+      "models": {
+        "deepseek/deepseek-v4-flash": { "name": "DeepSeek V4 Flash (econ conductor)", "limit": { "context": 1000000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true } } },
+        "z-ai/glm-5.2": { "name": "GLM 5.2 (econ oracle/reasoner)", "reasoning": true, "limit": { "context": 200000, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "high", "exclude": true } } },
+        "openai/gpt-oss-20b": { "name": "gpt-oss-20b (econ executor/assistant)", "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "options": { "provider": { "order": ["fireworks"], "allow_fallbacks": true }, "reasoning": { "effort": "low", "exclude": true } } }
+      }
+    }
+  }
+
+  // econ in-region inference + data residency (S8.1) — GATED. Real in-region (India) OSS
+  // endpoints are not yet provisioned; this is the scaffolding contract. To route a tier to
+  // in-region infra, add a provider pointing at the India gateway (OpenAI-compatible) and point
+  // the tier's agent model at "econ-in/<model>". The per-tier fallback chain + data-residency
+  // policy lives in packages/code-intelligence/src/region.ts (DEFAULT_REGION_CONFIG,
+  // resolveTierChain, selectEndpoint). See docs/features/07-hardening-hosting-ship.md.
+  //
+  // econ model fallback (S8.3) — expressed config-first: each tier's ordered endpoint chain is
+  // held in region.ts (in-region preferred, global OpenRouter as fallback). OpenCode has no
+  // native per-model failover field, so runtime auto-failover on a 5xx is a GATED minimal
+  // wrapper (docs/features/07-hardening-hosting-ship.md). The safe always-available baseline today is the openrouter
+  // provider above; small_model is pinned so housekeeping degrades cheaply.
+}

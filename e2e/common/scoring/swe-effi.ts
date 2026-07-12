@@ -10,7 +10,7 @@
  * This module is pure scoring over trajectory records — usable the moment you
  * have Arm A / Arm B trajectories (see README). No agent run happens here.
  */
-import { PROVIDER_RATES, dollarsSaved, fmtUsd } from "../../../internal/lib/pricing.js";
+import { PROVIDER_RATES, dollarsSaved, fmtUsd } from "../lib/pricing.js";
 
 /** One SWE-bench instance attempt by one arm. */
 export interface Trajectory {

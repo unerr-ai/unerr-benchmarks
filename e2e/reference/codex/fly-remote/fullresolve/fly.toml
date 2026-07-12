@@ -1,0 +1,14 @@
+# Full-resolve SWE-bench runner — minimal app config.
+#
+# Used ONLY by run.sh's `flyctl deploy --build-only --config this-file` to give
+# flyctl the app name without it trying to rebuild config from (nonexistent)
+# machines. The actual machine is launched by `flyctl machine run` with explicit
+# flags (volume, vm size, env) — NOT from this file. No [http_service]: this is a
+# one-shot batch job, not a server. No [mounts]/[[vm]] here on purpose (they would
+# add validation surface to --build-only and are passed as run.sh flags instead).
+# set to your fly app name (or pass --app)
+app = "swebench-agent-codex-fullresolve"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"

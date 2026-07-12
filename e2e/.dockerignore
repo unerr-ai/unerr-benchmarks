@@ -3,8 +3,8 @@
 # everything the image does NOT COPY so the remote-builder upload stays small.
 #
 # Only builds that use e2e/ as their context read this file. The single-machine
-# arm builds use a subdir context (e2e/econ, e2e/codex, e2e/claude) and read their
-# OWN per-arm .dockerignore, so this file does not affect them.
+# arm builds use a subdir context (e2e/econ, e2e/reference/codex, e2e/reference/claude)
+# and read their OWN per-arm .dockerignore, so this file does not affect them.
 #
 # KEEP: econ/local-docker/{run-benchmark.py,Dockerfile.*,context (incl. vendor/)},
 #       econ/{report.py,econ-telemetry.py,econ-tier-cost.py}, distributed/**.
@@ -28,8 +28,8 @@
 **/*.tgz
 
 # other arms are not part of the econ fleet image
-claude/
-codex/
+reference/claude/
+reference/codex/
 
 # EXCEPTION to the `**/node_modules` rule above: the econ toolbox vendors econ's
 # `.opencode/` as `vendor/dot-opencode/`, and its `.opencode/tool/*.ts` project

@@ -1,0 +1,9 @@
+# Minimal fly config for the Claude preflight app. Used only as build/deploy
+# context; the machine is launched explicitly by run.sh (flyctl machine run) and
+# is NOT auto-destroyed — it holds open for reuse.
+# set to your fly app name (or pass --app)
+app = "swebench-agent-claude"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"

@@ -1,7 +1,7 @@
 # e2e/econ — econ agent (unerr embedded) on SWE-bench
 
 Single-arm benchmark: **econ**, the team's OpenCode-fork coding agent, solving
-SWE-bench instances headless. Unlike the `e2e/codex/` and `e2e/claude/` arms,
+SWE-bench instances headless. Unlike the `e2e/reference/codex/` and `e2e/reference/claude/` arms,
 there is nothing to attach or flip here — see below — so this directory just
 runs econ and measures its resolve rate, cost, and token usage.
 
@@ -30,8 +30,8 @@ That wiring defines this benchmark:
   This directory simply runs econ and records what it does.
 
 The comparison this benchmark supports is **cross-agent**: run the same
-SWE-bench instance set through this arm and through `e2e/codex/` (and
-`e2e/claude/`) to build a Codex-vs-econ table — resolve rate, $/instance,
+SWE-bench instance set through this arm and through `e2e/reference/codex/` (and
+`e2e/reference/claude/`) to build a Codex-vs-econ table — resolve rate, $/instance,
 tokens/instance, turns/instance — rather than an on/off delta within one
 agent.
 
@@ -124,6 +124,17 @@ python -m swebench.harness.run_evaluation \
 python report.py --meta results/meta.jsonl --grade-report <run_evaluation output>
 ```
 
+### Targeted runs by difficulty tier
+
+To run specific instances by hardness rather than the default Mini set, SWE-bench
+Verified's per-instance `difficulty` annotation is bucketed into ready-to-run id
+lists under **`../swebench-verified-difficulty/`** (easy 194 · medium 261 · hard
+42 · veryhard 3). The fly full-resolve runner takes an `IDS=` override
+(comma-separated, bypasses the Mini-10 default); see
+`fly-remote/fullresolve/RUNBOOK.md` §2b and the difficulty dir's README. This is
+the only way to exercise the non-django/cross-repo hard tier — the Mini-10/Mini-50
+subsets are django/sphinx only.
+
 ## What performance & cost you get
 
 - **Performance** — resolve rate from the standard
@@ -183,10 +194,10 @@ Two caveats worth knowing before reading that table:
    total is still correct). If you need them split, `data.agent` in the
    SQLite session log is what distinguishes them.
 
-## How it compares to e2e/codex & e2e/claude
+## How it compares to e2e/reference/codex & e2e/reference/claude
 
 There is no in-arm A/B here. The comparison is cross-agent: run the same
-SWE-bench instance set through `e2e/codex/` and `e2e/claude/` and this arm,
+SWE-bench instance set through `e2e/reference/codex/` and `e2e/reference/claude/` and this arm,
 then line up the three `cost-report.json` outputs into one table — resolve %,
 $/instance, $/resolved instance, tokens/instance, turns/instance. That table
 is the actual "does unerr help" signal for econ: not an on/off flip, but
@@ -198,7 +209,7 @@ fraction of Codex/Claude's per-instance cost.
 - **Per-instance repo checkout / containerisation** — `run-econ.sh` currently
   assumes `REPO_DIR` is already the instance's checked-out repo at
   `base_commit` (the same `/testbed`-style assumption the codex local arm
-  makes). A Docker-per-instance wrapper mirroring `e2e/codex/local-docker` is
+  makes). A Docker-per-instance wrapper mirroring `e2e/reference/codex/local-docker` is
   a reasonable future add, but building and maintaining per-instance repo
   state is the harness's responsibility, not this script's.
 - **Exact dist binary path** — confirm

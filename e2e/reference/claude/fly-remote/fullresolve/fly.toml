@@ -1,0 +1,12 @@
+# Full-resolve Claude runner — minimal app config.
+#
+# Used ONLY by run.sh's `flyctl deploy --build-only --config this-file` to give
+# flyctl the app name without it trying to rebuild config from (nonexistent)
+# machines. The actual machine is launched by `flyctl machine run` with explicit
+# flags (volume, vm size, env). One-shot batch job, not a server.
+# set to your fly app name (or pass --app)
+app = "swebench-agent-claude-fullresolve"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"

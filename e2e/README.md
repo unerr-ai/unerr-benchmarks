@@ -1,112 +1,76 @@
-# e2e — End-to-end bill benchmark
+# e2e — SWE-bench Verified benchmark
 
-Answers the question: **does unerr lower the API bill for a real coding agent on real tasks?**
+Answers: **does econ (unerr embedded) resolve competitively against reference
+coding agents, and at what cost?**
 
-The benchmark runs the same coding agent on the same SWE-bench instances twice — once
-with unerr's MCP tools attached (treatment) and once without (baseline). A/B delta
-reported: **resolve rate**, **total tokens + $**, **mean turns**.
+One execution mode: a work-stealing fleet of fly.io machines resolves + grades
+SWE-bench instances in parallel. Running it with `MACHINES=1` is the sequential
+case — there is no separate sequential runner.
 
 ```
-SWE-bench instances (Lite / Verified Mini / Verified)
+SWE-bench Verified instances
          │
-         ├── Arm A  Codex, no unerr  ──┐
-         └── Arm B  Codex + unerr    ──┴─► scoring/  (swe-effi.ts) ──► ab-report.md
+         ├── e2e/econ                agent-under-test — econ (unerr embedded), no on/off flip
+         ├── e2e/reference/codex      reference arm — Codex CLI, run native
+         └── e2e/reference/claude     reference arm — Claude Code CLI, run native
+                     │
+                     ▼
+         swebench.harness.run_evaluation (same grader, every arm)
+                     │
+                     ▼
+         e2e/common/scoring  (SWE-Effi)  →  resolve rate, $/instance, tokens, turns
 ```
 
 ## Directory map
 
 | Path | Role |
 |---|---|
-| `codex/local-docker/` | Full resolve-rate + cost run: Codex ± unerr inside official SWE-bench Docker images, graded by the standard harness. Needs local Docker + ~30 GB disk. |
-| `codex/fly-remote/` | No-local-Docker variant: image built by fly's remote builder, one-shot machine, results scraped back. Localization A/B only (no resolution grading yet). |
-| `common/` | Shared offline-Pro entitlement (`dev-entitlement.mjs`, `lib.sh`), preflight health-check (`preflight.sh`, `mcp-healthcheck.mjs`), and SWE-Effi scoring (`scoring/`). |
-| `econ/` | Econ-coding-agent arm — scaffolded separately; see its own README. |
+| `distributed/` | The runner — `run-distributed.sh` launches a coordinator + N worker machines on fly.io, each claiming and resolving+grading one instance at a time, then merges results into one bundle. |
+| `econ/` | Agent-under-test harness — econ (unerr compiled in) on SWE-bench. Single-arm: there's nothing to attach or flip, so this measures econ's own resolve rate/cost/tokens. |
+| `reference/codex/` | Codex reference arm (`local-docker/` + `fly-remote/` backends) — comparison baseline. |
+| `reference/claude/` | Claude Code reference arm (`local-docker/` + `fly-remote/` backends) — comparison baseline. |
+| `common/` | Shared offline-Pro entitlement (`dev-entitlement.mjs`, `lib.sh`), preflight health-check, and SWE-Effi scoring (`scoring/`). |
 
-## Tiered launcher
-
-Use `codex/run-tier.sh` to route each tier to the right backend. The script enforces the routing policy and prints the resolved command before execution.
-
-| Tier | Size | Default backend | Backend options | What it produces |
-|---|--:|---|---|---|
-| smoke | 1 | local-docker | local only | full resolve + cost bill (on the laptop) |
-| pilot | 5 | local-docker | local OR fly | local = full bill; fly = localization A/B |
-| mini | 50 | fly | fly OR local | fly = localization A/B at scale; `--backend local` = full bill |
-
-**Commands:**
-```bash
-./codex/run-tier.sh smoke                       # 1 instance, full bill, local-docker
-./codex/run-tier.sh pilot                       # 5 instances, full bill, local-docker
-./codex/run-tier.sh pilot --backend fly         # 5 instances, localization A/B, fly
-./codex/run-tier.sh mini                        # 50 instances, localization A/B, fly
-./codex/run-tier.sh mini --backend local        # 50 instances, full bill, local-docker
-./codex/run-tier.sh <tier> --dry-run            # print the resolved command, run nothing
-```
-
-**Critical notes:**
-
-1. **fly is localization-only today** — it runs the SWE-bench *Lite* file-naming A/B (codex names the buggy file, scored vs gold-patch files). It does NOT apply patches or run the grader, so it does NOT produce the resolve-rate/$ bill. The full-bill mini therefore stays on local-docker on purpose (`mini --backend local`).
-
-2. **Different datasets** — local-docker uses SWE-bench **Verified** (full resolve); fly uses SWE-bench **Lite** (localization). They are not directly comparable as absolute numbers.
-
-3. **fly mini may need more memory** — the 50-instance mini clones large repos (django, sympy, scikit-learn) to reach 50 instances. The fly machine may need memory/disk adjustment via `MEM=`/`CPUS=` env on `run.sh`.
-
-## Shared runtime: offline Pro entitlement
-
-Both codex backends use unerr at the Pro tier with **no login and no cloud** via two
-env vars injected before any agent run:
-
-- `UNERR_ENTITLEMENT_KID` / `UNERR_ENTITLEMENT_PUBKEY` — minted by
-  `common/dev-entitlement.mjs mint pro`; lifts the free-tier 1-repo cap so unerr
-  runs in every instance repo.
-- `UNERR_TOKEN` — any non-blank value satisfies the login-presence wall
-  (`src/cloud/login-gate.ts:hasHeadlessToken`); no cloud call is ever made.
-
-Order matters: **always export these before `unerr pm start`** so the daemon
-inherits them and enforces Pro at spawn.
-
-These vars are set by `unerr_offline_pro()` in `common/lib.sh`, sourced by both
-backends.
-
-## Shared preflight
-
-Before spending any tokens, verify the entire unerr chain works in-image:
+## Quick-start
 
 ```bash
-# local-docker
-python e2e/codex/local-docker/run-benchmark.py --instances 1 --preflight
+cd distributed
 
-# fly-remote: exit after the image build and a short smoke
-SELECT=requests:1 LIMIT=1 e2e/codex/fly-remote/run.sh
+# smoke first, always
+MACHINES=2 ARM=econ LABEL=dist-smoke \
+  TASKS="django__django-11880,django__django-11951,django__django-11790" \
+  ./run-distributed.sh
+
+# a real tranche
+MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
 ```
 
-`common/preflight.sh` checks (in order): toolbox binaries → native modules →
-offline Pro minted → unerrd up → `unerr install codex` wrote config → MCP
-`initialize → tools/list → file_read` all succeed (no `-32003`/`-32004` error).
+Full launch/monitor/pull/teardown detail, invariants, and the env contract
+(`FLY_ORG`, `FLY_APP`, `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `CPU_KIND`,
+`CAMPAIGN`): [`distributed/README.md`](distributed/README.md). Methodology and
+results: [`../docs/METHODOLOGY.md`](../docs/METHODOLOGY.md),
+[`../docs/RESULTS.md`](../docs/RESULTS.md).
 
 ## Scoring: SWE-Effi (`common/scoring/`)
 
 Raw "fewer tokens" can be won by *failing faster*. SWE-Effi (arXiv 2509.09853)
 scores resolve rate *against* resources: the normalized AUC of the token-bounded
-effectiveness curve is the headline. "More resolves per token" is the defensible claim.
+effectiveness curve is the headline. "More resolves per token" is the defensible
+claim. See `common/scoring/README.md` for the trajectory schema and metric
+definitions.
 
-Once you have per-instance trajectory JSONL from both arms:
+## Shared runtime: offline Pro entitlement
 
-```bash
-tsx e2e/common/scoring/run.ts armA-baseline.jsonl armB-unerr.jsonl
-# → e2e/common/results/ab-report.md
-```
+The reference arms (`reference/codex/`, `reference/claude/`) run unerr at the Pro
+tier with **no login and no cloud** via two env vars injected before any agent
+run:
 
-See `common/scoring/README.md` for the trajectory schema and metric definitions.
+- `UNERR_ENTITLEMENT_KID` / `UNERR_ENTITLEMENT_PUBKEY` — minted by
+  `common/dev-entitlement.mjs mint pro`; lifts the free-tier 1-repo cap so unerr
+  runs in every instance repo.
+- `UNERR_TOKEN` — any non-blank value satisfies the login-presence wall; no
+  cloud call is ever made.
 
-## Quick-start
-
-```bash
-# local-docker full run (smoke first)
-cd e2e/codex/local-docker
-./build-toolbox.sh                                     # build toolbox image
-python run-benchmark.py --instances 1 --preflight      # verify, $0
-python run-benchmark.py --instances 1 --mode both      # smoke, ~$0.4
-
-# fly-remote localization A/B (no local Docker)
-SELECT=requests:1 LIMIT=1 e2e/codex/fly-remote/run.sh
-```
+These vars are set by `unerr_offline_pro()` in `common/lib.sh`, sourced by both
+reference backends. econ doesn't need any of this — unerr is compiled directly
+into its tool registry, not attached externally.

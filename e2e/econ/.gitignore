@@ -1,3 +1,5 @@
 .env.local
 results/
 __pycache__/
+# vendored by fly-remote/fullresolve/run.sh from e2e/distributed/lib/boot.sh
+/lib/

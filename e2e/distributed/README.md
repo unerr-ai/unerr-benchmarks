@@ -6,7 +6,7 @@ is the concise operator doc: launch, monitor, pull, teardown.
 
 ## 0. Invariants (do not violate)
 - **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`.
-- **Fly org = `vamsee-k-933` (team)** — never the personal org. App `unerr-bench-dist` (fixed; every
+- **Fly org = `your-fly-org` (team)** — never the personal org. App `swebench-agent-dist` (fixed; every
   run is scoped by `fleet=<LABEL>` machine metadata, not a separate app per run).
 - **Web search OFF** (baseline-comparable): the launcher exports `EXA_API_KEY` unset unless
   `WEBSEARCH=1` — same rule as the single-machine econ runbook. SWE-bench fixes are public on

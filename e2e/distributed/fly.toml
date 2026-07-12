@@ -14,9 +14,11 @@
 # [[vm]] here either; those are `flyctl machine run` flags (they differ per role:
 # coordinator = shared-cpu-1x + 1 volume, workers = shared-cpu-8x + no volume).
 #
-# App name is the FIXED `unerr-bench-dist`; each run is scoped by the `fleet=<LABEL>`
-# machine metadata (LABEL doubles as RUN_ID), so teardown targets one run's machines.
-app = "unerr-bench-dist"
+# App name is the FIXED `swebench-agent-dist` (override via run-distributed.sh's
+# APP= env); each run is scoped by the `fleet=<LABEL>` machine metadata (LABEL
+# doubles as RUN_ID), so teardown targets one run's machines.
+# set to your fly app name (or pass --app)
+app = "swebench-agent-dist"
 primary_region = "iad"
 
 [build]

@@ -21,7 +21,7 @@ MACHINES=10 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
 ## 1. Architecture (decided)
 
 ```
-        host (laptop)                         fly app  unerr-bench-dist-<label>  (org vamsee-k-933)
+        host (laptop)                         fly app  swebench-agent-dist-<label>  (org your-fly-org)
   ┌──────────────────────┐             ┌───────────────────────────────────────────────────────┐
   │ run-distributed.sh   │  create     │  COORDINATOR  (shared-cpu-1x / 1GB, 1 small volume)    │
   │  build image         │────────────▶│  ┌─────────────────────────────────────────────────┐  │

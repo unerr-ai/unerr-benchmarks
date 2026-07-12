@@ -1,0 +1,8 @@
+# Keep the fly build context (e2e/reference/claude) small and clean.
+**/results/
+**/logs/
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/.env.local
+**/node_modules/

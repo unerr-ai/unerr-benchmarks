@@ -32,18 +32,20 @@ ECON_REPO="${ECON_REPO:-$HERE/../../../econ-coding-agent}"         # sibling of 
 cd "$HERE"
 
 # ── config ────────────────────────────────────────────────────────────────────
-APP="${APP:-unerr-bench-dist}"              # FIXED app; each run scoped by fleet=<LABEL> metadata
-ORG="${FLY_ORG:-vamsee-k-933}"              # team space; override via FLY_ORG
+APP="${APP:-swebench-agent-dist}"           # FIXED app; each run scoped by fleet=<LABEL> metadata
+ORG="${FLY_ORG:-your-fly-org}"               # fly org; override via FLY_ORG
 REGION="${REGION:-iad}"
 ARM="${ARM:-econ}"
 LABEL="${LABEL:-}"                          # REQUIRED, unique per run — doubles as RUN_ID + fleet metadata
 MACHINES="${MACHINES:-}"                    # REQUIRED (unless DESTROY_ONLY) — worker count N
 DESTROY_ONLY="${DESTROY_ONLY:-0}"           # 1 = only tear down the fleet named by LABEL, then exit
 IMAGE="${IMAGE:-}"                          # reuse a prior built image ref (skip the remote build)
+CAMPAIGN="${CAMPAIGN:-}"                    # pins one image across all tranches of a multi-run campaign
 
 # worker sizing (shared-cpu-8x / 16GB — SWE-bench env images + DinD need the room)
 MEM="${MEM:-16384}"
 CPUS="${CPUS:-8}"
+CPU_KIND="${CPU_KIND:-shared}"              # 'shared' (default) or 'performance' — dedicated cores; A/B knob for the CPU-starvation → stuck-escalation hypothesis
 ROOTFS_GB="${ROOTFS_GB:-}"                  # OPTIONAL ephemeral-rootfs size (see NOTE at worker create)
 # fly hard-caps config.rootfs.size_gb at 50 (0/unset = image default). Clamp so a
 # too-large value degrades to the max instead of failing every worker create.
@@ -165,6 +167,32 @@ case "$MACHINES" in (*[!0-9]*|'') echo "MACHINES must be a positive integer"; ex
 OUTDIR="$HERE/out/dist-$LABEL"
 mkdir -p "$OUTDIR"
 
+# ── campaign image pin (locks one image across all tranches of a multi-run
+# campaign) — skipped entirely when CAMPAIGN is unset (DESTROY_ONLY already
+# exited above). The first tranche writes the lock once IMG is resolved
+# (below, after the build/reuse step); every later tranche in the same
+# campaign must resolve to the identical image — a stray IMAGE or a fresh
+# build must not sneak into a pinned campaign, so a mismatch here is fatal.
+CAMPAIGN_LOCK="$HERE/out/campaign-$CAMPAIGN.json"
+if [ -n "$CAMPAIGN" ] && [ -f "$CAMPAIGN_LOCK" ]; then
+  LOCKED_IMAGE="$("$PY_HOST" -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    print(json.load(f).get("image", ""))
+' "$CAMPAIGN_LOCK")"
+  [ -n "$LOCKED_IMAGE" ] || { echo "campaign lock $CAMPAIGN_LOCK has no image field — remove it and re-run"; exit 1; }
+  if [ -z "$IMAGE" ]; then
+    IMAGE="$LOCKED_IMAGE"
+    echo "==> campaign '$CAMPAIGN': pinned image $IMAGE (from lock)"
+  elif [ "$IMAGE" = "$LOCKED_IMAGE" ]; then
+    echo "==> campaign '$CAMPAIGN': IMAGE matches lock ($IMAGE)"
+  else
+    echo "==> campaign '$CAMPAIGN': IMAGE=$IMAGE conflicts with locked image $LOCKED_IMAGE — refusing to run" >&2
+    echo "    a stray IMAGE or a fresh build must not sneak into a pinned campaign" >&2
+    exit 1
+  fi
+fi
+
 # ── auth: LiteLLM gateway key (never printed) — prefer env, else e2e/econ/.env.local (from run.sh) ──
 if [ -z "${LITELLM_API_KEY:-}" ] && [ -f "$ECON_DIR/.env.local" ]; then
   LITELLM_API_KEY="$(grep -E '^LITELLM_API_KEY=' "$ECON_DIR/.env.local" | head -1 | sed 's/^LITELLM_API_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
@@ -256,6 +284,7 @@ else
 fi
 
 # ── build the fleet image on fly's remote builder (context = e2e) ─────────────
+IMG_BUILT_THIS_RUN=0
 if [ -n "$IMAGE" ]; then
   IMG="$IMAGE"; echo "==> reusing image: $IMG"
 else
@@ -269,8 +298,92 @@ else
     --dockerfile "$HERE/Dockerfile.dist" "$E2E_DIR" 2>&1 | tee "$OUTDIR/build.log"
   IMG="$(grep -oE 'registry\.fly\.io/[^ ]+' "$OUTDIR/build.log" | tail -1)"
   [ -n "$IMG" ] || { echo "could not determine built image ref"; exit 1; }
+  IMG_BUILT_THIS_RUN=1
   echo "==> image: $IMG"
 fi
+
+# ── econ provenance for the campaign lock / run-info stamp (below) ────────────
+# unknown-prebuilt when IMG was reused (IMAGE=/campaign pin) rather than built
+# from the local $ECON_REPO checkout this run.
+if [ "$IMG_BUILT_THIS_RUN" = "1" ]; then
+  ECON_COMMIT="$(git -C "$ECON_REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(git -C "$ECON_REPO" status --porcelain 2>/dev/null)" ]; then ECON_DIRTY=true; else ECON_DIRTY=false; fi
+else
+  ECON_COMMIT="unknown-prebuilt"
+  ECON_DIRTY=false
+fi
+
+# ── campaign lock-write (only the tranche that first resolves this image) ─────
+if [ -n "$CAMPAIGN" ] && [ ! -f "$CAMPAIGN_LOCK" ]; then
+  CAMPAIGN="$CAMPAIGN" LOCK_IMG="$IMG" LOCK_ECON_COMMIT="$ECON_COMMIT" LOCK_ECON_DIRTY="$ECON_DIRTY" \
+  LOCK_DATASET="$DATASET" LOCK_SPLIT="$SPLIT" LOCK_LABEL="$LABEL" LOCK_PATH="$CAMPAIGN_LOCK" \
+  "$PY_HOST" -c '
+import os, json
+from datetime import datetime, timezone
+env = os.environ
+d = {
+    "campaign": env["CAMPAIGN"],
+    "image": env["LOCK_IMG"],
+    "econ_commit": env["LOCK_ECON_COMMIT"],
+    "econ_dirty": env["LOCK_ECON_DIRTY"] == "true",
+    "dataset": env["LOCK_DATASET"],
+    "split": env["LOCK_SPLIT"],
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "created_by_label": env["LOCK_LABEL"],
+}
+with open(env["LOCK_PATH"], "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+'
+  echo "==> campaign '$CAMPAIGN': lock written -> $CAMPAIGN_LOCK (image $IMG)"
+fi
+
+# ── run-info.json stamp (always — one per run, campaign or not) ───────────────
+mkdir -p "$OUTDIR"
+CAMPAIGN="$CAMPAIGN" RI_LABEL="$LABEL" RI_IMG="$IMG" \
+RI_ECON_COMMIT="$ECON_COMMIT" RI_ECON_DIRTY="$ECON_DIRTY" \
+RI_CPU_KIND="$CPU_KIND" RI_MEM="$MEM" RI_CPUS="$CPUS" RI_MACHINES="$MACHINES" \
+RI_REGION="$REGION" RI_DATASET="$DATASET" RI_SPLIT="$SPLIT" \
+RI_SUITE="${SUITE:-}" RI_TASKS="${TASKS:-}" RI_TASKS_FILE="${TASKS_FILE:-}" \
+RI_WEBSEARCH="${WEBSEARCH:-0}" RI_OUT="$OUTDIR/run-info.json" \
+"$PY_HOST" -c '
+import os, json
+from datetime import datetime, timezone
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return v
+
+def _opt(v):
+    return v if v else None
+
+env = os.environ
+d = {
+    "label": env["RI_LABEL"],
+    "campaign": _opt(env.get("CAMPAIGN", "")),
+    "image": env["RI_IMG"],
+    "econ_commit": env["RI_ECON_COMMIT"],
+    "econ_dirty": env["RI_ECON_DIRTY"] == "true",
+    "cpu_kind": env["RI_CPU_KIND"],
+    "mem": _int(env["RI_MEM"]),
+    "cpus": _int(env["RI_CPUS"]),
+    "machines": _int(env["RI_MACHINES"]),
+    "region": env["RI_REGION"],
+    "dataset": env["RI_DATASET"],
+    "split": env["RI_SPLIT"],
+    "suite": _opt(env.get("RI_SUITE", "")),
+    "tasks": _opt(env.get("RI_TASKS", "")),
+    "tasks_file": _opt(env.get("RI_TASKS_FILE", "")),
+    "websearch": env["RI_WEBSEARCH"] == "1",
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+with open(env["RI_OUT"], "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+'
+echo "==> run-info: $OUTDIR/run-info.json"
 
 # ── run_machine: `flyctl machine run` with a MANIFEST_UNKNOWN / 429 / capacity retry ──
 # The just-pushed image manifest can lag behind the machine-create call
@@ -326,19 +439,20 @@ done
 # lives on ephemeral rootfs (PLAN decision 2). NOTE: if flyctl in use lacks
 # `--rootfs-size`, leave ROOTFS_GB unset (default rootfs) and, if the env-image
 # unpack is IOPS-starved on the smoke, flip a worker to a volume instead.
-echo "==> creating $MACHINES worker(s) (${MEM}MB/${CPUS}cpu, no volume, paced <=1/s)"
+echo "==> creating $MACHINES worker(s) (${MEM}MB/${CPUS}cpu/${CPU_KIND}, no volume, paced <=1/s)"
 ROOTFS_FLAG=(); [ -n "$ROOTFS_GB" ] && ROOTFS_FLAG=(--rootfs-size "$ROOTFS_GB")
 WORKERS_OK=0
 for i in $(seq 1 "$MACHINES"); do
   if run_machine "$OUTDIR/worker-$i-run.log" "$IMG" \
       --app "$APP" --region "$REGION" \
-      --vm-memory "$MEM" --vm-cpus "$CPUS" "${ROOTFS_FLAG[@]+"${ROOTFS_FLAG[@]}"}" \
+      --vm-memory "$MEM" --vm-cpus "$CPUS" --vm-cpu-kind "$CPU_KIND" "${ROOTFS_FLAG[@]+"${ROOTFS_FLAG[@]}"}" \
       --restart no \
       --entrypoint /work/distributed/worker/worker-entrypoint.sh \
       --metadata fleet="$LABEL" --metadata role=worker \
       -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e RUN_ID="$LABEL" \
       -e DATASET="$DATASET" -e SPLIT="$SPLIT" \
       -e PER_INSTANCE_TIMEOUT="$PER_INSTANCE_TIMEOUT" -e GRADE_WORKERS="$GRADE_WORKERS" \
+      -e MAX_ARTIFACT_TEXT_BYTES="${MAX_ARTIFACT_TEXT_BYTES:-5000000}" -e MAX_ARTIFACT_DB_BYTES="${MAX_ARTIFACT_DB_BYTES:-8000000}" \
       -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY"; then
     WID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/worker-$i-run.log" | head -1 | awk '{print $3}')"
     WORKERS_OK=$((WORKERS_OK + 1))
