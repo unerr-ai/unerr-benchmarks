@@ -186,16 +186,19 @@ class Queue:
         events_jsonl: Optional[str] = None,
         err_txt: Optional[str] = None,
         db_b64: Optional[str] = None,
+        engine_log: Optional[str] = None,
     ) -> dict[str, bool]:
         """Idempotent completion upsert: mark `done` and store the results.
 
         Accepted even if the lease already expired — at-least-once delivery plus
         an idempotent overwrite makes a double-run effectively-once.
 
-        events_jsonl/err_txt/db_b64 (S7b) are the instance's raw transcript —
-        optional, since the worker bounds/omits them (see worker-loop.py
-        _read_artifacts) — stored verbatim so coordinator-entrypoint.sh can
-        write them back out under results/<label>/artifacts/<iid>/ at drain.
+        events_jsonl/err_txt/db_b64 (S7b) and engine_log (S7c: the full,
+        tail-capped econ engine log — orchestration markers) are the instance's
+        raw transcript — optional, since the worker bounds/omits them (see
+        worker-loop.py _read_artifacts) — stored verbatim so
+        coordinator-entrypoint.sh can write them back out under
+        results/<label>/artifacts/<iid>/ at drain.
         """
         now = int(time.time())
         resolved_int = _as_int_bool(resolved)
@@ -203,7 +206,7 @@ class Queue:
             cur = self._conn.execute(
                 "UPDATE tasks SET status='done', patch=?, report_json=?, "
                 "  meta_json=?, resolved=?, events_jsonl=?, err_txt=?, db_b64=?, "
-                "  completed_by=?, completed_at=? "
+                "  engine_log=?, completed_by=?, completed_at=? "
                 "WHERE instance_id=?",
                 (
                     patch,
@@ -213,6 +216,7 @@ class Queue:
                     events_jsonl,
                     err_txt,
                     db_b64,
+                    engine_log,
                     worker_id,
                     now,
                     instance_id,
@@ -386,6 +390,7 @@ class Handler(BaseHTTPRequestHandler):
             body.get("events_jsonl"),
             body.get("err_txt"),
             body.get("db_b64"),
+            body.get("engine_log"),
         )
 
     def _post_fail(self, body: dict[str, Any]) -> dict[str, Any]:

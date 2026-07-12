@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   events_jsonl    TEXT,                               -- S7b: raw agent event stream
   err_txt         TEXT,                               -- S7b: raw agent stderr transcript
   db_b64          TEXT,                               -- S7b: base64 opencode.db (bounded, may be absent)
+  engine_log      TEXT,                               -- S7c: tail-capped econ engine log (orchestration markers)
   completed_by    TEXT,
   completed_at    INTEGER                             -- epoch s
 );

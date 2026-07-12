@@ -36,6 +36,10 @@ COPY local-docker/context             /work/local-docker/context
 COPY econ-telemetry.py                /work/econ-telemetry.py
 COPY econ-tier-cost.py                /work/econ-tier-cost.py
 COPY report.py                        /work/report.py
+# Shared dockerd-boot + toolbox-build lib, sourced by entrypoint.sh as
+# /work/lib/boot.sh. run.sh vendors it into lib/ from e2e/distributed/lib/boot.sh
+# (it lives outside this build context). Missing it → entrypoint boots no dockerd.
+COPY lib/boot.sh                      /work/lib/boot.sh
 COPY fly-remote/fullresolve/entrypoint.sh /work/entrypoint.sh
 RUN chmod +x /work/entrypoint.sh /work/local-docker/context/run-instance.sh
 

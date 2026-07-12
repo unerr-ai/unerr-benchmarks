@@ -146,6 +146,17 @@ else
   echo "    engine: none at $CI_SRC/src — in-container plugins will fall back to ../../packages and stay disabled"
 fi
 
+# ── vendor the shared boot lib (dockerd-boot + toolbox-build) into the context ─
+# entrypoint.sh sources /work/lib/boot.sh, but the lib lives in e2e/distributed/lib
+# (OUTSIDE this e2e/econ build context), so copy it in like the binary. Without it
+# the source silently no-ops (entrypoint has no `set -e`) → boot_dockerd/build_toolbox
+# never run → dockerd stays down → resolve hits a dead socket → 0B patches.
+BOOTLIB_SRC="$ECON_DIR/../distributed/lib/boot.sh"
+[ -f "$BOOTLIB_SRC" ] || { echo "missing boot lib at $BOOTLIB_SRC"; exit 1; }
+mkdir -p "$ECON_DIR/lib"
+cp "$BOOTLIB_SRC" "$ECON_DIR/lib/boot.sh"
+echo "    bootlib: $BOOTLIB_SRC -> lib/boot.sh"
+
 # ── ensure app + volume ───────────────────────────────────────────────────────
 echo "==> ensuring app $APP exists"
 if ! flyctl apps create "$APP" --org "$ORG" 2>/tmp/fly-econ-fr-appcreate.err; then
@@ -186,6 +197,7 @@ echo "==> launching one-shot DinD machine ($MEM MB / $CPUS cpu, $REGION, vol $VO
 # output so a launch error is visible (otherwise it gets eaten by the pipe).
 flyctl machine run "$IMG" \
   --app "$APP" --region "$REGION" --vm-memory "$MEM" --vm-cpus "$CPUS" \
+  --vm-cpu-kind "${CPU_KIND:-performance}" \
   --volume "$VOL:/data" --restart no \
   -e LITELLM_API_KEY="$LITELLM_API_KEY" \
   -e EXA_API_KEY="$EXA_API_KEY" \

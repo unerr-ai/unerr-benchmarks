@@ -54,6 +54,13 @@ emit() { printf '{"ev":%s}\n' "$1"; }   # one-line JSON beacons the host scrapes
 # fly container) we fall back to the real repo-relative path.
 BOOT_LIB="${BOOT_LIB:-/work/lib/boot.sh}"
 [ -f "$BOOT_LIB" ] || BOOT_LIB="$(dirname "${BASH_SOURCE[0]}")/../../../distributed/lib/boot.sh"
+# FATAL if absent: without set -e a failed source silently no-ops, boot_dockerd
+# never runs, and every resolve hits a dead docker socket → 0B patches (the
+# grader may then falsely "resolve" via a stale report). Fail loud instead.
+if [ ! -f "$BOOT_LIB" ]; then
+  log "FATAL: boot lib not found at $BOOT_LIB (run.sh must vendor lib/boot.sh + Dockerfile must COPY it → /work/lib/)"
+  emit '"fatal","stage":"boot-lib-missing"'; exit 10
+fi
 # shellcheck source=../../../distributed/lib/boot.sh
 source "$BOOT_LIB"
 

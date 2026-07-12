@@ -55,8 +55,11 @@ VENV_PY = os.environ.get("VENV_PY", "/work/.venv/bin/python")
 # Typical sizes observed on the fullresolve path: events.jsonl 50KB-1.3MB,
 # err.txt 4-16KB, opencode.db 0.4-5MB — these caps cover the normal case and
 # only truncate/skip pathological outliers.
-MAX_ARTIFACT_TEXT_BYTES = 5_000_000
-MAX_ARTIFACT_DB_BYTES = 8_000_000
+MAX_ARTIFACT_TEXT_BYTES = int(os.environ.get("MAX_ARTIFACT_TEXT_BYTES", 5_000_000))
+MAX_ARTIFACT_DB_BYTES = int(os.environ.get("MAX_ARTIFACT_DB_BYTES", 8_000_000))
+# engine.log is already tail-capped in-container by run-instance.sh, but the
+# worker caps again defensively — mirrors the MAX_ARTIFACT_TEXT_BYTES pattern.
+MAX_ENGINE_LOG_BYTES = int(os.environ.get("MAX_ENGINE_LOG_BYTES", 10_000_000))
 
 
 def _int_env(name: str, default: int) -> int:
@@ -304,17 +307,19 @@ class Worker:
             self.log(f"{iid}: could not parse report.json ({e})")
             return False, ""
 
-    # ── per-instance artifact sync (S7b: events.jsonl/err.txt/opencode.db) ───
+    # ── per-instance artifact sync (S7b: events.jsonl/err.txt/opencode.db; ───
+    # S7c: engine.log) ────────────────────────────────────────────────────────
     def _read_artifacts(self, run_dir: str, iid: str) -> dict:
         """Read the instance's raw transcript out of run-benchmark.py's
         artifact dir (run_dir/artifacts/<iid>/ — same layout the single-
         machine fullresolve path leaves on disk) so it can ride the /complete
-        POST. Bounded by MAX_ARTIFACT_TEXT_BYTES/MAX_ARTIFACT_DB_BYTES; a
-        missing or oversized file yields None for that key rather than
-        failing the instance."""
+        POST. Bounded by MAX_ARTIFACT_TEXT_BYTES/MAX_ARTIFACT_DB_BYTES/
+        MAX_ENGINE_LOG_BYTES; a missing or oversized file yields None for that
+        key (tail-capped, not dropped, for the text logs) rather than failing
+        the instance."""
         art_dir = os.path.join(run_dir, "artifacts", iid)
 
-        def _read_text(name: str) -> str | None:
+        def _read_text(name: str, max_bytes: int = MAX_ARTIFACT_TEXT_BYTES) -> str | None:
             path = os.path.join(art_dir, name)
             if not os.path.isfile(path):
                 return None
@@ -323,8 +328,8 @@ class Worker:
                     data = f.read()
             except OSError:
                 return None
-            if len(data) > MAX_ARTIFACT_TEXT_BYTES:
-                data = data[-MAX_ARTIFACT_TEXT_BYTES:]
+            if len(data) > max_bytes:
+                data = data[-max_bytes:]
             return data.decode("utf-8", "replace")
 
         db_path = os.path.join(art_dir, "opencode.db")
@@ -342,6 +347,7 @@ class Worker:
         return {
             "events_jsonl": _read_text("events.jsonl"),
             "err_txt": _read_text("err.txt"),
+            "engine_log": _read_text("engine.log", MAX_ENGINE_LOG_BYTES),
             "db_b64": db_b64,
         }
 
@@ -420,10 +426,11 @@ class Worker:
             "report_json": report_json,
             "meta_json": meta_json,
             "resolved": bool(resolved),
-            # S7b: the per-instance transcript, synced here because the
+            # S7b/S7c: the per-instance transcript, synced here because the
             # distributed worker has no volume that survives the machine.
             "events_jsonl": artifacts.get("events_jsonl"),
             "err_txt": artifacts.get("err_txt"),
+            "engine_log": artifacts.get("engine_log"),
             "db_b64": artifacts.get("db_b64"),
         }, max_attempts=8)
 

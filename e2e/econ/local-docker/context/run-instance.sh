@@ -56,9 +56,13 @@ PROBLEM="$(cat "$PROBLEM_FILE")"
 log "econ run starting (repo=$REPO_DIR, timeout=${ECON_TIMEOUT}s)"
 # Container is the sandbox → --dangerously-skip-permissions for full autonomy.
 # --format json: machine-readable event stream (token/turn/tier telemetry).
-# NO --model: routing is opencode.json-driven. All output to the mounted dir.
+# --print-logs: without it the Effect logger only writes opencode.log inside
+# the container (packages/core/src/observability/logging.ts loggers()) — the
+# orchestration markers (turn_converge_nudge, stuck_escalate, ...) never reach
+# stderr/err.txt otherwise. NO --model: routing is opencode.json-driven.
 timeout "$ECON_TIMEOUT" "$TOOLBOX/opencode" run \
   --format json \
+  --print-logs \
   --dir "$REPO_DIR" \
   --dangerously-skip-permissions \
   "$PROBLEM" \
@@ -66,6 +70,14 @@ timeout "$ECON_TIMEOUT" "$TOOLBOX/opencode" run \
 ECON_RC=$?
 log "econ exit=$ECON_RC"
 [ "$ECON_RC" -ne 0 ] && sed 's/^/[econ.err] /' "$OUT/err.txt" | tail -30 >&2
+
+# ── Full engine log for finish-path forensics, tail-capped ──────────────────
+# err.txt (above) is the raw uncapped stderr other tooling already keys on
+# (the failure dump just above, worker-loop.py's _read_artifacts). engine.log
+# is the artifact this pipeline is built for: same content, capped to the last
+# 10MB (tail semantics — the finish markers land at the end of a long run).
+ENGINE_LOG_MAX_BYTES=10000000
+tail -c "$ENGINE_LOG_MAX_BYTES" "$OUT/err.txt" > "$OUT/engine.log" 2>/dev/null || true
 
 # ── Capture the top-level sessionID (report.py / econ-tier-cost.py want it) ───
 SID="$(python3 -c "

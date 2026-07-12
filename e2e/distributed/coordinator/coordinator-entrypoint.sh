@@ -182,20 +182,23 @@ for row in rows:
         "model_name_or_path": arm,
         "model_patch": row["patch"] or "",
     }
-    # S7b: write back the per-instance transcript synced over /complete,
+    # S7b/S7c: write back the per-instance transcript synced over /complete,
     # mirroring the single-machine fullresolve layout (results/<label>/
     # artifacts/<iid>/) so a distributed near-miss stays reconstructable.
     row_keys = row.keys()
     events_jsonl = row["events_jsonl"] if "events_jsonl" in row_keys else None
     err_txt = row["err_txt"] if "err_txt" in row_keys else None
     db_b64 = row["db_b64"] if "db_b64" in row_keys else None
-    if events_jsonl or err_txt or db_b64:
+    engine_log = row["engine_log"] if "engine_log" in row_keys else None
+    if events_jsonl or err_txt or db_b64 or engine_log:
         art_dir = rundir / "artifacts" / iid
         art_dir.mkdir(parents=True, exist_ok=True)
         if events_jsonl:
             (art_dir / "events.jsonl").write_text(events_jsonl, encoding="utf-8")
         if err_txt:
             (art_dir / "err.txt").write_text(err_txt, encoding="utf-8")
+        if engine_log:
+            (art_dir / "engine.log").write_text(engine_log, encoding="utf-8")
         if db_b64:
             try:
                 (art_dir / "opencode.db").write_bytes(base64.b64decode(db_b64))
