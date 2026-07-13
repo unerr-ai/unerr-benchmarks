@@ -36,9 +36,11 @@ FW_BASE_MODEL="${FW_BASE_MODEL:-accounts/fireworks/models/minimax-m3}"
 FW_DEPLOYMENT_ID="${FW_DEPLOYMENT_ID:-bench-conductor}"
 FW_ACCEL_TYPE="${FW_ACCEL_TYPE:-NVIDIA_B300_288GB}"   # 8x B300 = Fireworks default shape, $96/hr, FP4
 FW_ACCEL_COUNT="${FW_ACCEL_COUNT:-8}"
-FW_PRECISION="${FW_PRECISION:-}"                       # empty = let Fireworks auto-pick (FP4 for B300); else FP4/FP8/…
-FW_MIN_REPLICAS="${FW_MIN_REPLICAS:-1}"               # 1 = warm (no cold-start 503s mid-run)
-FW_MAX_REPLICAS="${FW_MAX_REPLICAS:-1}"               # fixed cost; raise for autoscaled concurrency
+FW_PRECISION="${FW_PRECISION:-FP4}"                   # FP4 = B300 default (matches the READY stqphvpa spec); "" lets auto-tune pick
+FW_MIN_REPLICAS="${FW_MIN_REPLICAS:-0}"              # MUST be 0 — the create fails code=INTERNAL with min>0. Warmth is NOT from min>0:
+                                                     # it comes from traffic (scaleToZeroWindow=3600s keeps 1 replica up 1h after last request)
+FW_MAX_REPLICAS="${FW_MAX_REPLICAS:-1}"               # autoscales 0→1 on demand; raise for more concurrency
+FW_MULTIREGION="${FW_MULTIREGION:-GLOBAL}"            # placement.multiRegion — GLOBAL = broadest B300 capacity (matches working spec)
 FW_READY_TIMEOUT="${FW_READY_TIMEOUT:-1800}"          # 30m — 428B on 8 GPUs is a slow cold start
 FW_GATEWAY_APP="${FW_GATEWAY_APP:-econ-litellm}"      # only used for the key-of-last-resort pull
 
@@ -96,11 +98,16 @@ cmd_up() {
   else
     log "creating dedicated deployment $FW_DEPLOYMENT_ID: ${FW_ACCEL_COUNT}x ${FW_ACCEL_TYPE}${FW_PRECISION:+ ($FW_PRECISION)}, replicas ${FW_MIN_REPLICAS}-${FW_MAX_REPLICAS}"
     local body resp name prec_field=""
-    # Only pin precision when explicitly asked; otherwise Fireworks auto-selects the
-    # model default for the shape (FP4 on B300) — avoids guessing the enum spelling.
     [ -n "$FW_PRECISION" ] && prec_field="$(printf ',"precision":"%s"' "$FW_PRECISION")"
-    body="$(printf '{"baseModel":"%s","acceleratorType":"%s","acceleratorCount":%s,"minReplicaCount":%s,"maxReplicaCount":%s%s,"displayName":"econ bench conductor (ephemeral)"}' \
-      "$FW_BASE_MODEL" "$FW_ACCEL_TYPE" "$FW_ACCEL_COUNT" "$FW_MIN_REPLICAS" "$FW_MAX_REPLICAS" "$prec_field")"
+    # This body mirrors the READY stqphvpa deployment field-for-field. Two fields are
+    # LOAD-BEARING and were the reason the earlier raw creates died with code=INTERNAL:
+    #   autoTune:{}                 → lets Fireworks merge the model's throughput shape
+    #                                 (accounts/fireworks/deploymentShapes/minimax-m3-throughput).
+    #                                 OMITTING it (with min>0) fails server-side.
+    #   minReplicaCount:0           → min>0 also fails INTERNAL; the deployment autoscales 0→1.
+    # placement.multiRegion=GLOBAL matches the working spec (broadest B300 capacity).
+    body="$(printf '{"baseModel":"%s","acceleratorType":"%s","acceleratorCount":%s,"minReplicaCount":%s,"maxReplicaCount":%s,"autoTune":{},"placement":{"multiRegion":"%s"}%s,"displayName":"econ bench conductor (ephemeral)"}' \
+      "$FW_BASE_MODEL" "$FW_ACCEL_TYPE" "$FW_ACCEL_COUNT" "$FW_MIN_REPLICAS" "$FW_MAX_REPLICAS" "$FW_MULTIREGION" "$prec_field")"
     resp="$(_fw_api POST "$FW_ACCOUNT/deployments?deploymentId=$FW_DEPLOYMENT_ID" "$body")"
     name="$(printf '%s' "$resp" | _json_field name)"
     if [ -z "$name" ]; then
