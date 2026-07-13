@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   db_b64          TEXT,                               -- S7b: base64 opencode.db (bounded, may be absent)
   engine_log      TEXT,                               -- S7c: tail-capped econ engine log (orchestration markers)
   completed_by    TEXT,
-  completed_at    INTEGER                             -- epoch s
+  completed_at    INTEGER,                            -- epoch s
+  failure_reason  TEXT                                 -- last /fail error (dead-instance capture, capped)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

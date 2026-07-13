@@ -412,7 +412,7 @@ class Worker:
         rc = m.get("rc")
         pb = m.get("patch_bytes")
         tail = (m.get("stderr_tail") or "").replace("\n", " ⏎ ")
-        return f"driver_rc={rc} patch_bytes={pb} stderr_tail: {tail[-2600:]}"
+        return f"driver_rc={rc} patch_bytes={pb} stderr_tail: {tail[-10000:]}"
 
     # ── report back to the coordinator ───────────────────────────────────────
     def _post_complete(self, iid: str, patch: str, report_json: str,
@@ -435,10 +435,12 @@ class Worker:
         }, max_attempts=8)
 
     def _post_fail(self, iid: str, error: str) -> None:
+        # Capped above _meta_diag's 10000-char stderr tail so widening that cap
+        # (dead-instance failure capture) isn't silently re-truncated here.
         self._request("/fail", {
             "instance_id": iid,
             "worker_id": self.worker_id,
-            "error": str(error)[:4000],
+            "error": str(error)[:10000],
         }, max_attempts=8)
 
     # ── heartbeat thread ─────────────────────────────────────────────────────

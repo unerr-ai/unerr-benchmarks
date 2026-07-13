@@ -237,7 +237,10 @@ class Queue:
         """Requeue a failed instance, or dead-letter it once attempts are spent.
 
         attempt_count was already incremented at claim, so it is only read here:
-        `>= MAX_ATTEMPTS` → `dead`, otherwise back to `pending`.
+        `>= MAX_ATTEMPTS` → `dead`, otherwise back to `pending`. The error is also
+        persisted into `failure_reason` (capped) so a dead instance's cause is
+        durably queryable — not just in server.log, which requires SSH+grep and
+        doesn't survive the coordinator machine.
         """
         with self._lock:
             row = self._conn.execute(
@@ -247,10 +250,11 @@ class Queue:
                 status = "pending"
             else:
                 status = "dead" if row[0] >= self._cfg.max_attempts else "pending"
+                reason = str(error)[:8000] if error is not None else None
                 self._conn.execute(
-                    "UPDATE tasks SET status=?, worker_id=NULL, lease_until=NULL "
-                    "WHERE instance_id=?",
-                    (status, instance_id),
+                    "UPDATE tasks SET status=?, worker_id=NULL, lease_until=NULL, "
+                    "failure_reason=? WHERE instance_id=?",
+                    (status, reason, instance_id),
                 )
                 self._conn.commit()
         log(

@@ -183,12 +183,15 @@ Two caveats worth knowing before reading that table:
 1. conductor / oracle / reasoner are `primary` agents, so they run in the
    main session and are fully captured by the `--format json` stream. The
    **executor is a `subagent`**, which runs in a child session the parent
-   stream filters out — so executor *token volume* doesn't show up here.
-   Its cost is unaffected (it's $0 by definition), but if complete per-tier
-   token volume including the executor is needed, it lives in econ's session
-   SQLite (`opencode.db`): each assistant message row stores its tier under
-   `data.agent`, so grouping by `agent` there gives a full parent+child
-   per-tier rollup. That path isn't wired up in this benchmark yet.
+   stream filters out — so executor *token volume* is absent from the raw
+   `--format json` stream. Its cost is unaffected (it's $0 by definition).
+   Complete per-tier token volume including the executor lives in econ's
+   session SQLite (`opencode.db`): each assistant message row stores its tier
+   under `data.agent`, so grouping by `agent` gives a full parent+child
+   per-tier rollup. That path IS wired up: `econ-tier-cost.py` computes it per
+   instance (`tier_cost_db.by_tier` in meta.jsonl) and `report.py` prefers it
+   over the stream — so the executor's token volume does appear in the
+   rendered per-tier table.
 2. oracle and reasoner both run `z-ai/glm-5.2`, so a modelID-keyed breakdown
    merges them under one entry (harmless — they share a price, so the cost
    total is still correct). If you need them split, `data.agent` in the

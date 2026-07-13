@@ -3,6 +3,7 @@ node_modules/
 
 # Benchmark run output (regeneratable; never committed)
 **/out/
+**/failed-runs/
 results/runs/
 *.log
 

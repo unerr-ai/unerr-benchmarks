@@ -103,11 +103,13 @@ def _clip(s: str, n: int) -> str:
 def find_grade_dir(bundle: Path, label: str, model: str, iid: str) -> Path | None:
     """Locate the swebench per-instance eval dir for this run's label.
 
-    Path shape: <bundle>/logs/grade-<label>/logs/run_evaluation/<label>/<model>/<iid>/.
-    Scoped to THIS label's grade dir only — the /data volume carries every prior
-    run's grade dirs, so a loose search would pull a stale instance's report
-    (the exact stale-report trap from prior runs). Returns None when absent
-    (empty-patch/no_generation instances have no grade dir).
+    Two layouts are supported:
+    - fullresolve runner: <bundle>/logs/grade-<label>/logs/run_evaluation/<label>/<model>/<iid>/
+    - distributed runner: <bundle>/logs/grade-merged/<iid>/ (merge-reports.py flattens
+      per-instance grades here; today it carries report.json only)
+    Both are scoped to THIS run's bundle, so there's no cross-run stale-report trap
+    (the /data volume's per-run grade dirs never leak into a single pulled bundle).
+    Returns None when absent (empty-patch/no_generation instances have no grade dir).
     """
     base = bundle / "logs" / f"grade-{label}" / "logs" / "run_evaluation" / label
     cand = base / model / iid
@@ -118,6 +120,10 @@ def find_grade_dir(bundle: Path, label: str, model: str, iid: str) -> Path | Non
         for m in base.iterdir():
             if (m / iid).is_dir():
                 return m / iid
+    # distributed-runner layout: per-instance grades flattened to grade-merged/<iid>/
+    merged = bundle / "logs" / "grade-merged" / iid
+    if merged.is_dir():
+        return merged
     return None
 
 

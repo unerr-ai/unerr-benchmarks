@@ -172,8 +172,23 @@ preds = {}
 counts = {}
 meta_lines = []
 n_artifacts = 0
+dead_rows = []
 for row in rows:
     counts[row["status"]] = counts.get(row["status"], 0) + 1
+    row_keys = row.keys()
+    if row["status"] == "dead":
+        # dead-instance capture: dump while the queue DB is still live so
+        # WAL-mode rows are visible — an offline `sqlite3 queue.db` copy in
+        # the bundle sees zero rows (no bundled -wal sidecar). This plain
+        # file is what survives for tools/collect-failed.py.
+        dead_rows.append({
+            "instance_id": row["instance_id"],
+            "failure_reason": row["failure_reason"] if "failure_reason" in row_keys else None,
+            "attempt_count": row["attempt_count"] if "attempt_count" in row_keys else None,
+            "worker_id": row["worker_id"] if "worker_id" in row_keys else None,
+            "last_heartbeat": row["last_heartbeat"] if "last_heartbeat" in row_keys else None,
+        })
+        continue
     if row["status"] != "done":
         continue
     iid = row["instance_id"]
@@ -185,7 +200,6 @@ for row in rows:
     # S7b/S7c: write back the per-instance transcript synced over /complete,
     # mirroring the single-machine fullresolve layout (results/<label>/
     # artifacts/<iid>/) so a distributed near-miss stays reconstructable.
-    row_keys = row.keys()
     events_jsonl = row["events_jsonl"] if "events_jsonl" in row_keys else None
     err_txt = row["err_txt"] if "err_txt" in row_keys else None
     db_b64 = row["db_b64"] if "db_b64" in row_keys else None
@@ -222,10 +236,16 @@ rundir.mkdir(parents=True, exist_ok=True)
 with (rundir / "meta.jsonl").open("w", encoding="utf-8") as fh:
     for line in meta_lines:
         fh.write(line.rstrip("\n") + "\n")
+# dead-instance capture: one JSON object per dead-lettered row, so
+# tools/collect-failed.py can enumerate + triage them from the bundle alone
+# (no SSH+grep of server.log needed).
+with (rundir / "dead.jsonl").open("w", encoding="utf-8") as fh:
+    for d in dead_rows:
+        fh.write(json.dumps(d) + "\n")
 
 print(json.dumps({
     "counts": counts, "n_preds": len(preds), "n_meta": len(meta_lines),
-    "n_artifacts": n_artifacts,
+    "n_artifacts": n_artifacts, "n_dead": len(dead_rows),
 }))
 PYEOF
 )"

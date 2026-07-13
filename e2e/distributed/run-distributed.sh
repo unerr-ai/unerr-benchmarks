@@ -262,6 +262,19 @@ if [ "$ARM" = "econ" ]; then
   VENDOR="$ECON_DIR/local-docker/context/vendor"
   echo "==> vendoring local econ build from $ECON_REPO -> $VENDOR"
   mkdir -p "$VENDOR/dot-opencode"
+  # Rebuild the binary from LIVE source every run. .opencode/opencode.json/
+  # code-intelligence below are copied live each run (they self-heal); the binary
+  # is the ONE econ input that is copied-not-rebuilt, so a stale dist/ would
+  # silently ship an old engine to the fleet (the fleet-vs-local drift footgun).
+  # SKIP_ECON_BUILD=1 reuses the existing dist/ (iterating on the runner, or a
+  # binary already built this session).
+  if [ "${SKIP_ECON_BUILD:-0}" = "1" ]; then
+    echo "    build: SKIP_ECON_BUILD=1 — reusing existing dist/ (may be stale)"
+  else
+    echo "    build: rebuilding econ from live $ECON_REPO (HEAD $(git -C "$ECON_REPO" rev-parse --short HEAD 2>/dev/null || echo '?'))"
+    ( cd "$ECON_REPO" && bun install && bun run --cwd packages/opencode build ) >"$OUTDIR/econ-build.log" 2>&1 \
+      || { echo "    econ build FAILED — see $OUTDIR/econ-build.log (or pass SKIP_ECON_BUILD=1 to reuse dist/)"; tail -20 "$OUTDIR/econ-build.log"; exit 1; }
+  fi
   # GLIBC binary (NOT -musl): the SWE-bench instance images are Debian/glibc.
   BIN="$(find "$ECON_REPO/packages/opencode/dist" -type f -name opencode -path '*/opencode-linux-x64-baseline/bin/opencode' 2>/dev/null | head -1)"
   [ -n "$BIN" ] || { echo "no local linux-x64-baseline (glibc) econ build under $ECON_REPO/packages/opencode/dist (run: cd $ECON_REPO && bun install && bun run --cwd packages/opencode build)"; exit 1; }
@@ -324,9 +337,16 @@ fi
 # ── build the fleet image on fly's remote builder (context = e2e) ─────────────
 IMG_BUILT_THIS_RUN=0
 if [ -n "$IMAGE" ]; then
-  IMG="$IMAGE"; echo "==> reusing image: $IMG"
+  # DEFAULT behaviour is to bake a FRESH image from live $ECON_REPO every run
+  # (the else branch). Passing IMAGE= REUSES a prebuilt image and BYPASSES that
+  # bake — it can ship STALE runner/econ code (this is how the easy-x15 run shipped
+  # the pre-fix run-benchmark.py). Reuse is legitimate ONLY for pinning one image
+  # across campaign tranches; otherwise unset IMAGE to get the live bake.
+  IMG="$IMAGE"
+  echo "==> ⚠️  REUSING PREBUILT IMAGE — NOT baking from live source: $IMG"
+  echo "    ⚠️  runner/econ code here may be STALE vs $ECON_REPO. Unset IMAGE to bake fresh (default)."
 else
-  echo "==> building fleet image on fly remote builder (context=$E2E_DIR)"
+  echo "==> baking FRESH fleet image from LIVE source on fly remote builder (context=$E2E_DIR, econ HEAD $(git -C "$ECON_REPO" rev-parse --short HEAD 2>/dev/null || echo '?'))"
   # Explicit --config: with a positional build CONTEXT arg flyctl looks for
   # fly.toml relative to that dir (e2e has none) and otherwise tries to rebuild
   # config from machines — which fails on a fresh, machine-less app.
@@ -594,8 +614,19 @@ else
   echo "==> no bundle_ready beacon — fleet did not finish; see $OUTDIR/coord.log"
 fi
 
+# ── collect failed-instance triage (resolved=0) into a durable, dated archive ──
+# Routine on every run: failed-runs/<label>/ (label carries the MMDD-HHMM run
+# time) gets each failed instance's model_patch, grade report (which tests
+# failed), engine.log, events.jsonl + session db — so a failure stays fully
+# triageable long after the ephemeral fleet is destroyed. Best-effort.
+if [ -d "$OUTDIR/bundle" ]; then
+  python3 "$HERE/tools/collect-failed.py" --bundle "$OUTDIR/bundle" --label "$LABEL" \
+    --dest "$HERE/failed-runs/$LABEL" 2>&1 | sed 's/^/    /' \
+    || echo "    (failed-triage collection skipped)"
+fi
+
 # ── teardown: destroy the whole fleet by metadata; remove the coord volume ────
 # Workers self-stopped on drain (restart:no → stopped, compute billing stops);
 # the coordinator is destroyed now that the bundle is pulled.
 destroy_fleet
-echo "==> done. results in $OUTDIR/ (coord.log, beacons.jsonl, bundle/)"
+echo "==> done. results in $OUTDIR/ (coord.log, beacons.jsonl, bundle/); failure triage in $HERE/failed-runs/$LABEL/"

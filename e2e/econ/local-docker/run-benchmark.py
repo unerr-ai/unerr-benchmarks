@@ -236,18 +236,25 @@ def main() -> int:
 
     from datasets import load_dataset  # lazy: only needed at run time
     rows = list(load_dataset(args.dataset, split=args.split))
-    # Filter to the pinned Verified Mini-50 allowlist.
-    allow = set(MINI_50_IDS)
-    rows = [r for r in rows if r["instance_id"] in allow]
-    missing = allow - {r["instance_id"] for r in rows}
-    if missing:
-        print(f"WARNING: {len(missing)} Mini-50 ids absent from {args.dataset}: "
-              f"{sorted(missing)[:3]}...", file=sys.stderr)
+    # --ids selects directly from the FULL dataset (targeted re-runs of ANY
+    # Verified instance); the Mini-50 allowlist does NOT gate it. Only when no
+    # explicit ids are given do we fall back to the pinned Mini-50 default.
     if args.ids:
         want = {s.strip() for s in args.ids.split(",") if s.strip()}
         rows = [r for r in rows if r["instance_id"] in want]
-    elif args.instances > 0:
-        rows = rows[: args.instances]
+        absent = want - {r["instance_id"] for r in rows}
+        if absent:
+            print(f"WARNING: {len(absent)} requested ids absent from {args.dataset}: "
+                  f"{sorted(absent)[:3]}...", file=sys.stderr)
+    else:
+        allow = set(MINI_50_IDS)
+        rows = [r for r in rows if r["instance_id"] in allow]
+        missing = allow - {r["instance_id"] for r in rows}
+        if missing:
+            print(f"WARNING: {len(missing)} Mini-50 ids absent from {args.dataset}: "
+                  f"{sorted(missing)[:3]}...", file=sys.stderr)
+        if args.instances > 0:
+            rows = rows[: args.instances]
     if not rows:
         print("no instances after filter", file=sys.stderr)
         return 1
