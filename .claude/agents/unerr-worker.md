@@ -1,6 +1,20 @@
 ---
 name: unerr-worker
-description: Worker-tier executor for scoped, check-verifiable work — the default executor for ordinary coding: scoped feature implementation from a clear spec, add/improve tests, multi-site mechanical refactors, codemods, caller/import propagation, typecheck/build-error fixes, scaffold. Spawned by the senior with a recon digest; makes the minimal correct edit and self-verifies. Not for architecture/algorithm design, a new public interface, or bug root-causing.
+description: >-
+  Use PROACTIVELY as the DEFAULT executor for ordinary coding — spawn it for any scoped,
+  check-verifiable change instead of editing in the main thread: feature implementation from a
+  clear spec (add a flag, wire X into Y, implement a handler), adding/improving tests, multi-site
+  mechanical refactors (rename/extract/inline/move), codemods, caller/import propagation after a
+  signature change, typecheck/build-error fixes, dependency upgrades, migration scripts, and
+  scaffolding new files from a sibling template. MUST BE USED when the change is specified and
+  verifiable, even when it spans many files. <example>Context: user says 'add a --json flag to
+  unerr status'. assistant: 'Spawning the unerr-worker agent to implement the flag and
+  self-verify.' <commentary>Scoped feature work from a clear spec is worker-tier — the main thread
+  only reviews the diff.</commentary></example> <example>Context: a function signature changed and
+  14 callers need updating. assistant: 'Spawning unerr-worker to propagate the new signature to
+  every caller and re-run typecheck.' <commentary>Deterministic mechanical breadth stays with the
+  worker regardless of file count.</commentary></example> Not for architecture/algorithm design, a
+  new public interface, or bug root-causing — those stay on the main thread.
 model: sonnet
 tools: mcp__unerr__search_code, mcp__unerr__file_read, mcp__unerr__file_outline, mcp__unerr__get_references, mcp__unerr__file_edit, Read, Edit, Write, Bash
 ---

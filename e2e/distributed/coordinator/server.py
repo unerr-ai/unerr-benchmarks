@@ -44,6 +44,7 @@ class Config:
     max_attempts: int
     heartbeat_timeout: int
     reaper_interval: int
+    armed: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -54,6 +55,11 @@ class Config:
             max_attempts=int(os.environ.get("MAX_ATTEMPTS", "2")),
             heartbeat_timeout=int(os.environ.get("HEARTBEAT_TIMEOUT", "120")),
             reaper_interval=int(os.environ.get("REAPER_INTERVAL", "30")),
+            # Prepare/run gate: default 1 → coordinator is armed from boot, so the
+            # all-in-one path is unchanged. `prepare` boots workers with COORD_ARMED=0
+            # so they warm and hold until an external POST /arm releases the fleet.
+            armed=(os.environ.get("COORD_ARMED", "1").strip().lower()
+                   in ("1", "true", "yes")),
         )
 
 
@@ -100,6 +106,30 @@ class Queue:
         self._conn = conn
         self._cfg = cfg
         self._lock = threading.Lock()
+        # Worker ids that have polled /claim at least once — the readiness signal
+        # `prepare` waits on (a warm worker polls before any work is armed).
+        self._workers_seen: set[str] = set()
+        # Armed gate (prepare/run split): while False, /claim returns {wait:true}
+        # so warm workers hold (toolbox built, polling, NOT exiting) and /drain
+        # never reports drained. Persisted in a `control` row so a coordinator
+        # restart keeps the state; COORD_ARMED (default 1, via cfg.armed) is the
+        # value the FIRST boot writes — the all-in-one path is armed from boot and
+        # behaves exactly as before.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS control (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        row = self._conn.execute(
+            "SELECT value FROM control WHERE key='armed'"
+        ).fetchone()
+        if row is None:
+            self._armed = cfg.armed
+            self._conn.execute(
+                "INSERT INTO control (key, value) VALUES ('armed', ?)",
+                ("1" if self._armed else "0",),
+            )
+            self._conn.commit()
+        else:
+            self._armed = row[0] == "1"
 
     # -- reads (lock held by caller) --------------------------------------- #
     def _counts(self) -> dict[str, int]:
@@ -137,6 +167,11 @@ class Queue:
         now = int(time.time())
         lease_until = now + self._cfg.lease_ttl
         with self._lock:
+            self._workers_seen.add(worker_id)
+            if not self._armed:
+                # Warm but not released yet: keep the worker in its poll loop
+                # (wait, not done) so it stays alive until the run is armed.
+                return {"wait": True}
             row = self._conn.execute(
                 "UPDATE tasks SET status='leased', worker_id=?, "
                 "  attempt_count=attempt_count+1, lease_until=?, last_heartbeat=? "
@@ -269,6 +304,8 @@ class Queue:
     def status(self) -> dict[str, Any]:
         """Full snapshot: counts by status, resolved tally, and per-instance rows."""
         with self._lock:
+            armed = self._armed
+            workers_seen = sorted(self._workers_seen)
             counts = self._counts()
             total = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
             resolved = self._conn.execute(
@@ -291,6 +328,8 @@ class Queue:
         ]
         return {
             "run_id": run_row[0] if run_row else None,
+            "armed": armed,
+            "workers_seen": workers_seen,
             "counts": counts,
             "resolved": resolved,
             "total": total,
@@ -298,10 +337,31 @@ class Queue:
         }
 
     def drain(self) -> dict[str, bool]:
-        """`{drained:true}` once no pending and no leased rows remain."""
+        """`{drained:true}` once ARMED and no pending and no leased rows remain.
+
+        The `armed` guard means an un-released (prepare-phase) queue — seeded but
+        not yet armed, or momentarily empty — never reads as drained, so the
+        coordinator won't aggregate/bundle before the run is released."""
         with self._lock:
+            armed = self._armed
             counts = self._counts()
-        return {"drained": counts["pending"] == 0 and counts["leased"] == 0}
+        return {
+            "drained": armed and counts["pending"] == 0 and counts["leased"] == 0
+        }
+
+    def arm(self) -> dict[str, Any]:
+        """Release the fleet: flip `armed` on (persisted). Idempotent — after this
+        /claim hands out work and /drain can report drained. The prepare→run split
+        calls this once workers are warm and the GPU is up."""
+        with self._lock:
+            self._armed = True
+            self._conn.execute(
+                "INSERT INTO control (key, value) VALUES ('armed', '1') "
+                "ON CONFLICT(key) DO UPDATE SET value='1'"
+            )
+            self._conn.commit()
+        log("arm")
+        return {"armed": True}
 
     def reap(self) -> int:
         """Requeue leases whose heartbeat is stale; dead-letter spent ones.
@@ -377,6 +437,9 @@ class Handler(BaseHTTPRequestHandler):
     def _post_seed(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._q.seed(body["run_id"], body["instance_ids"])
 
+    def _post_arm(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._q.arm()
+
     def _post_claim(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._q.claim(body["worker_id"])
 
@@ -403,6 +466,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         routes: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "/seed": self._post_seed,
+            "/arm": self._post_arm,
             "/claim": self._post_claim,
             "/heartbeat": self._post_heartbeat,
             "/complete": self._post_complete,

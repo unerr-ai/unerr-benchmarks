@@ -36,6 +36,15 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from litellm_cost import mint_instance_key, fetch_cost
+except ImportError:  # sibling module landing in parallel — degrade to master-key-only
+    def mint_instance_key(base_url, master_key, *, alias, metadata, max_budget=50.0):
+        return None
+
+    def fetch_cost(base_url, master_key, vk, *, alias="", settle_timeout=25.0):
+        return {"source": "unavailable"}
+
 
 def docker_image_for(instance: dict) -> str:
     """Official per-instance image name (mirrors mini-swe-agent's mapping)."""
@@ -174,6 +183,24 @@ MINI_50_IDS = [
 ]
 
 
+def _load_litellm_key() -> str | None:
+    """LiteLLM gateway key: host env first, else e2e/econ/.env.local (sibling dir)."""
+    key = os.environ.get("LITELLM_API_KEY") or os.environ.get("LITELLM_MASTER_KEY")
+    if key:
+        return key
+    env_file = Path(__file__).parent.parent.parent.parent / "econ" / ".env.local"
+    if not env_file.exists():
+        return None
+    parsed: dict[str, str] = {}
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        parsed[k.strip()] = v.strip()
+    return parsed.get("LITELLM_API_KEY") or parsed.get("LITELLM_MASTER_KEY")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
@@ -181,6 +208,10 @@ def main() -> int:
     ap.add_argument("--split", default="test")
     ap.add_argument("--slice", default="", help="e.g. 0:1 (smoke) or 0:50 (Verified Mini)")
     ap.add_argument("--filter", default="", help="regex on instance_id")
+    ap.add_argument("--ids", default="",
+                    help="comma-separated instance_ids to run exactly (overrides "
+                         "--filter/--slice/--instances/--mini); used by the "
+                         "distributed worker for single-instance dispatch")
     ap.add_argument("--mini", action="store_true",
                     help="restrict to the pinned SWE-bench Verified Mini-50 (django+sphinx); "
                          "ignores --slice. Defaults to paced runs (see --pace).")
@@ -194,16 +225,27 @@ def main() -> int:
     ap.add_argument("--preflight", action="store_true",
                     help="health-check only: verify unerr runs + MCP tools work in-image. "
                          "No token, no claude, zero cost.")
-    ap.add_argument("--claude-model", default="opus",
+    ap.add_argument("--open-models", action="store_true",
+                    help="route the container's Claude Code at our LiteLLM gateway with the "
+                         "open-weight model ensemble instead of real Claude (same as host env "
+                         "CLAUDE_OPEN_MODELS=1). Skips real-Claude auth; needs "
+                         "LITELLM_API_KEY/LITELLM_MASTER_KEY.")
+    ap.add_argument("--claude-model", default=None,
                     help="model passed to `claude -p` (alias like 'opus'/'sonnet' or a full "
-                         "id), IDENTICAL on both arms. Default 'opus' = the user's real default; "
-                         "the bare container would otherwise fall back to sonnet-4-6.")
+                         "id), IDENTICAL on both arms. Default: 'opus' = the user's real "
+                         "default (the bare container would otherwise fall back to "
+                         "sonnet-4-6); 'sonnet' when --open-models, so it resolves via "
+                         "ANTHROPIC_DEFAULT_SONNET_MODEL.")
     ap.add_argument("--repo-dir", default="/testbed", help="repo root inside the instance image")
     ap.add_argument("--timeout", type=int, default=3600,
                     help="per-instance TOTAL docker seconds (ceiling). The in-container "
                          "claude budget is this minus ~1200s reserved for the ON-arm graph "
                          "warm-up + overhead, so run-instance.sh times out first and still "
                          "captures any partial diff.")
+    ap.add_argument("--parallel", type=int, default=1,
+                    help="accepted for CLI compatibility with the distributed worker "
+                         "(which always passes --parallel 1); instances still run "
+                         "sequentially")
     ap.add_argument("--out", default="results")
     ap.add_argument("--label", default="run",
                     help="label for this run; output goes to <out>/<label>/.")
@@ -214,40 +256,83 @@ def main() -> int:
     # exec inside the x86_64 instance image (under emulation).
     os.environ.setdefault("DOCKER_DEFAULT_PLATFORM", "linux/amd64")
 
-    # Subscription auth: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) is
-    # preferred; ANTHROPIC_API_KEY is an accepted fallback. Either is passed
-    # through to the container untouched.
-    auth_env = {}
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        auth_env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        auth_env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
-    if not auth_env and not args.preflight:
-        print("ERROR: set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token` once) "
-              "or ANTHROPIC_API_KEY — or use --preflight for the zero-cost check",
-              file=sys.stderr)
-        return 1
+    # Open-models mode: point the container's Claude Code at our LiteLLM gateway
+    # + open-weight ensemble instead of real Claude. ON via --open-models or host
+    # env CLAUDE_OPEN_MODELS=1; OFF preserves the real-Claude subscription path
+    # (the else branch below) exactly as before.
+    open_models = args.open_models or os.environ.get("CLAUDE_OPEN_MODELS") == "1"
+
+    auth_env: dict[str, str] = {}
+    if open_models:
+        litellm_key = _load_litellm_key()
+        if not litellm_key and not args.preflight:
+            print("ERROR: open-models mode needs LITELLM_API_KEY or LITELLM_MASTER_KEY "
+                  "(host env, or e2e/econ/.env.local) — or use --preflight for the "
+                  "zero-cost check", file=sys.stderr)
+            return 1
+        # never forward real-Claude auth here — requests must not be able to
+        # route back to real Anthropic while in this mode.
+        auth_env["CLAUDE_OPEN_MODELS"] = "1"
+        auth_env["ANTHROPIC_BASE_URL"] = os.environ.get(
+            "ANTHROPIC_BASE_URL", "https://econ-litellm.fly.dev")
+        if litellm_key:
+            auth_env["ANTHROPIC_AUTH_TOKEN"] = litellm_key
+        auth_env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = os.environ.get(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "minimax/minimax-m3")
+        auth_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = os.environ.get(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL", "deepseek/deepseek-v4-pro")
+        auth_env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = os.environ.get(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "openai/gpt-oss-120b")
+        auth_env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = os.environ.get(
+            "ANTHROPIC_DEFAULT_FABLE_MODEL", "z-ai/glm-5.2")
+    else:
+        # Subscription auth: CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) is
+        # preferred; ANTHROPIC_API_KEY is an accepted fallback. Either is passed
+        # through to the container untouched.
+        if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            auth_env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            auth_env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+        if not auth_env and not args.preflight:
+            print("ERROR: set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token` once) "
+                  "or ANTHROPIC_API_KEY — or use --preflight for the zero-cost check",
+                  file=sys.stderr)
+            return 1
+
+    # Real per-model cost needs each instance on its own LiteLLM virtual key
+    # (open-models only); base_url is the gateway both mint + fetch hit.
+    base_url = auth_env.get("ANTHROPIC_BASE_URL", "") if open_models else ""
+
+    # --claude-model default: 'opus' normally, 'sonnet' under open-models (so it
+    # resolves through ANTHROPIC_DEFAULT_SONNET_MODEL to the conductor tier).
+    claude_model = args.claude_model or ("sonnet" if open_models else "opus")
 
     from datasets import load_dataset  # lazy: only needed at run time
     rows = list(load_dataset(args.dataset, split=args.split))
-    if args.mini:
-        allow = set(MINI_50_IDS)
-        rows = [r for r in rows if r["instance_id"] in allow]
-        missing = allow - {r["instance_id"] for r in rows}
-        if missing:
-            print(f"WARNING: {len(missing)} Mini-50 ids absent from {args.dataset}: "
-                  f"{sorted(missing)[:3]}...", file=sys.stderr)
-        if args.instances == 0:
-            args.instances = len(MINI_50_IDS)
-    if args.filter:
-        import re
-        rows = [r for r in rows if re.match(args.filter, r["instance_id"])]
-    if args.slice and not args.mini:
-        lo, _, hi = args.slice.partition(":")
-        rows = rows[int(lo or 0):int(hi) if hi else None]
-    if args.instances == 0:   # non-mini default = 1 (smoke)
-        args.instances = 1
-    rows = rows[: args.instances]
+    if args.ids:
+        # exact selection for the distributed worker (--ids <single_iid>); overrides
+        # --filter/--slice/--instances/--mini entirely.
+        ids = [s.strip() for s in args.ids.split(",") if s.strip()]
+        rows = [r for r in rows if r["instance_id"] in set(ids)]
+    else:
+        if args.mini:
+            allow = set(MINI_50_IDS)
+            rows = [r for r in rows if r["instance_id"] in allow]
+            missing = allow - {r["instance_id"] for r in rows}
+            if missing:
+                print(f"WARNING: {len(missing)} Mini-50 ids absent from {args.dataset}: "
+                      f"{sorted(missing)[:3]}...", file=sys.stderr)
+            if args.instances == 0:
+                args.instances = len(MINI_50_IDS)
+        if args.filter:
+            import re
+            rows = [r for r in rows if re.match(args.filter, r["instance_id"])]
+        if args.slice and not args.mini:
+            lo, _, hi = args.slice.partition(":")
+            rows = rows[int(lo or 0):int(hi) if hi else None]
+        if args.instances == 0:   # non-mini default = 1 (smoke)
+            args.instances = 1
+        rows = rows[: args.instances]
     if not rows:
         print("no instances after slice/filter", file=sys.stderr)
         return 1
@@ -269,25 +354,75 @@ def main() -> int:
         print(f"\n=== preflight: {len(rows) - failed}/{len(rows)} instances ALL-PASS ===", file=sys.stderr)
         return 1 if failed else 0
 
-    modes = ["on", "off"] if args.mode == "both" else [args.mode]
+    if open_models:
+        # open-models: only the ON arm is meaningful (the OFF/subscription arm is
+        # real-Claude and irrelevant here) — --mode is ignored in this case.
+        modes = ["on"]
+    else:
+        modes = ["on", "off"] if args.mode == "both" else [args.mode]
     out = Path(args.out) / args.label
     out.mkdir(parents=True, exist_ok=True)
 
+    # A single mode (the common case, incl. the distributed worker which always
+    # passes exactly one mode) writes unqualified preds.json/meta.jsonl so a
+    # downstream reader doesn't need to know the mode name; --mode both keeps the
+    # _<mode> suffix so the two arms don't collide in the same <out>/<label>/ dir.
+    def _preds_name(mode: str) -> str:
+        return "preds.json" if len(modes) == 1 else f"preds_{mode}.json"
+
+    def _meta_name(mode: str) -> str:
+        return "meta.jsonl" if len(modes) == 1 else f"meta_{mode}.jsonl"
+
     print(f"instances={len(rows)} modes={modes} dataset={args.dataset} pace={pace}s", file=sys.stderr)
     for mode in modes:
-        preds_path = out / f"preds_{mode}.json"
-        meta_path = out / f"meta_{mode}.jsonl"
+        preds_path = out / _preds_name(mode)
+        meta_path = out / _meta_name(mode)
         preds = json.loads(preds_path.read_text()) if preds_path.exists() else {}
         with meta_path.open("a") as mf:
             for i, inst in enumerate(rows, 1):
                 iid = inst["instance_id"]
                 print(f"[{mode} {i}/{len(rows)}] {iid}", file=sys.stderr)
+
+                # Open-models: mint a per-instance LiteLLM virtual key so cost
+                # tracks per instance instead of pooling under the master key.
+                # Mint failure never aborts the run — fall back to the master.
+                vk = None
+                alias = ""
+                inst_auth = auth_env
+                if open_models and litellm_key:
+                    alias = f"claude-{args.label}-{mode}-{iid}"
+                    vk = mint_instance_key(
+                        base_url, litellm_key, alias=alias,
+                        metadata={"arm": "claude-open-models", "run": args.label,
+                                  "mode": mode, "instance_id": iid},
+                        max_budget=50.0)
+                    if vk:
+                        inst_auth = {**auth_env, "ANTHROPIC_AUTH_TOKEN": vk}
+                    else:
+                        print(f"  WARNING: mint_instance_key failed for {iid}; "
+                              f"falling back to the master key", file=sys.stderr)
+
                 try:
                     patch, meta = solve_instance(
-                        inst, mode, auth_env, args.repo_dir, args.timeout, out,
-                        args.claude_model)
+                        inst, mode, inst_auth, args.repo_dir, args.timeout, out,
+                        claude_model)
                 except subprocess.TimeoutExpired:
                     patch, meta = "", {"instance_id": iid, "mode": mode, "rc": "timeout"}
+
+                if open_models and vk:
+                    meta["cost"] = fetch_cost(base_url, litellm_key, vk, alias=alias)
+                    if isinstance(meta.get("telemetry"), dict):
+                        meta["telemetry"]["usd_anthropic_priced"] = meta["telemetry"].pop("usd", None)
+                    cost = meta["cost"]
+                    anthropic_usd = (meta.get("telemetry") or {}).get("usd_anthropic_priced") or 0
+                    print(
+                        f"  cost: ${cost.get('usd', 0):.4f} real "
+                        f"(vs ${anthropic_usd:.4f} anthropic-priced) "
+                        f"turns={cost.get('requests')} "
+                        f"models={list(cost.get('by_model', {}))}",
+                        file=sys.stderr,
+                    )
+
                 preds[iid] = {
                     "instance_id": iid,
                     "model_name_or_path": f"claude-{mode}",
@@ -300,13 +435,13 @@ def main() -> int:
 
     print("\n=== predictions written ===", file=sys.stderr)
     for mode in modes:
-        print(f"  {out}/preds_{mode}.json", file=sys.stderr)
+        print(f"  {out}/{_preds_name(mode)}", file=sys.stderr)
     print("\n=== grade them (standard SWE-bench harness) ===", file=sys.stderr)
     for mode in modes:
         print(
             f"  python -m swebench.harness.run_evaluation \\\n"
             f"    --dataset_name {args.dataset} --split {args.split} \\\n"
-            f"    --predictions_path {out}/preds_{mode}.json \\\n"
+            f"    --predictions_path {out}/{_preds_name(mode)} \\\n"
             f"    --run_id claude_{mode} --max_workers 4 --cache_level env",
             file=sys.stderr,
         )

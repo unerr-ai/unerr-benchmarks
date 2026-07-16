@@ -51,6 +51,24 @@ fi
 export OPENCODE_DB="$OUT/opencode.db"
 rm -f "$OPENCODE_DB"
 
+# Start err.txt empty so the [graph-init] marker below (and opencode run's
+# appended stderr further down) land together in the file engine.log tails —
+# graph-init's log() line alone never reaches the bundle otherwise.
+: > "$OUT/err.txt"
+
+# Warm the code-graph up front (mirrors the claude arm's `unerr index`) so the
+# first agent turn starts on a ready graph instead of cold-indexing mid-request.
+# No --force: warm-starts off the persisted per-repo graph cache (see
+# run-benchmark.py's GRAPH_CACHE_ROOT mount) and reconciles changed/added/
+# deleted files by content hash instead of re-indexing the whole repo.
+if timeout 600 "$TOOLBOX/opencode" init "$REPO_DIR" --json >/tmp/opencode-init.log 2>&1; then
+  log "graph init: ok ($(grep -oE '\"entities\":[0-9]+' /tmp/opencode-init.log | head -1) $(grep -oE '\"edges\":[0-9]+' /tmp/opencode-init.log | head -1))"
+  printf '[graph-init] %s\n' "$(tr -d "\n" < /tmp/opencode-init.log)" >> "$OUT/err.txt"
+else
+  log "graph init: FAILED/timeout (see /tmp/opencode-init.log) — agent may cold-index on first tool call"
+  printf '[graph-init] FAILED/timeout: %s\n' "$(tr -d "\n" < /tmp/opencode-init.log)" >> "$OUT/err.txt"
+fi
+
 PROBLEM="$(cat "$PROBLEM_FILE")"
 
 log "econ run starting (repo=$REPO_DIR, timeout=${ECON_TIMEOUT}s)"
@@ -66,7 +84,7 @@ timeout "$ECON_TIMEOUT" "$TOOLBOX/opencode" run \
   --dir "$REPO_DIR" \
   --dangerously-skip-permissions \
   "$PROBLEM" \
-  > "$OUT/events.jsonl" 2> "$OUT/err.txt"
+  > "$OUT/events.jsonl" 2>> "$OUT/err.txt"
 ECON_RC=$?
 log "econ exit=$ECON_RC"
 [ "$ECON_RC" -ne 0 ] && sed 's/^/[econ.err] /' "$OUT/err.txt" | tail -30 >&2

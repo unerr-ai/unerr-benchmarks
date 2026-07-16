@@ -124,6 +124,38 @@ fi
 log "seeded"
 emit "\"seeded\",\"n\":$N_SEED"
 
+# ── 2.5 Wait until the run is ARMED (prepare/run split) ─────────────────────
+# COORD_ARMED=1 (default, all-in-one) → server.py boots armed, so this gate
+# passes on the first /status poll and behaviour is unchanged. When `prepare`
+# booted the coordinator with COORD_ARMED=0, the server holds /claim at
+# {wait:true} (warm workers idle, toolbox already built) and /drain never
+# reports drained; we block HERE — deliberately BEFORE START_TS so the warm-hold
+# does NOT count against MAXWAIT — until the host's `run` step POSTs /arm. The
+# `prepared` beacon (with worker-ready count) lets the host know the fleet is warm.
+PREPARE_MAXWAIT="${PREPARE_MAXWAIT:-43200}"   # 12h ceiling on the warm-hold
+ARM_START=$(date +%s)
+LAST_PREP_LOG=0
+while :; do
+  PELAPSED=$(( $(date +%s) - ARM_START ))
+  STATUS_JSON="$(curl -sf "$BASE/status" 2>/dev/null || true)"
+  if printf '%s' "$STATUS_JSON" | grep -q '"armed"[[:space:]]*:[[:space:]]*true'; then
+    log "armed after ${PELAPSED}s — releasing fleet"; emit '"armed"'; break
+  fi
+  if [ "$PELAPSED" -ge "$PREPARE_MAXWAIT" ]; then
+    log "PREPARE_MAXWAIT (${PREPARE_MAXWAIT}s) exceeded without /arm — proceeding"
+    emit '"prepare_timeout"'; break
+  fi
+  if [ $((PELAPSED - LAST_PREP_LOG)) -ge 30 ]; then
+    NW=$(printf '%s' "$STATUS_JSON" | "$PY" -c 'import json,sys
+try: print(len((json.load(sys.stdin).get("workers_seen") or [])))
+except Exception: print(0)' 2>/dev/null || echo 0)
+    log "prepare: warm & holding (t+${PELAPSED}s) — workers_ready=${NW}"
+    emit "\"prepared\",\"workers_ready\":${NW}"
+    LAST_PREP_LOG=$PELAPSED
+  fi
+  sleep 10
+done
+
 # ── 3. Wait for drain (work-stealing fleet claims/completes/fails rows) ─────
 log "waiting for queue to drain (poll 20s, status log ~60s, maxwait ${MAXWAIT}s)"
 START_TS=$(date +%s)
@@ -268,11 +300,22 @@ TOTAL=$(jq -r '.submitted_instances // .total_instances // 0' "$MERGED_GRADE" 2>
 log "grade merged: resolved=${RESOLVED:-?}/${TOTAL:-?}"
 emit "\"grade_done\",\"run_id\":\"$RUN_ID\",\"resolved\":${RESOLVED:-0},\"total\":${TOTAL:-0}"
 
-# ── 6. Cost/tier report (report.py joins meta.jsonl + the merged grade) ─────
+# ── 6. Cost/tier report (arm-aware: claude uses cost_report.py, else report.py
+#      joins meta.jsonl + the merged grade) ─────────────────────────────────
 # Reused verbatim, not reimplemented (PLAN.md §1 consolidation guarantee).
 # report.py has no third-party deps (stdlib only) so plain python3 runs it.
 log "aggregating cost report"
-if [ -f "$REPORT_PY" ]; then
+if [ "$ARM" = "claude" ]; then
+  CLAUDE_COST_PY="/work/claude/local-docker/cost_report.py"
+  if [ -f "$CLAUDE_COST_PY" ]; then
+    if ! "$PY" "$CLAUDE_COST_PY" "$RUNDIR" --mode on --grade "$MERGED_GRADE" \
+          >"$LOGDIR/report-$LABEL.log" 2>&1; then
+      log "cost_report.py nonzero exit — tail:"; tail -20 "$LOGDIR/report-$LABEL.log" >&2
+    fi
+  else
+    log "CLAUDE_COST_PY=$CLAUDE_COST_PY not found — skipping cost report (guard for arm-specific path)"
+  fi
+elif [ -f "$REPORT_PY" ]; then
   if ! "$PY" "$REPORT_PY" --meta "$RUNDIR/meta.jsonl" --grade-report "$MERGED_GRADE" \
         --label "$LABEL" --out "$RUNDIR" >"$LOGDIR/report-$LABEL.log" 2>&1; then
     log "report.py nonzero exit — tail:"; tail -20 "$LOGDIR/report-$LABEL.log" >&2

@@ -69,8 +69,23 @@ boot_dockerd() {
   # (single-machine run), so this call is inert there.
   ensure_overlay2_backing "$data_root" "${DOCKER_FS_GB:-42}" "$logdir"
 
+  # Optional pull-through registry mirror — SHARED across every arm (econ, claude,
+  # future arms all boot dockerd through this one function). When
+  # SWEBENCH_REGISTRY_MIRROR is set, point dockerd at it so a fresh worker's
+  # SWE-bench testbed-image pull (docker.io/swebench/sweb.eval.x86_64.<iid>) hits a
+  # shared cache instead of Docker Hub directly. It's plain HTTP on the private
+  # 6PN, so its bare host:port also goes into --insecure-registry. Unset (the
+  # default) -> mirror_flags stays empty -> dockerd start is byte-for-byte unchanged.
+  local -a mirror_flags=()
+  if [ -n "${SWEBENCH_REGISTRY_MIRROR:-}" ]; then
+    local mirror_hostport="${SWEBENCH_REGISTRY_MIRROR#*://}"
+    mirror_flags=(--registry-mirror="$SWEBENCH_REGISTRY_MIRROR" --insecure-registry="$mirror_hostport")
+    log "registry mirror: $SWEBENCH_REGISTRY_MIRROR"
+  fi
+
   log "starting dockerd (data-root=$data_root)"
   dockerd --data-root="$data_root" --storage-driver=overlay2 \
+          "${mirror_flags[@]+"${mirror_flags[@]}"}" \
           >"$logdir/dockerd.log" 2>&1 &
   dockerd_pid=$!
 
@@ -93,7 +108,7 @@ boot_dockerd() {
 # build_toolbox <dockerfile> <context> <image_tag> <logdir>
 #
 # Builds <image_tag> from <dockerfile> with build context <context> (the
-# arm-specific toolbox image, e.g. unerr-econ-toolbox), logs to
+# arm-specific toolbox image, e.g. econ-toolbox or unerr-claude-toolbox), logs to
 # <logdir>/toolbox-build.log, and emits the `toolbox_built` beacon. Fatal on
 # failure: emits `"fatal","stage":"toolbox"` and exits 12, matching the
 # original inline behaviour byte-for-byte.

@@ -13,6 +13,7 @@
 #   - dev-entitlement.mjs    (offline Pro-token minter, zero-dep, node-only)
 #   - run-instance.sh        (the in-container driver — Claude variant)
 #   - preflight.sh / mcp-healthcheck.mjs / lib.sh
+#   - cc-harness-hooks.py    (OPEN-MODELS mechanical finish-gate hooks)
 
 FROM node:24-bookworm-slim AS build
 ENV TOOLBOX=/opt/toolbox
@@ -42,9 +43,14 @@ RUN npm config set prefix "$TOOLBOX" \
 
 COPY dev-entitlement.mjs  $TOOLBOX/dev-entitlement.mjs
 COPY mcp-healthcheck.mjs  $TOOLBOX/mcp-healthcheck.mjs
+COPY cc-harness-hooks.py  $TOOLBOX/cc-harness-hooks.py
 COPY lib.sh               $TOOLBOX/lib.sh
 COPY run-instance.sh      $TOOLBOX/run-instance.sh
 COPY preflight.sh         $TOOLBOX/preflight.sh
+# Shipped agent files (open-models arm): run-instance.sh resolves them next to
+# itself at runtime ($TOOLBOX/agents) and copies unerr-*.md over the freshly
+# `unerr install`ed .claude/agents/ when CLAUDE_OPEN_MODELS=1.
+COPY agents/              $TOOLBOX/agents/
 RUN chmod +x $TOOLBOX/run-instance.sh $TOOLBOX/preflight.sh
 
 # Minimal carrier image — only the toolbox, nothing else.

@@ -6,9 +6,9 @@
 #     --build-arg INSTANCE_IMAGE=swebench/sweb.eval.x86_64.<id>:latest \
 #     -t unerr-econ-run:<id> .
 #
-# `COPY --from=unerr-econ-toolbox` references the locally-built toolbox image
+# `COPY --from=econ-toolbox` references the locally-built toolbox image
 # (see Dockerfile.toolbox / entrypoint.sh) — no network, just a cached layer copy.
 
 ARG INSTANCE_IMAGE
 FROM ${INSTANCE_IMAGE}
-COPY --from=unerr-econ-toolbox /opt/toolbox /opt/toolbox
+COPY --from=econ-toolbox /opt/toolbox /opt/toolbox

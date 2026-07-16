@@ -50,11 +50,27 @@ import sqlite3
 import sys
 
 # econ's Fireworks-BYOK price matrix, keyed by BARE modelID (USD per 1M tokens).
-# Mirrors packages/code-intelligence/src/econ-cost.ts::ECON_COST_MATRIX.
+# MUST mirror packages/code-intelligence/src/econ-cost.ts::ECON_COST_MATRIX (the
+# source of truth) in the econ-coding-agent repo. When econ rebinds a tier to a
+# new model, add it here in the same change — otherwise that tier's per-tier USD
+# silently reads $0 (exactly the drift that hid the minimax-m3 conductor cost).
+# The `unpriced_models` surfacing in build() turns any future gap into a visible
+# flag instead of a silent zero.
 ECON_COST_MATRIX = {
-    "deepseek/deepseek-v4-flash": {"input": 0.14, "cachedInput": 0.03, "output": 0.28},
-    "z-ai/glm-5.2": {"input": 1.4, "cachedInput": 0.14, "output": 4.4},
-    "openai/gpt-oss-20b": {"input": 0.0, "cachedInput": 0.0, "output": 0.0},
+    # conductor (legacy, pre-OL-8.B4)
+    "deepseek/deepseek-v4-flash": {"input": 0.14, "cachedInput": 0.03, "cacheWrite": 0.14, "output": 0.28},
+    # oracle
+    "z-ai/glm-5.2": {"input": 1.4, "cachedInput": 0.14, "cacheWrite": 1.4, "output": 4.4},
+    # reasoner (OL-8.B4+, was shared glm-5.2)
+    "deepseek/deepseek-v4-pro": {"input": 1.74, "cachedInput": 0.15, "cacheWrite": 1.74, "output": 3.48},
+    # executor (OL-8.B4+, was gpt-oss-20b self-hosted $0) — real Fireworks serverless rate
+    "openai/gpt-oss-120b": {"input": 0.15, "cachedInput": 0.01, "cacheWrite": 0.15, "output": 0.60},
+    # conductor (current) + catalog models available in the gateway/registry
+    "minimax/minimax-m3": {"input": 0.3, "cachedInput": 0.06, "cacheWrite": 0.3, "output": 1.2},
+    "moonshotai/kimi-k2p7-code": {"input": 0.95, "cachedInput": 0.19, "cacheWrite": 0.95, "output": 4.0},
+    # legacy self-hosted executor (pre-OL-8.B4) — kept at $0 so old-run reports
+    # don't false-flag it as unpriced; it was genuinely self-hosted at $0.
+    "openai/gpt-oss-20b": {"input": 0.0, "cachedInput": 0.0, "cacheWrite": 0.0, "output": 0.0},
 }
 _LITELLM_PREFIX = "litellm/"
 
@@ -69,8 +85,18 @@ def _bare_model(model_id):
     return model_id if isinstance(model_id, str) else ""
 
 
+def is_priced(model_id):
+    """True iff this model has a rate in ECON_COST_MATRIX (so its USD is real,
+    not a silent $0 from an unknown-model fallthrough)."""
+    return _bare_model(model_id) in ECON_COST_MATRIX
+
+
 def econ_step_cost(model_id, tok):
-    """econ BYOK USD for one message's tokens — matches econStepCost()."""
+    """econ BYOK USD for one message's tokens — mirrors
+    packages/code-intelligence/src/econ-cost.ts::econStepCost (cache WRITE billed
+    at its own cacheWrite rate; reasoning billed at the output rate). Returns 0.0
+    for a model absent from the matrix — callers must use is_priced() to tell a
+    real $0 from an unpriced-model $0."""
     rate = ECON_COST_MATRIX.get(_bare_model(model_id))
     if not rate:
         return 0.0
@@ -78,7 +104,7 @@ def econ_step_cost(model_id, tok):
     return (
         _num(tok.get("input")) * rate["input"]
         + _num(cache.get("read")) * rate["cachedInput"]
-        + _num(cache.get("write")) * rate["input"]
+        + _num(cache.get("write")) * rate.get("cacheWrite", rate["input"])
         + _num(tok.get("output")) * rate["output"]
         + _num(tok.get("reasoning")) * rate["output"]
     ) / 1_000_000
@@ -86,14 +112,15 @@ def econ_step_cost(model_id, tok):
 
 def _empty_tier():
     return dict(usd=0.0, usd_upstream=0.0, in_tokens=0, cached_in=0, out_tokens=0,
-               reasoning_tokens=0, cache_write=0, messages=0, models=set())
+               reasoning_tokens=0, cache_write=0, messages=0, priced=True, models=set())
 
 
 def _zero_result(db, session_id, error=None):
     out = dict(
         source="sqlite", db=db, session_id=session_id, sessions=0,
         usd=0.0, usd_upstream=0.0, in_tokens=0, cached_in=0, out_tokens=0,
-        reasoning_tokens=0, cache_write=0, messages=0, by_tier={}, by_model={},
+        reasoning_tokens=0, cache_write=0, messages=0,
+        unpriced_models=[], all_priced=True, by_tier={}, by_model={},
     )
     if error:
         out["error"] = error
@@ -150,6 +177,7 @@ def build(db, session_id):
     by_tier: dict[str, dict] = {}
     by_model: dict[str, dict] = {}
     totals = _empty_tier()
+    unpriced: dict[str, int] = {}  # model_id -> token volume for models absent from the matrix
 
     for raw in datas:
         try:
@@ -168,6 +196,7 @@ def build(db, session_id):
         tier = d.get("agent") or "<unknown>"
         econ_usd = econ_step_cost(model_id, tok)
         upstream_usd = _num(d.get("cost"))
+        priced = is_priced(model_id)
 
         def add(bucket):
             bucket["usd"] += econ_usd
@@ -178,6 +207,14 @@ def build(db, session_id):
             bucket["reasoning_tokens"] += _num(tok.get("reasoning"))
             bucket["cache_write"] += _num(cache.get("write"))
             bucket["messages"] += 1
+            if not priced:
+                bucket["priced"] = False
+
+        if not priced:
+            unpriced[model_id] = unpriced.get(model_id, 0) + (
+                _num(tok.get("input")) + _num(cache.get("read"))
+                + _num(tok.get("output")) + _num(tok.get("reasoning"))
+            )
 
         t = by_tier.setdefault(tier, _empty_tier())
         add(t)
@@ -205,6 +242,10 @@ def build(db, session_id):
         in_tokens=totals["in_tokens"], cached_in=totals["cached_in"],
         out_tokens=totals["out_tokens"], reasoning_tokens=totals["reasoning_tokens"],
         cache_write=totals["cache_write"], messages=totals["messages"],
+        # models that ran but had no matrix entry (their per-tier USD is a silent
+        # $0 — a drift signal, e.g. econ rebound a tier to an unpriced model).
+        unpriced_models=sorted(unpriced),
+        all_priced=(not unpriced),
         by_tier={k: fin(v) for k, v in by_tier.items()},
         by_model={k: {**fin(v), "tier": (sorted(v["models"])[0] if v["models"] else None)}
                   for k, v in by_model.items()},

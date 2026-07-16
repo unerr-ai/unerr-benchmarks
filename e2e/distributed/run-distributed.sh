@@ -22,6 +22,12 @@
 #   MACHINES=25 ARM=econ LABEL=full-ded DEDICATED_CONDUCTOR=1 ./run-distributed.sh  # ephemeral dedicated-GPU conductor (see README §2); ~$80/hr while up
 #   DESTROY_ONLY=1 LABEL=dist-smoke ./run-distributed.sh                   # just tear a fleet down
 #
+#   # prepare/run split — warm the fleet (build the ~10-min toolbox) BEFORE raising
+#   # the GPU, so the $80/hr conductor never idles during warmup:
+#   MACHINES=5 ARM=claude LABEL=mini SUITE=mini ./run-distributed.sh prepare  # build + warm + HOLD at the gate (no work, no GPU)
+#   LABEL=mini ARM=claude DEDICATED_CONDUCTOR=1 ./run-distributed.sh run      # raise GPU → arm → poll → bundle → teardown
+#   LABEL=mini ./run-distributed.sh arm                                       # just flip the gate (fleet claims; poll/bundle later with `run`)
+#
 # Prereqs: flyctl logged in (token auto-read from ~/.fly/config.yml); econ built
 #          locally (see RUNBOOK §1); LITELLM_API_KEY exported or in e2e/econ/.env.local;
 #          python3 on PATH (+ `datasets` only if SUITE=full/verified/lite).
@@ -33,10 +39,15 @@ ECON_REPO="${ECON_REPO:-$HERE/../../../econ-coding-agent}"         # sibling of 
 cd "$HERE"
 
 # ── config ────────────────────────────────────────────────────────────────────
-APP="${APP:-swebench-agent-dist}"           # FIXED app; each run scoped by fleet=<LABEL> metadata
 ORG="${FLY_ORG:-your-fly-org}"               # fly org; override via FLY_ORG
 REGION="${REGION:-iad}"
 ARM="${ARM:-econ}"
+# App default is arm-aware (ARM must be known first, above): econ keeps the
+# original fixed app name byte-for-byte; claude gets its own app so the two
+# arms' fleets never collide.
+DEFAULT_APP="swebench-agent-dist"
+[ "$ARM" = "claude" ] && DEFAULT_APP="swebench-agent-dist-claude"
+APP="${APP:-$DEFAULT_APP}"                  # FIXED app; each run scoped by fleet=<LABEL> metadata
 LABEL="${LABEL:-}"                          # REQUIRED, unique per run — doubles as RUN_ID + fleet metadata
 MACHINES="${MACHINES:-}"                    # REQUIRED (unless DESTROY_ONLY) — worker count N
 DESTROY_ONLY="${DESTROY_ONLY:-0}"           # 1 = only tear down the fleet named by LABEL, then exit
@@ -91,8 +102,9 @@ fi
 
 HOLD="${HOLD:-3600}"                        # coordinator holds open this long after bundle for the pull
 MAXWAIT="${MAXWAIT:-172800}"                # host poll ceiling (48h — covers long/large runs; the fleet self-stops on drain regardless of this)
-PER_INSTANCE_TIMEOUT="${PER_INSTANCE_TIMEOUT:-14400}"  # per-task resolve ceiling (4h); the worker kills a resolve that runs past this
+PER_INSTANCE_TIMEOUT="${PER_INSTANCE_TIMEOUT:-10800}"  # per-task resolve ceiling (3h normal; stall watchdog handles hangs — STALL_KILL_S)
 GRADE_WORKERS="${GRADE_WORKERS:-6}"         # swebench harness --max_workers on the worker
+STALL_KILL_S="${STALL_KILL_S:-2700}"        # seconds of zero log growth before a resolve is killed for restart
 HEARTBEAT_TIMEOUT="${HEARTBEAT_TIMEOUT:-300}"          # coordinator reaps a lease after this much heartbeat silence (10 beats @30s)
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
@@ -188,6 +200,52 @@ verify_gateway_flip() {                     # verify_gateway_flip <dedicated-mod
   return 1
 }
 
+# ── dedicated-conductor bring-up (extracted so both all-in-one and `run` mode
+#    raise the GPU + flip the gateway from one place). ──────────────────────────
+bring_up_dedicated() {
+  echo "==> DEDICATED_CONDUCTOR=1 — bringing up ephemeral Fireworks conductor deployment (~\$80/hr while up)"
+  trap 'cleanup_dedicated; exit 130' INT
+  trap 'cleanup_dedicated; exit 143' TERM
+  trap 'cleanup_dedicated' EXIT
+  bash "$FW" up || { echo "dedicated conductor: deployment did not come up — aborting"; destroy_fleet; exit 1; }
+  DPATH="$(bash "$FW" print-path)"
+  echo "==> flipping gateway $GATEWAY_APP conductor -> dedicated (secret $CONDUCTOR_SECRET); gateway restarts"
+  flyctl secrets set "$CONDUCTOR_SECRET=$DPATH" -a "$GATEWAY_APP" >/dev/null \
+    || { echo "failed to set gateway secret — aborting"; destroy_fleet; exit 1; }
+  echo "==> waiting for gateway health after restart ($GATEWAY_HEALTH_URL)"
+  gw_ok=0; code=""
+  for _ in $(seq 1 40); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GATEWAY_HEALTH_URL" 2>/dev/null || true)"
+    [ "$code" = "200" ] && { gw_ok=1; echo "    gateway healthy"; break; }
+    sleep 6
+  done
+  [ "$gw_ok" = "1" ] || echo "    WARN: gateway health not confirmed (last code=${code:-none}) — proceeding"
+  if verify_gateway_flip "$DPATH"; then
+    echo "    verified: gateway conductor now routes to the dedicated deployment"
+  else
+    echo "    WARN: could not confirm conductor routing to the dedicated deployment —"
+    echo "          is the gateway built with infra/litellm/econ-entrypoint.sh? deploy it once, else you pay for an unused GPU"
+  fi
+}
+
+# ── /status probe (curl INSIDE the coordinator via ssh — host is off 6PN); used
+#    by both the prepare readiness-wait and the main drain poll. ────────────────
+poll_status() {
+  flyctl ssh console -a "$APP" --machine "$COORD_MID" -C "curl -s localhost:8080/status" 2>/dev/null \
+    | grep -vE 'Connecting|Waiting|Connected|already'
+}
+
+# ── mode dispatch: prepare (warm+hold) / run (arm a prepared fleet + poll) /
+#    arm (just flip the gate) / destroy | default = all-in-one (unchanged). ──────
+MODE="all"
+case "${1:-}" in
+  prepare|run|arm) MODE="$1"; shift ;;
+  destroy)         DESTROY_ONLY=1; shift ;;
+esac
+# COORD_ARMED=0 only in prepare → server holds /claim at {wait} so workers warm
+# and idle; every other mode boots armed (byte-identical all-in-one behaviour).
+COORD_ARMED_VAL=1; [ "$MODE" = "prepare" ] && COORD_ARMED_VAL=0
+
 # ── DESTROY_ONLY: nuke the fleet named by LABEL and exit ──────────────────────
 if [ "$DESTROY_ONLY" = "1" ]; then
   [ -n "$LABEL" ] || { echo "DESTROY_ONLY=1 needs LABEL=<fleet>"; exit 1; }
@@ -198,12 +256,35 @@ fi
 
 # ── required args ─────────────────────────────────────────────────────────────
 [ -n "$LABEL" ]    || { echo "set LABEL=<unique-run-id> (names the fleet metadata + coordinator RUN_ID)"; exit 1; }
-[ -n "$MACHINES" ] || { echo "set MACHINES=<N> (number of worker machines)"; exit 1; }
-case "$MACHINES" in (*[!0-9]*|'') echo "MACHINES must be a positive integer"; exit 1;; esac
-[ "$MACHINES" -ge 1 ] || { echo "MACHINES must be >= 1"; exit 1; }
+# run/arm attach to an already-created fleet, so MACHINES is only required when
+# building one (prepare / all-in-one).
+if [ "$MODE" != "run" ] && [ "$MODE" != "arm" ]; then
+  [ -n "$MACHINES" ] || { echo "set MACHINES=<N> (number of worker machines)"; exit 1; }
+  case "$MACHINES" in (*[!0-9]*|'') echo "MACHINES must be a positive integer"; exit 1;; esac
+  [ "$MACHINES" -ge 1 ] || { echo "MACHINES must be >= 1"; exit 1; }
+fi
 
 OUTDIR="$HERE/out/dist-$LABEL"
 mkdir -p "$OUTDIR"
+
+# ── mode branch: run/arm ATTACH to an already-prepared fleet; prepare/all BUILD it
+if [ "$MODE" = "run" ] || [ "$MODE" = "arm" ]; then
+  COORD_MID="$(fleet_ids coordinator | head -1)"
+  [ -n "$COORD_MID" ] || { echo "no coordinator found for fleet '$LABEL' — run 'prepare' first"; exit 1; }
+  COORD_URL="http://${COORD_MID}.vm.${APP}.internal:8080"
+  echo "==> attaching to prepared fleet '$LABEL' — coordinator $COORD_MID  ($COORD_URL)"
+  # Raise the GPU now (run only) — kept out of `prepare` so it never idles during warmup.
+  if [ "$MODE" = "run" ] && [ "$DEDICATED_CONDUCTOR" = "1" ]; then bring_up_dedicated; fi
+  echo "==> arming fleet (POST /arm on the coordinator via ssh)"
+  flyctl ssh console -a "$APP" --machine "$COORD_MID" -C "curl -s -X POST localhost:8080/arm" 2>/dev/null \
+    | grep -vE 'Connecting|Waiting|Connected|already' || true
+  if [ "$MODE" = "arm" ]; then
+    echo "==> armed. Fleet '$LABEL' is now claiming; poll/bundle later with: LABEL=$LABEL ./run-distributed.sh run"
+    exit 0
+  fi
+  echo "==> armed — proceeding to poll/bundle/teardown"
+else
+# ═══════════ prepare / all-in-one: build the image + create the fleet ═════════
 
 # ── campaign image pin (locks one image across all tranches of a multi-run
 # campaign) — skipped entirely when CAMPAIGN is unset (DESTROY_ONLY already
@@ -238,6 +319,22 @@ fi
 [ -n "${LITELLM_API_KEY:-}" ] || { echo "set LITELLM_API_KEY (or add it to e2e/econ/.env.local)"; exit 1; }
 export LITELLM_API_KEY
 echo "==> LITELLM_API_KEY: set (len ${#LITELLM_API_KEY})"
+
+# ── auth: LiteLLM MASTER key (claude arm only) — the econ LITELLM_API_KEY above
+# may be a non-master/placeholder; claude mints a per-instance virtual key on
+# each worker and needs a mint-capable master key to do it. Prefer env, else
+# the sibling econ-coding-agent infra .env.local (never econ's .env.local).
+if [ "$ARM" = "claude" ]; then
+  if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+    _INFRA_ENV="$HERE/../../../econ-coding-agent/infra/litellm/.env.local"
+    if [ -f "$_INFRA_ENV" ]; then
+      LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "$_INFRA_ENV" | head -1 | sed 's/^LITELLM_MASTER_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
+    fi
+  fi
+  [ -n "${LITELLM_MASTER_KEY:-}" ] || { echo "set LITELLM_MASTER_KEY (or add it to ../econ-coding-agent/infra/litellm/.env.local) — claude arm needs it to mint per-instance keys"; exit 1; }
+  export LITELLM_MASTER_KEY
+  echo "==> LITELLM_MASTER_KEY: set (len ${#LITELLM_MASTER_KEY})"
+fi
 
 # EXA web-search key — web search OFF by default for a clean, baseline-comparable
 # run (SWE-bench fixes are public → web search = answer-lookup). STRICTLY opt-in:
@@ -307,6 +404,8 @@ if [ "$ARM" = "econ" ]; then
   else
     echo "    engine: none at $CI_SRC/src — in-container plugins fall back and stay disabled"
   fi
+elif [ "$ARM" = "claude" ]; then
+  log "arm=claude: no vendor step"
 fi
 
 # ── resolve the task set → INSTANCE_IDS (comma-separated) ─────────────────────
@@ -475,7 +574,7 @@ run_machine "$OUTDIR/coord-run.log" "$IMG" \
   --metadata fleet="$LABEL" --metadata role=coordinator \
   -e RUN_ID="$LABEL" -e TASKS="$INSTANCE_IDS" \
   -e DATASET="$DATASET" -e SPLIT="$SPLIT" -e HOLD="$HOLD" \
-  -e HEARTBEAT_TIMEOUT="$HEARTBEAT_TIMEOUT" \
+  -e HEARTBEAT_TIMEOUT="$HEARTBEAT_TIMEOUT" -e COORD_ARMED="$COORD_ARMED_VAL" \
   || { echo "coordinator create failed — see $OUTDIR/coord-run.log"; exit 1; }
 cat "$OUTDIR/coord-run.log"
 COORD_MID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/coord-run.log" | head -1 | awk '{print $3}')"
@@ -491,34 +590,11 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 
-# ── dedicated conductor: bring up the GPU + flip the gateway (opt-in) ──────────
-# Done AFTER the coordinator is up but BEFORE any worker starts resolving (workers
-# make conductor calls the moment they claim a task), so the gateway is flipped and
-# healthy first. The traps are set BEFORE `up` so even a failed bring-up is torn down.
-if [ "$DEDICATED_CONDUCTOR" = "1" ]; then
-  echo "==> DEDICATED_CONDUCTOR=1 — bringing up ephemeral Fireworks conductor deployment (~\$80/hr while up)"
-  trap 'cleanup_dedicated; exit 130' INT
-  trap 'cleanup_dedicated; exit 143' TERM
-  trap 'cleanup_dedicated' EXIT
-  bash "$FW" up || { echo "dedicated conductor: deployment did not come up — aborting"; destroy_fleet; exit 1; }
-  DPATH="$(bash "$FW" print-path)"
-  echo "==> flipping gateway $GATEWAY_APP conductor -> dedicated (secret $CONDUCTOR_SECRET); gateway restarts"
-  flyctl secrets set "$CONDUCTOR_SECRET=$DPATH" -a "$GATEWAY_APP" >/dev/null \
-    || { echo "failed to set gateway secret — aborting"; destroy_fleet; exit 1; }
-  echo "==> waiting for gateway health after restart ($GATEWAY_HEALTH_URL)"
-  gw_ok=0; code=""
-  for _ in $(seq 1 40); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GATEWAY_HEALTH_URL" 2>/dev/null || true)"
-    [ "$code" = "200" ] && { gw_ok=1; echo "    gateway healthy"; break; }
-    sleep 6
-  done
-  [ "$gw_ok" = "1" ] || echo "    WARN: gateway health not confirmed (last code=${code:-none}) — proceeding"
-  if verify_gateway_flip "$DPATH"; then
-    echo "    verified: gateway conductor now routes to the dedicated deployment"
-  else
-    echo "    WARN: could not confirm conductor routing to the dedicated deployment —"
-    echo "          is the gateway built with infra/litellm/econ-entrypoint.sh? deploy it once, else you pay for an unused GPU"
-  fi
+# ── dedicated conductor: bring up the GPU + flip the gateway (all-in-one only).
+#    `prepare` skips it so the ~$80/hr GPU never idles during the toolbox warmup;
+#    `run` raises it just before arming (see the run/arm branch above). ──────────
+if [ "$MODE" = "all" ] && [ "$DEDICATED_CONDUCTOR" = "1" ]; then
+  bring_up_dedicated
 fi
 
 # ── create N WORKER machines, PACED (burst 3 then sleep) ──────────────────────
@@ -529,6 +605,16 @@ fi
 # unpack is IOPS-starved on the smoke, flip a worker to a volume instead.
 echo "==> creating $MACHINES worker(s) (${MEM}MB/${CPUS}cpu/${CPU_KIND}, no volume, paced <=1/s)"
 ROOTFS_FLAG=(); [ -n "$ROOTFS_GB" ] && ROOTFS_FLAG=(--rootfs-size "$ROOTFS_GB")
+# claude-only worker env — EMPTY for every other arm (econ unaffected).
+EXTRA_ENV=()
+if [ "$ARM" = "claude" ]; then
+  EXTRA_ENV+=(-e CLAUDE_OPEN_MODELS=1 -e LITELLM_MASTER_KEY="$LITELLM_MASTER_KEY" -e ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://econ-litellm.fly.dev}")
+fi
+# Optional pull-through registry mirror for SWE-bench testbed image pulls — ARM-
+# AGNOSTIC (unlike EXTRA_ENV above), shared across econ, claude, and future arms
+# (see e2e/distributed/lib/boot.sh::boot_dockerd). Passed through only when set in
+# the launching shell; unset -> empty array -> no flag emitted, no default set here.
+MIRROR_ENV=(); [ -n "${SWEBENCH_REGISTRY_MIRROR:-}" ] && MIRROR_ENV=(-e SWEBENCH_REGISTRY_MIRROR="$SWEBENCH_REGISTRY_MIRROR")
 WORKERS_OK=0
 for i in $(seq 1 "$MACHINES"); do
   if run_machine "$OUTDIR/worker-$i-run.log" "$IMG" \
@@ -540,8 +626,10 @@ for i in $(seq 1 "$MACHINES"); do
       -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e RUN_ID="$LABEL" \
       -e DATASET="$DATASET" -e SPLIT="$SPLIT" \
       -e PER_INSTANCE_TIMEOUT="$PER_INSTANCE_TIMEOUT" -e GRADE_WORKERS="$GRADE_WORKERS" \
+      -e STALL_KILL_S="${STALL_KILL_S:-2700}" \
       -e MAX_ARTIFACT_TEXT_BYTES="${MAX_ARTIFACT_TEXT_BYTES:-5000000}" -e MAX_ARTIFACT_DB_BYTES="${MAX_ARTIFACT_DB_BYTES:-8000000}" \
-      -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY"; then
+      -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY" \
+      "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${MIRROR_ENV[@]+"${MIRROR_ENV[@]}"}"; then
     WID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/worker-$i-run.log" | head -1 | awk '{print $3}')"
     WORKERS_OK=$((WORKERS_OK + 1))
     echo "    worker $i/$MACHINES: ${WID:-?}"
@@ -554,6 +642,38 @@ done
 echo "==> $WORKERS_OK/$MACHINES workers created"
 [ "$WORKERS_OK" -ge 1 ] || { echo "no workers came up — tearing down"; destroy_fleet; exit 1; }
 
+# ── prepare: fleet is warming (workers building the toolbox). Wait until every
+#    worker has polled /claim (its readiness signal), then HOLD — no work, no GPU.
+if [ "$MODE" = "prepare" ]; then
+  echo "==> prepare: waiting for $MACHINES worker(s) to warm (build toolbox ~10min) & report ready"
+  PREP_WAITED=0; PREP_CEIL="${PREPARE_READY_TIMEOUT:-2400}"; NREADY=0
+  while [ "$PREP_WAITED" -lt "$PREP_CEIL" ]; do
+    # Capture /status first (ssh can blip) then parse — keeps a transient poll
+    # failure from producing a multiline count that breaks the integer test.
+    SJSON="$(poll_status 2>/dev/null || true)"
+    NREADY="$(printf '%s' "$SJSON" | "$PY_HOST" -c 'import json,sys
+try: print(len((json.load(sys.stdin).get("workers_seen") or [])))
+except Exception: print(0)' 2>/dev/null || echo 0)"
+    echo "    warm workers: ${NREADY:-0}/${MACHINES} (t+${PREP_WAITED}s)"
+    [ "${NREADY:-0}" -ge "$MACHINES" ] && break
+    sleep 30; PREP_WAITED=$((PREP_WAITED + 30))
+  done
+  if [ "${NREADY:-0}" -ge "$MACHINES" ]; then
+    echo "==> PREPARED: ${NREADY}/${MACHINES} workers warm & holding at the armed gate"
+  else
+    echo "==> WARN: prepare readiness timeout (${PREP_CEIL}s) — ${NREADY:-0}/${MACHINES} warm; the rest join when armed"
+  fi
+  cat <<EOF
+==> Fleet '$LABEL' is PREPARED — warm, holding, no work started, no GPU up.
+    Release it (raise your GPU first if using DEDICATED_CONDUCTOR):
+      LABEL=$LABEL ARM=$ARM DEDICATED_CONDUCTOR=${DEDICATED_CONDUCTOR} ./run-distributed.sh run
+    Or just flip the gate without babysitting the pull:
+      LABEL=$LABEL ./run-distributed.sh arm
+EOF
+  exit 0
+fi
+fi   # ═══ end prepare/all build section (run/arm attached above) ═══════════════
+
 # ── poll the coordinator until the bundle is ready ────────────────────────────
 # The host is NOT on 6PN, so reach the coordinator's HTTP endpoint by running
 # curl INSIDE the coordinator via ssh (localhost:8080). We also tail its logs for
@@ -561,11 +681,14 @@ echo "==> $WORKERS_OK/$MACHINES workers created"
 echo "==> streaming coordinator logs + polling /status (every 30s, up to ${MAXWAIT}s)"
 flyctl logs -a "$APP" --machine "$COORD_MID" > "$OUTDIR/coord.log" 2>&1 &
 LOGPID=$!
-poll_status() {
-  flyctl ssh console -a "$APP" --machine "$COORD_MID" -C "curl -s localhost:8080/status" 2>/dev/null \
-    | grep -vE 'Connecting|Waiting|Connected|already'
-}
 WAITED=0; STOPPED=0
+# Transient flyctl/ssh blips inside this loop must not kill the whole run
+# under `set -e` (observed live: rc=1 mid-poll orphaned the fleet and skipped
+# bundle-pull/teardown). Suspend errexit for the loop body only — the loop's
+# real exit conditions (bundle_ready beacon, 2 consecutive empty-status reads
+# with a dead machine, or MAXWAIT) are explicit `break`/loop-exhaustion, not
+# errexit-driven, so they still fire normally.
+set +e
 while [ "$WAITED" -lt "$MAXWAIT" ]; do
   if grep -q '"bundle_ready"' "$OUTDIR/coord.log" 2>/dev/null; then
     echo "==> bundle_ready after ${WAITED}s"; break
@@ -596,6 +719,7 @@ print(f"    progress: done={done} total={total} resolved={res} raw={json.dumps(d
   fi
   sleep 30; WAITED=$((WAITED + 30))
 done
+set -e
 [ "$WAITED" -ge "$MAXWAIT" ] && echo "==> hit MAXWAIT ${MAXWAIT}s without bundle_ready"
 kill "$LOGPID" 2>/dev/null || true
 

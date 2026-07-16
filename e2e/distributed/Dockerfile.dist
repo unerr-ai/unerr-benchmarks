@@ -51,6 +51,9 @@ COPY econ/econ-telemetry.py                /work/econ-telemetry.py
 COPY econ/econ-tier-cost.py                /work/econ-tier-cost.py
 COPY econ/report.py                        /work/report.py
 
+# ── arm pipeline (claude) — baked alongside econ, selected at runtime by ARM ──
+COPY reference/claude/local-docker /work/claude/local-docker
+
 # ── distributed scripts — the /work COPY contract (PLAN §2) ────────────────────
 # Shared DinD+toolbox boot lib (Slice A), sourced by BOTH entrypoints.
 COPY distributed/lib/boot.sh               /work/lib/boot.sh
@@ -73,7 +76,7 @@ RUN chmod +x \
 
 # run-benchmark.py builds each instance image with context = /work/local-docker,
 # which holds the vendored binary (tens of MB). Dockerfile.instance COPYs NOTHING
-# from that context (only `COPY --from=unerr-econ-toolbox`), so ignore the whole
+# from that context (only `COPY --from=econ-toolbox`), so ignore the whole
 # context — else it streams to dockerd on every instance build. Only read when
 # local-docker is the build context; the toolbox build (context=local-docker/context)
 # still sees vendor/.

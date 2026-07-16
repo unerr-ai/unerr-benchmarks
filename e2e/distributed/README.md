@@ -6,8 +6,10 @@ is the concise operator doc: launch, monitor, pull, teardown.
 
 ## 0. Invariants (do not violate)
 - **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`.
-- **Fly org = `your-fly-org` (team)** — never the personal org. App `swebench-agent-dist` (fixed; every
-  run is scoped by `fleet=<LABEL>` machine metadata, not a separate app per run).
+- **Set `FLY_ORG=<your-team-org>` (required)** — never a personal org. `run-distributed.sh` defaults
+  `ORG` to the non-functional placeholder `your-fly-org`; an unset `FLY_ORG` fails at app-create with
+  `organization your-fly-org not found`. App `swebench-agent-dist` (fixed; every run is scoped by
+  `fleet=<LABEL>` machine metadata, not a separate app per run).
 - **Web search OFF** (baseline-comparable): the launcher exports `EXA_API_KEY` unset unless
   `WEBSEARCH=1` — same rule as the single-machine econ runbook. SWE-bench fixes are public on
   GitHub → an enabled web search is answer-lookup.
@@ -47,13 +49,19 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   multi-hour resolve stays leased for its whole duration. `MAXWAIT` (default `172800` = 48 h) is only
   the *host's* poll ceiling — if it's hit the fleet keeps running and self-stops on drain; you just
   pull + destroy manually (§4, §5).
-- Prereqs: `flyctl` logged in (token auto-read from `~/.fly/config.yml`); econ built locally (see
-  the single-machine `RUNBOOK.md` §1) with `LITELLM_API_KEY` exported or in `e2e/econ/.env.local`;
-  `python3` on `PATH` (+ the `datasets` package if `SUITE=full/verified/lite`).
+- Prereqs: `flyctl` logged in (token auto-read from `~/.fly/config.yml`); `FLY_ORG` set (§0);
+  `LITELLM_API_KEY` exported or in `e2e/econ/.env.local`; `python3` on `PATH` (+ the `datasets`
+  package if `SUITE=full/verified/lite`). The launcher rebuilds the econ binary from live source in its
+  vendor step each run (single-machine build flow: [`e2e/econ/README.md`](../econ/README.md)); pass
+  `SKIP_ECON_BUILD=1` to reuse the existing `packages/opencode/dist/` binary instead.
+- **econ web-UI build gotcha.** A fresh `bun run --cwd packages/opencode build` can fail with
+  `Could not resolve "../app/dist/assets/*.js"` — the embedded web UI isn't built, and it's dead weight
+  for headless benchmark runs. Build with `bun run --cwd packages/opencode build --skip-embed-web-ui`,
+  then run with `SKIP_ECON_BUILD=1` (and no `IMAGE=`) to bake a fresh image from that binary.
 - `run-distributed.sh` does the build → seed → create coordinator + N workers (paced ≤1/s, 429/
-  MANIFEST_UNKNOWN retried) → poll → pull → teardown, all in one run. It is safe to `Ctrl-C` and
-  fall back to the `bench-ctl` commands below — nothing about the fleet depends on the launcher
-  process staying alive.
+  MANIFEST_UNKNOWN retried) → poll → pull → teardown, all in one run. It is safe to `Ctrl-C` — nothing
+  about the fleet depends on the launcher process staying alive; fall back to the out-of-band commands
+  in §3–§5 (status curl, `tools/pull_results.sh`, `run-distributed.sh destroy`).
 
 ### Dedicated conductor (opt-in — `DEDICATED_CONDUCTOR=1`)
 The conductor (`minimax/minimax-m3`, a 428B MoE) is served from Fireworks **serverless** by
@@ -91,39 +99,44 @@ MACHINES=25 ARM=econ LABEL=full-dedicated DEDICATED_CONDUCTOR=1 ./run-distribute
   `./fireworks-conductor.sh {up|status|print-path|down}`.
 
 ## 3. Monitor
+While it runs, `run-distributed.sh` streams the coordinator's `progress:` line
+(`done`/`total`/`resolved` + per-instance status) every 30 s — that is the primary monitor. For an
+out-of-band check (the launcher died or you `Ctrl-C`'d it), find the fleet's coordinator machine and
+curl its `/status` on 6PN — the same call the launcher makes internally
+([`run-distributed.sh`](./run-distributed.sh) `:233`):
 ```bash
-tools/bench-ctl.sh distributed-status LABEL   # fleet machines (role+state) + coordinator progress
+flyctl machines list -a swebench-agent-dist    # pick the machine with role=coordinator, fleet=<LABEL>
+flyctl ssh console -a swebench-agent-dist --machine <COORD_ID> -C "curl -s localhost:8080/status"
 ```
-Lists every machine tagged `fleet=<LABEL>` with its role (`coordinator`/`worker`) and state, then
-`flyctl ssh`s into the coordinator and curls its `/status` endpoint for `done`/`total`/`resolved`
-plus a per-instance status line. Prints "coordinator not up yet" / "not responding yet" instead of
-erroring if the fleet is still booting — safe to poll early.
+`/status` returns `counts` (`pending`/`leased`/`done`/`dead`), `resolved`/`total`, and a per-instance
+array. Live per-instance **cost/turns/pull_s aren't in `/status`** — they land in the coordinator's
+`/data/queue.db` `tasks` table (completion-meta JSON) and in the final bundle.
 
-(`tools/bench-ctl.sh` lives at `e2e/econ/fly-remote/fullresolve/tools/bench-ctl.sh` — same control
-surface as the single-machine runbook, extended with a `distributed-*` command group so there is
-still only ONE bench-ctl.)
+> The old `tools/bench-ctl.sh distributed-*` control surface was **removed** in the public-release
+> reorg. There is no `bench-ctl.sh`; use the §3–§5 commands here.
 
 ## 4. Pull results
 ```bash
-tools/bench-ctl.sh distributed-pull LABEL     # sftp-get /data/bundle.tgz -> out/dist-LABEL/bundle/
+tools/pull_results.sh LABEL [APP]     # sftp-get /data/bundle.tgz -> out/dist-<LABEL>/bundle/
 ```
-One-shot pull + extract, independent of whether `run-distributed.sh` is still running or already
-exited. Overwrite-safe (the local `bundle.tgz` is `rm -f`'d before the sftp get, same gotcha as the
-single-machine `pull` command). `run-distributed.sh` also does this automatically once it sees the
-`bundle_ready` beacon in the coordinator's logs — this is the manual/safety-net path if you need
-results before that, or the host process died first.
+One-shot pull + extract that does **not** tear the fleet down. `APP` defaults to `swebench-agent-dist`
+(the econ/default app; pass `swebench-agent-dist-claude` for the claude arm). Overwrite-safe (the local
+`bundle.tgz` is `rm -f`'d before the sftp get). `run-distributed.sh` already does this automatically
+once it sees the `bundle_ready` beacon in the coordinator's logs — this is the manual/safety-net path
+when you want the bundle before teardown (e.g. a `KEEP=1` debug run) or the host process died first.
+The bundle only exists after the coordinator aggregates (post-drain), so a mid-run pull before any
+instance completes finds no `bundle.tgz` yet.
 
 ## 5. Teardown
 ```bash
-tools/bench-ctl.sh distributed-destroy LABEL [-y]   # or FORCE=1
+DESTROY_ONLY=1 LABEL=<label> ./run-distributed.sh   # or: LABEL=<label> ./run-distributed.sh destroy
 ```
 Destroys every machine tagged `fleet=<LABEL>` (workers AND the coordinator) plus the coordinator
-volume `dist_coord_<LABEL>`. Prompts for confirmation unless `-y` is passed or `FORCE=1` is set.
-`run-distributed.sh` already tears its own fleet down at the end of a normal run (workers self-stop
-on drain, `restart:no`, so teardown just frees the stopped machines + coordinator + volume) — this
-is the safety net for an aborted run, a killed host process, or a stuck/never-draining fleet.
-`DESTROY_ONLY=1 LABEL=<label> ./run-distributed.sh` does the same fleet-by-metadata teardown via the
-launcher itself, if you'd rather not reach for `bench-ctl`.
+volume `dist_coord_<LABEL>`. `run-distributed.sh` already tears its own fleet down at the end of a
+normal run (workers self-stop on drain, `restart:no`, so teardown just frees the stopped machines +
+coordinator + volume) — this `destroy` path is the safety net for an aborted run, a killed host
+process, or a stuck/never-draining fleet. Pass the same `ARM`/`APP`/`FLY_ORG` you launched with if
+they weren't the defaults, so the metadata lookup targets the right app.
 
 ## 6. Known calibration note — ephemeral-rootfs IOPS
 Workers have no volume; DinD's data-root sits on the worker's ephemeral rootfs, which is capped at
@@ -145,7 +158,7 @@ wired by default — this is the flagged escape hatch, not the steady-state path
     `dot-opencode/tool/github-*.ts` — SWE-bench never uses the GitHub tools, so belt-and-suspenders
     it out of the image.
   - Confirm inside the built image:
-    `docker run --rm --entrypoint sh unerr-econ-toolbox -c 'test -d /opt/toolbox/.opencode/node_modules && echo OK || echo MISSING'`.
+    `docker run --rm --entrypoint sh econ-toolbox -c 'test -d /opt/toolbox/.opencode/node_modules && echo OK || echo MISSING'`.
 - **Never edit `run-distributed.sh` (or any live script) while a launch is running.** bash reads a
   script by byte-offset; a mid-run insert shifts every later offset and corrupts the live read
   (`line NNN: ooks: command not found`) and the fleet never comes up. Sequence your edits after the
@@ -155,10 +168,10 @@ wired by default — this is the flagged escape hatch, not the steady-state path
   `stderr_tail` lands here) and the launcher's `out/dist-<LABEL>/coord.log` (full coordinator
   fly-log stream). The launcher's own stdout only carries `progress:` lines — don't grep it for
   failure reasons.
-- **The pulled bundle's `queue.db` is empty.** The queue is WAL-mode and `distributed-pull` copies
-  the `.db` without its `-wal` sidecar, so offline queries against the bundled DB see no rows. The
-  live merge is unaffected (it reads the coordinator's live DB); re-analyze against the live
-  coordinator, not the bundle.
+- **The pulled bundle's `queue.db` is empty.** The queue is WAL-mode and the bundle copies the `.db`
+  without its `-wal` sidecar, so offline queries against the bundled DB see no rows. The live merge is
+  unaffected (it reads the coordinator's live DB); for live per-instance cost/turns, query the
+  coordinator's `/data/queue.db` directly over ssh, not the bundled copy.
 - **Report shows `0 resolved` despite the harness resolving instances.** The merge normalizes both
   the aggregate swebench summary shape (`resolved_ids`/`submitted_ids`) and the per-instance harness
   shape (`{"<iid>": {"resolved": bool, ...}}`) the worker actually posts — if you see 0/0, confirm

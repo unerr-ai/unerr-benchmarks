@@ -31,6 +31,22 @@
 reference/claude/
 reference/codex/
 
+# EXCEPTION: the claude arm's local-docker/ IS baked into the shared fleet image
+# (distributed/Dockerfile.dist: `COPY reference/claude/local-docker
+# /work/claude/local-docker`). Re-include it — run-benchmark.py, litellm_cost.py,
+# cost_report.py, Dockerfile.*, and context/ incl. the vendored toolbox `.tgz`
+# payload. These negations come AFTER both `reference/claude/` AND `**/*.tgz`
+# above, so last-match-wins keeps the subtree (same technique as the
+# dot-opencode/node_modules carve-out below).
+!reference/claude/local-docker
+!reference/claude/local-docker/**
+# ...but keep local run scratch OUT of the image (re-excluded after the negation,
+# so last-match-wins drops them again — scoped to the claude subtree only).
+reference/claude/local-docker/results/
+reference/claude/local-docker/logs/
+reference/claude/local-docker/**/__pycache__/
+reference/claude/local-docker/*.json
+
 # EXCEPTION to the `**/node_modules` rule above: the econ toolbox vendors econ's
 # `.opencode/` as `vendor/dot-opencode/`, and its `.opencode/tool/*.ts` project
 # tools `import "@opencode-ai/plugin"` — a workspace dep that lives ONLY under

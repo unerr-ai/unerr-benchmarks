@@ -234,7 +234,7 @@ def aggregate_by_tier(rows):
                 continue
             a = agg.setdefault(tier, dict(
                 usd=0.0, in_tokens=0, cached_in=0, out_tokens=0,
-                reasoning_tokens=0, cache_write=0, instances=0,
+                reasoning_tokens=0, cache_write=0, instances=0, priced=True,
             ))
             a["usd"]              += _num(t.get("usd"), 0.0)
             a["in_tokens"]        += _num(t.get("in_tokens"), 0)
@@ -243,6 +243,10 @@ def aggregate_by_tier(rows):
             a["reasoning_tokens"] += _num(t.get("reasoning_tokens"), 0)
             a["cache_write"]      += _num(t.get("cache_write"), 0)
             a["instances"]        += 1
+            # a tier is "unpriced" if ANY contributing row's tier bucket was
+            # unpriced (a model missing from ECON_COST_MATRIX → silent $0).
+            if t.get("priced") is False:
+                a["priced"] = False
     return agg, source_counts
 
 
@@ -349,9 +353,13 @@ def sec_per_instance(rows):
     body_rows = []
     for r in sorted(rows, key=lambda r: (r["label"], r["instance_id"])):
         mark = "?" if r["resolved"] is None else ("✓" if r["resolved"] else "✗")
+        # Use the SAME effective source (SQLite tier_cost_db when present) as the
+        # Per-Tier table so the two sections reconcile — the raw stream by_tier
+        # mislabels reasoner spend as oracle and zeroes unpriced tiers.
+        eff_by_tier, _src = _effective_by_tier(r)
         body_rows.append([
             r["instance_id"], mark, r["turns"], r["in_tokens"], r["cached_in"],
-            r["out_tokens"], _usd(r["usd"]), _fmt_tier_usd(r["by_tier"]),
+            r["out_tokens"], _usd(r["usd"]), _fmt_tier_usd(eff_by_tier),
             r["tool_calls"], r["graph_tool_calls"],
             _f(r["wall_s"]), r["rc"], r["patch_bytes"],
         ])
@@ -362,10 +370,11 @@ def sec_per_instance(rows):
 def sec_per_tier(rows):
     agg, source_counts = aggregate_by_tier(rows)
     grand_total = sum(a["usd"] for a in agg.values())
+    unpriced_tiers = [t for t, a in agg.items() if a.get("priced") is False]
     hdrs = [
         "Tier", "Total $", "% of Total $", "Mean $/inst",
-        "Total In Tok", "Total Cached", "Total Out Tok", "Total Tokens",
-        "Instances Used",
+        "Total In Tok", "Total Cached", "Total Out Tok", "Reasoning Tok",
+        "Cache Write", "Total Tokens", "Cache-Hit %", "Instances Used",
     ]
     body_rows = []
     for tier, a in sorted(agg.items(), key=lambda kv: kv[1]["usd"], reverse=True):
@@ -373,10 +382,16 @@ def sec_per_tier(rows):
         mean_usd = (a["usd"] / n_used) if n_used else 0.0
         pct_ratio = (a["usd"] / grand_total) if grand_total else None
         total_tokens = a["in_tokens"] + a["cached_in"] + a["out_tokens"]
+        # cache-hit % = cache-read input / all input seen (uncached + cached read)
+        cache_denom = a["in_tokens"] + a["cached_in"]
+        cache_hit = (a["cached_in"] / cache_denom) if cache_denom else None
+        # ⚠️ marks a tier whose USD is understated — a model it used is missing
+        # from ECON_COST_MATRIX, so its cost silently read $0.
+        label = f"{tier} ⚠️" if a.get("priced") is False else tier
         body_rows.append([
-            tier, _usd(a["usd"]), _pct(pct_ratio), _usd(mean_usd),
-            a["in_tokens"], a["cached_in"], a["out_tokens"], total_tokens,
-            n_used,
+            label, _usd(a["usd"]), _pct(pct_ratio), _usd(mean_usd),
+            a["in_tokens"], a["cached_in"], a["out_tokens"], a["reasoning_tokens"],
+            a["cache_write"], total_tokens, _pct(cache_hit), n_used,
         ])
     body = (
         md_table(hdrs, body_rows) if body_rows
@@ -396,10 +411,20 @@ def sec_per_tier(rows):
     else:
         source_line = "Source: n/a (no per-tier telemetry found)."
     caption = (
-        f"\n_{source_line} conductor = cheap bulk tier · oracle/reasoner = "
-        "expensive glm tier (may show as one merged row if they share a "
-        "model) · executor = self-hosted, billed at $0._\n"
+        f"\n_{source_line} conductor = cheap bulk tier (minimax-m3) · "
+        "reasoner = deepseek-v4-pro · oracle = glm-5.2 (most expensive/1M) · "
+        "executor = gpt-oss-120b. USD is econ's Fireworks-BYOK price "
+        "(ECON_COST_MATRIX), recomputed per tier from the session DB token "
+        "counts._\n"
     )
+    if unpriced_tiers:
+        caption += (
+            f"\n> ⚠️ **Per-tier USD understated.** These tier(s) used a model "
+            f"absent from ECON_COST_MATRIX, so their cost silently read $0: "
+            f"**{', '.join(sorted(unpriced_tiers))}**. Add the model's rate to "
+            f"`e2e/econ/econ-tier-cost.py` (mirror econ-cost.ts) and re-run the "
+            f"report.\n"
+        )
     return f"## 4. Per-Tier Cost\n\n{body}\n{caption}"
 
 
@@ -408,7 +433,11 @@ def sec_notes(rows):
     rc_nonzero  = sum(1 for r in rows if r["rc"] != 0)
     empty_patch = sum(1 for r in rows if r["patch_bytes"] == 0)
     no_graph    = sum(1 for r in rows if r["graph_tool_calls"] == 0)
-    cache_ratios = [r["cached_in"] / r["in_tokens"] for r in rows if r["in_tokens"] > 0]
+    # cache-hit % = cache-read input / all input seen (uncached + cache-read),
+    # so it stays in 0–100% (cached_in/in_tokens alone exceeds 100% here because
+    # cache reads dwarf uncached input).
+    cache_ratios = [r["cached_in"] / (r["in_tokens"] + r["cached_in"])
+                    for r in rows if (r["in_tokens"] + r["cached_in"]) > 0]
     mean_cache_ratio = statistics.mean(cache_ratios) if cache_ratios else None
 
     lines = [
@@ -419,7 +448,16 @@ def sec_notes(rows):
     if no_graph > 0:
         flag = " — FLAG: econ's embedded graph tools didn't fire (want >0)"
     lines.append(f"- {no_graph}/{n} instance(s) recorded zero graph_tool_calls{flag}.")
-    lines.append(f"- Mean cache-hit ratio (cached_in / in_tokens): {_pct(mean_cache_ratio)}")
+    lines.append(f"- Mean cache-hit ratio (cache-read / all input): {_pct(mean_cache_ratio)}")
+
+    unpriced_tiers = [t for t, a in aggregate_by_tier(rows)[0].items()
+                      if a.get("priced") is False]
+    if unpriced_tiers:
+        lines.append(
+            f"- {len(unpriced_tiers)} tier(s) have UNPRICED models (per-tier USD "
+            f"understated to $0) — FLAG: add the model rate(s) to "
+            f"econ-tier-cost.py::ECON_COST_MATRIX: {', '.join(sorted(unpriced_tiers))}"
+        )
 
     fallback_ids = [r["instance_id"] for r in rows if r.get("usd_source") == "upstream_fallback"]
     if fallback_ids:
@@ -479,9 +517,13 @@ def build_json(label, rows):
             "reasoning_tokens": a["reasoning_tokens"],
             "cache_write":      a["cache_write"],
             "instances_used":   a["instances"],
+            # False → this tier used a model missing from ECON_COST_MATRIX, so
+            # its USD is a silent $0 (drift signal).
+            "priced":           a.get("priced", True),
         }
         for tier, a in by_tier_agg.items()
     }
+    unpriced_tiers = sorted(t for t, a in by_tier_agg.items() if a.get("priced") is False)
 
     per_instance = [
         {
@@ -514,6 +556,7 @@ def build_json(label, rows):
         "usd_upstream_total": usd_upstream_total,
         "tier_cost_source": tier_cost_source,
         "by_tier":          by_tier_json,
+        "unpriced_tiers":   unpriced_tiers,
         "per_instance":     per_instance,
     }
 

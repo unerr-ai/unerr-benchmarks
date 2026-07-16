@@ -1,0 +1,72 @@
+# Shared SWE-bench pull-through Docker registry cache — arm-agnostic infra.
+#
+# Runs the official CNCF `registry:2` (distribution) image in *pull-through /
+# proxy* mode in front of docker.io. Every distributed run — econ, claude
+# open-weight, codex, and future arms — points its workers' dockerd at this
+# ONE registry via `registry-mirrors`, so the cold pull of
+# `docker.io/swebench/sweb.eval.x86_64.*` testbed images (the ~11min/~$11-on-
+# the-GPU-clock tax per worker) happens once fleet-wide and is reused across
+# runs — content-addressed blob cache, see README.md.
+#
+# Unlike the fleet app's e2e/distributed/fly.toml (build/deploy-context only;
+# machines are launched by explicit `flyctl machine run`), THIS app is a
+# single long-lived `flyctl deploy` service — the [env]/[[services]] below
+# drive the deployed machine directly (storage is a shared Tigris bucket, see
+# config.yml — no [mounts]). Deployed + torn down by deploy.sh in this same dir.
+app = "swebench-registry"
+primary_region = "iad"
+
+[build]
+  # Custom image = stock registry:2 + our Tigris(S3) pull-through config.yml +
+  # reg-entrypoint.sh (see Dockerfile). Deployed from this dir so the build
+  # context includes config.yml / reg-entrypoint.sh.
+  dockerfile = "Dockerfile"
+
+[env]
+  # Storage (Tigris S3), proxy remoteurl, and http addr now live in config.yml
+  # (baked into the image via Dockerfile), not here. Tigris creds arrive as
+  # AWS_* secrets from `fly storage create` and are mapped onto
+  # REGISTRY_STORAGE_S3_ACCESSKEY/_SECRETKEY by reg-entrypoint.sh.
+  #
+  # Docker Hub token — lifts the 100-pull/6h anonymous rate limit on the ONE
+  # upstream fetch per image. Set via `fly secrets set` (see deploy.sh /
+  # README.md), NEVER here — this file is checked into git.
+  # REGISTRY_PROXY_USERNAME = "<hub-username>"
+  # REGISTRY_PROXY_PASSWORD = "<hub-token>"
+
+# The blob cache lives in a shared Tigris (S3) bucket now — NOT a per-machine
+# fly volume (single-attach → each replica would cache independently). All
+# replicas read/write the one bucket, so it's content-addressed AND shared:
+# identical layers dedupe across arms/runs/replicas. Config is in config.yml;
+# bucket + creds are provisioned by deploy.sh (`fly storage create`). Hence NO
+# [mounts] block — nothing to mount.
+
+# Private only: 6PN/flycast, never the public edge. deploy.sh allocates a
+# private IPv6 (`flyctl ips allocate-v6 --private`) and never a public one, so
+# `[[services]]` here — vs. a public-facing `[http_service]` — just wires the
+# internal_port Fly Proxy routes flycast traffic to. `<app>.flycast` is the
+# stable app-wide address (survives redeploys/machine-id changes); workers
+# should target `http://swebench-registry.flycast:5000`.
+[[services]]
+  internal_port = 5000
+  protocol = "tcp"
+  auto_stop_machines = "off"      # always up — a cold-started cache defeats the point mid-run
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 5000
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+
+# Network-bound in steady state (serving cached blobs), but a warm-cache.sh
+# pre-seed streams many blobs concurrently Hub->Tigris THROUGH this registry, and
+# the S3 driver buffers multipart upload parts per in-flight blob — 512mb OOMs
+# under that fan-out. 2gb gives headroom for high-CONCURRENCY warms; steady-state
+# serving never approaches it. (shared-cpu-1x stays — it's I/O/network bound.)
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2048mb"

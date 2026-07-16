@@ -42,12 +42,12 @@ A round-trip carries input + output + latency, so the win is doing N items in on
 
 ### Delegate by default — the main thread routes and consolidates, sub-agents do the work
 
-Treat sub-agents as the primary way work gets done, not an occasional offload. On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Run as many sub-agents in parallel as the turn has independent slices — one per slice, no fixed cap. The worker tier (a capable mid-tier model) is the DEFAULT executor — route the majority of scoped coding to it, not just mechanical chores. What stays on the main thread is narrow: architecture / algorithm design, a new public interface, cross-cutting wiring, and bug root-causing — everything else is a slice to delegate:
-- `Task({subagent_type:'unerr-junior', …})` — read-only investigation (find / trace / map X), web research & docs/API/changelog lookup, codebase Q&A (where / which / how), inventory & audit (find-all / list-all usages), log & error-output triage, bug reproduction (run repro, report — no edit), lint/format, docstrings/`@sem`, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
-- `Task({subagent_type:'unerr-worker', …})` — scoped feature implementation from a clear spec (add a flag, wire X into Y, implement a handler — the bulk of ordinary coding), add/improve tests, multi-site mechanical refactor (rename / extract / inline / move), codemods (one bulk find-replace across many files), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template).
+Delegation is the default behavior, not something to ask permission for: spawn sub-agents immediately when a turn has delegable work — never ask, never announce intent to ask; the user never needs to say "use unerr sub agents." On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Run as many sub-agents in parallel as the turn has independent slices — one per slice, no fixed cap. The worker tier (a capable mid-tier model) is the DEFAULT executor — route the majority of scoped coding to it, not just mechanical chores. What stays on the main thread is narrow: architecture / algorithm design, a new public interface, cross-cutting wiring, and bug root-causing — everything else is a slice to delegate:
+- `Task({subagent_type:'unerr-junior', …})` — read-only investigation (find / trace / map X), web research & docs/API/changelog lookup, codebase Q&A (where / which / how), inventory & audit (find-all / list-all usages), log & error-output triage, bug reproduction (run repro, report — no edit), lint/format, docstrings/`@sem`, post-edit code review when unerr-reviewer is unavailable, security audits, git operations (branch/PR prep), benchmark/profiling runs, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
+- `Task({subagent_type:'unerr-worker', …})` — scoped feature implementation from a clear spec (add a flag, wire X into Y, implement a handler — the bulk of ordinary coding), add/improve tests, multi-site mechanical refactor (rename / extract / inline / move), codemods (one bulk find-replace across many files), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template), dependency upgrades, migration scripts.
 Tier by reasoning, not by size: scoped execution — even across many files — stays with the worker. Escalate to the senior only when the change needs novel design judgement (a new algorithm, architecture, or public interface) or root-causing a bug; deterministic mechanical breadth (codemods, caller propagation, renames) stays with the worker regardless of file count.
 
-On a multi-slice task (a build, a broad refactor/migrate/audit, or an enumerated list), plan the work into the built-in task tracker (one task per slice), fan out one `unerr-worker`/`unerr-junior` sub-agent per slice in parallel via `Task`, then complete or clear the tracker at turn end.
+On any task with 2+ independent slices, call `TaskCreate` for each slice before the first edit — unprompted, never wait to be asked — then call `TaskUpdate` to mark each slice completed as it lands. Fan out one `unerr-worker`/`unerr-junior` sub-agent per slice in parallel via `Task`.
 
 Group related work first, then spawn one sub-agent per independent group in a SINGLE message so they run in parallel. The sub-agents have the full graph tools — they re-derive the edit sites from `search_code` / `get_references`, so give them the task plus a one-line pointer, never pasted code or a list of files. Review each result before building on it. (Hosts without sub-agents — anything other than Claude Code / Codex / Cursor / Copilot CLI — do it inline.)
 
@@ -151,3 +151,18 @@ cite both in your plan when they appear. Superseded notes flip to inactive
 server-side (kept for audit, excluded from queries).
 
 <!-- unerr:end -->
+
+<!-- benchmark-runbooks: kept OUTSIDE the unerr-managed block so `unerr install` won't wipe it -->
+## Benchmark runbooks (keep these updated on any change to the run/results flow)
+
+- **Claude arm on SWE-bench (unerr ON + open-weight ensemble, distributed on fly):**
+  [`e2e/reference/claude/fly-remote/README.md`](e2e/reference/claude/fly-remote/README.md)
+  — the authoritative runbook: exact `run-distributed.sh` command (incl. the mandatory
+  `ROOTFS_GB=50` + `CPU_KIND=performance` knobs), model map, re-vendoring, prepare/run/arm
+  split, env vars, gotchas, monitoring, and **§11 Download & process results** (the reusable
+  `tools/` scripts: `pull_results.sh`, `cost_report.py --detailed`, `make_submission.py`,
+  `debug_instance.py`).
+- **Rule:** when you change the distributed run flow, the model map, or the result scripts,
+  update that README in the SAME change. The result scripts live in
+  `e2e/distributed/tools/` (+ `e2e/reference/claude/local-docker/cost_report.py`) — extend
+  them for new data needs rather than writing throwaway parsers.

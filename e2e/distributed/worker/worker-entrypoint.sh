@@ -61,11 +61,18 @@ boot_dockerd "$DOCKER_ROOT" "$LOGDIR"
 emit '"dockerd_up"'
 
 # ── 2. Build the arm toolbox image once (grafted into every instance) ────────
-# Arm-parameterized tag; econ default. run-benchmark.py's Dockerfile.instance grafts
-# `unerr-econ-toolbox`, so the econ tag MUST stay unerr-econ-toolbox.
-TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-${ARM}-toolbox}"
+# Arm-parameterized tag. Econ's toolbox does NOT install unerr, so its tag drops
+# the prefix: `econ-toolbox`, matching Dockerfile.instance's `COPY --from`.
+# Claude/codex toolboxes DO install unerr, so they keep `unerr-<arm>-toolbox`.
+if [ "$ARM" = "econ" ]; then
+  TOOLBOX_TAG="${TOOLBOX_TAG:-econ-toolbox}"
+else
+  TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-${ARM}-toolbox}"
+fi
 log "building toolbox $TOOLBOX_TAG (arm=$ARM)"
-build_toolbox /work/local-docker/Dockerfile.toolbox /work/local-docker/context "$TOOLBOX_TAG" "$LOGDIR"
+ARM_DIR="/work/local-docker"
+[ "$ARM" = "claude" ] && ARM_DIR="/work/claude/local-docker"
+build_toolbox "$ARM_DIR/Dockerfile.toolbox" "$ARM_DIR/context" "$TOOLBOX_TAG" "$LOGDIR"
 emit "\"toolbox_built\",\"tag\":\"$TOOLBOX_TAG\""
 
 # ── 3. Worker loop: claim → resolve → grade → report, until the queue drains ─

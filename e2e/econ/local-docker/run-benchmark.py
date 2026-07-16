@@ -16,7 +16,7 @@ Per instance:
 Grading is a separate, standard step: `swebench.harness.run_evaluation` scores
 preds.json; then report.py joins meta.jsonl + the grade report into a cost report.
 
-Prereqs: docker, the `unerr-econ-toolbox` image (built by entrypoint.sh /
+Prereqs: docker, the `econ-toolbox` image (built by entrypoint.sh /
 Dockerfile.toolbox), LITELLM_API_KEY in the env, `pip install datasets`.
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -37,6 +38,12 @@ HERE = Path(__file__).resolve().parent
 ECON_ROOT = HERE.parent
 TELEMETRY_PY = ECON_ROOT / "econ-telemetry.py"
 TIERCOST_PY = ECON_ROOT / "econ-tier-cost.py"
+
+# Host-side persistent graph-index cache, keyed per-repo (see solve_instance).
+# MUST live outside out_dir/artifacts: that tree is fresh per instance, while
+# this survives for the worker's lifetime so sequential instances of the same
+# repo warm-start off each other's graph.db instead of cold-indexing every time.
+GRAPH_CACHE_ROOT = Path(os.environ.get("OC_GRAPH_CACHE", "/var/tmp/oc-graph-cache"))
 
 
 def docker_image_for(instance: dict) -> str:
@@ -117,7 +124,12 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
     tag = f"unerr-econ-run:{iid.replace('__', '_1776_').lower()}"
 
     # ensure the official env image is present, then graft the toolbox onto it
+    mirror_on = bool(os.environ.get("SWEBENCH_REGISTRY_MIRROR"))
+    pull_t0 = time.time()
     run(["docker", "pull", instance_image], check=False)
+    pull_s = round(time.time() - pull_t0, 1)
+    print(f"[pull-time] {iid} {pull_s}s mirror={'on' if mirror_on else 'off'}",
+          file=sys.stderr)
     build_instance_image(instance_image, tag)
 
     problem = instance["problem_statement"]
@@ -140,10 +152,27 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
     if exa_key:
         docker_env += ["-e", f"EXA_API_KEY={exa_key}"]
 
+    # Per-repo graph-index cache mount. opencode's graph db path is
+    # Hash.fast(repoRoot) and every instance mounts its repo at the SAME
+    # REPO_DIR (/testbed) — so without per-repo keying on the host side, every
+    # repo's graph db would collide at one container path. Keying by repo_key
+    # (instance_id minus its trailing "-<n>") isolates repos on the host while
+    # letting sequential instances of the SAME repo share one persisted
+    # graph.db: run-instance.sh's `opencode init` (now incremental, no
+    # --force) reconciles changed/added/deleted files by content hash, so
+    # warm-starting across commits of one repo is safe.
+    docker_mounts = ["-v", f"{art_host_dir.resolve()}:/work-out"]
+    if os.environ.get("OC_GRAPH_CACHE_PERSIST", "1") != "0":
+        repo_key = iid.rsplit("-", 1)[0]
+        repo_key = re.sub(r"[^A-Za-z0-9._-]", "_", repo_key)
+        repo_cache = GRAPH_CACHE_ROOT / repo_key
+        repo_cache.mkdir(parents=True, exist_ok=True)
+        docker_mounts += ["-v", f"{repo_cache.resolve()}:/root/.local/share/opencode/graph"]
+
     t0 = time.time()
     proc = run(
         ["docker", "run", "--rm", "-i",
-         "-v", f"{art_host_dir.resolve()}:/work-out",
+         *docker_mounts,
          *docker_env,
          tag,
          "bash", "-c",
@@ -170,6 +199,8 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
         "instance_id": iid,
         "label": label,
         "wall_s": round(time.time() - t0, 1),
+        "pull_s": pull_s,
+        "mirror": "on" if mirror_on else "off",
         "rc": proc.returncode,
         "patch_bytes": len(patch),
         "telemetry": telemetry,

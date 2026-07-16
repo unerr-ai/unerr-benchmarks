@@ -1,0 +1,50 @@
+# swebench-registry config — CNCF Distribution (registry:2) in pull-through /
+# proxy mode, backed by Tigris (S3-compatible) object storage.
+#
+# WHY S3, NOT A VOLUME: fly volumes are single-attach (bound 1:1 to one
+# machine), so two registry machines on their own volumes cache INDEPENDENTLY —
+# a pre-seed warms only ~one replica and half the fleet's run-time pulls still
+# miss. Pointing every replica at ONE shared Tigris bucket gives a single
+# unified cache behind 2+ machines (HA + parallel pull throughput). Provisioned
+# by `fly storage create` (see deploy.sh); creds arrive as AWS_* secrets and are
+# mapped to REGISTRY_STORAGE_S3_ACCESSKEY/SECRETKEY by reg-entrypoint.sh, so no
+# credentials live in this file or the image.
+#
+# WHY PROXY: workers point dockerd `--registry-mirror` here; on a miss the proxy
+# fetches from Docker Hub once and caches the blobs in S3, so the ~11min/worker
+# cold `docker pull` of a ~2GB sweb.eval testbed image happens once fleet-wide.
+# Proxy mode is READ-ONLY to clients (pushes 405) — the cache is populated only
+# by pulling THROUGH it (see warm-cache.sh).
+version: 0.1
+log:
+  level: info
+  fields:
+    service: registry
+storage:
+  s3:
+    region: auto
+    regionendpoint: https://fly.storage.tigris.dev
+    bucket: swebench-registry-cache
+    forcepathstyle: true
+    secure: true
+    rootdirectory: /
+    # accesskey/secretkey intentionally omitted — injected via
+    # REGISTRY_STORAGE_S3_ACCESSKEY/SECRETKEY env by reg-entrypoint.sh.
+  delete:
+    enabled: false
+  cache:
+    blobdescriptor: inmemory
+http:
+  addr: 0.0.0.0:5000
+  headers:
+    X-Content-Type-Options: [nosniff]
+proxy:
+  remoteurl: https://registry-1.docker.io
+  # Docker Hub creds (raise the 100-pull/6h anon limit on the ONE upstream fetch
+  # per image) go in via REGISTRY_PROXY_USERNAME/REGISTRY_PROXY_PASSWORD secrets,
+  # NOT here — see deploy.sh / README.md.
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3

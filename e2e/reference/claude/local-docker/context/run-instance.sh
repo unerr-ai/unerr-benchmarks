@@ -37,6 +37,13 @@ MODE="${UNERR_MODE:-on}"
 # makes the run reflect the user's actual default config; the A/B stays clean
 # because on/off use the SAME model. Override with CLAUDE_MODEL=sonnet etc.
 CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
+# Open-models mode: run-benchmark.py sets CLAUDE_OPEN_MODELS=1 (plus
+# ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_DEFAULT_*_MODEL and
+# CLAUDE_MODEL=sonnet) to route Claude Code through an OpenAI-compatible
+# gateway instead of the Anthropic API. Claude Code reads those ANTHROPIC_*
+# vars itself — this flag only gates OUR extra behavior below (shipped agent
+# files + extra system-prompt text), so it's a no-op when unset/0.
+OPEN_MODELS="${CLAUDE_OPEN_MODELS:-0}"
 PROBLEM_FILE="${1:?usage: run-instance.sh <problem_statement_file>}"
 
 # Hardening for reproducible headless runs: no mid-run auto-update, no
@@ -124,6 +131,85 @@ if [ "$MODE" = "on" ]; then
     log "WARNING: .mcp.json absent after install — unerr MCP may not load"
   fi
 
+  # 3.1 OPEN-MODELS: overwrite the just-installed agent files with our shipped,
+  #     customized versions (Task-delegation policy tuned for the open-models
+  #     arm). Shipped next to this script in the toolbox image under agents/.
+  #     No-op on the real-Claude path (OPEN_MODELS unset/0).
+  if [ "$OPEN_MODELS" = "1" ]; then
+    SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+    AGENTS_SRC="$SELF_DIR/agents"
+    if [ -d "$AGENTS_SRC" ]; then
+      mkdir -p "$REPO_DIR/.claude/agents"
+      n=0
+      for f in "$AGENTS_SRC"/unerr-*.md; do
+        [ -f "$f" ] || continue
+        cp -f "$f" "$REPO_DIR/.claude/agents/"
+        n=$((n + 1))
+      done
+      log "open-models: copied $n shipped agent file(s) into $REPO_DIR/.claude/agents/"
+    else
+      log "open-models: WARNING — agents source dir missing ($AGENTS_SRC), keeping installed agents"
+    fi
+  fi
+
+  # 3.15 OPEN-MODELS: install the mechanical finish-gate + edit-deny hooks
+  #      (PreToolUse deny + PostToolUse recorder + Stop-time gate; see
+  #      cc-harness-hooks.py, shipped in $TOOLBOX the same way as
+  #      mcp-healthcheck.mjs). Written to .claude/settings.local.json,
+  #      NEVER .claude/settings.json: unerr owns settings.json (it wrote its
+  #      own hooks there during `unerr install claude-code` above) and never
+  #      touches settings.local.json, and Claude Code UNIONS the hook arrays
+  #      from both files — so this file only ADDS our three hooks, it can
+  #      never clobber or conflict with unerr's. Hook STATE lives under
+  #      /tmp/cc-harness/ (see cc-harness-hooks.py), never inside REPO_DIR, so
+  #      it can never leak into the graded model_patch diff — the diff step
+  #      near the end of this script excludes .claude/ too, but /tmp is the
+  #      real reason it's safe. All three hooks are FAIL-OPEN by construction
+  #      (cc-harness-hooks.py: any internal exception -> exit 0), so a bug
+  #      here degrades to a no-op gate/deny, never a broken run.
+  if [ "$OPEN_MODELS" = "1" ]; then
+    # $TOOLBOX is NOT set inside the instance container: Dockerfile.instance COPYs
+    # the toolbox to /opt/toolbox but does not carry the toolbox image's ENV, and no
+    # `-e TOOLBOX` is passed at `docker run`. Default it to the fixed COPY target.
+    # Resolve an ABSOLUTE python too — SWE-bench conda envs may expose only `python`
+    # (not `python3`); the hooks run as Claude Code's children and inherit THIS shell's
+    # PATH, so a write-time absolute resolution is what makes the gate actually fire
+    # (a bare `python3` that doesn't resolve would exit non-zero → gate silently no-op).
+    : "${TOOLBOX:=/opt/toolbox}"
+    PYBIN="$(command -v python3 || command -v python || echo python3)"
+    mkdir -p "$REPO_DIR/.claude"
+    cat > "$REPO_DIR/.claude/settings.local.json" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|mcp__unerr__file_edit",
+        "hooks": [
+          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py deny" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",
+        "hooks": [
+          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py record" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py gate" }
+        ]
+      }
+    ]
+  }
+}
+EOF
+    log "open-models: wrote $REPO_DIR/.claude/settings.local.json (mechanical finish-gate + edit-deny hooks)"
+  fi
+
   # 3.5 HEALTH GATE: confirm unerrd + the process manager actually registered THIS
   #     repo and report its state, via `unerr pm status` (run from the target repo
   #     cwd so it resolves to /testbed, not the unerr-cli repo). This is the
@@ -172,6 +258,63 @@ AUTONOMY_PROMPT="You are operating fully autonomously in an automated benchmark,
 # out of the OFF baseline so the A/B delta stays purely "unerr on vs off".
 if [ "$MODE" = "on" ]; then
   AUTONOMY_PROMPT="$AUTONOMY_PROMPT Take the shortest correct path to a working fix. If you are unsure how to fix something, use web search to find the answer. Delegate independent sub-tasks to unerr subagents so they run in parallel. Do not modify test files unless the fix is impossible without it."
+  # OPEN-MODELS ONLY: orchestration + escalation contract (delegate to subagents;
+  # escalate the hard tail). The prior in-prompt WORK PROTOCOL (reproduce-first /
+  # typed-assert / leave-tests-red) was REMOVED 2026-07-14: appended on top
+  # of Claude Code's OWN agentic harness it "enforced the harness twice" and drove the
+  # Mini-10 regressions — repro-false-confidence (11848), a Rule-4 license to ship
+  # PASS_TO_PASS regressions (11885/12039), and a 131-turn/$8 thrash. Claude Code's
+  # native loop already reproduces + verifies; keep only the orchestration here.
+  #
+  # ADDED 2026-07-15 — three prompt-level priors distilled from the econ
+  # path-to-85 / harness-variance forensics, filtered to items that are (i) UNIVERSAL
+  # across SWE-Verified, not Django-specific, and (ii) NON-CONFLICTING with the native
+  # loop (they are CODING priors — how to write the fix — never verification machinery):
+  #  - TRACK: minimax under-weights the TaskCreate/TaskUpdate guidance that lives only
+  #    in the installed CLAUDE.md; restate it in the appended prompt where it lands harder.
+  #  - FIX DISCIPLINE / fix-at-definition: the "root-most layer" maintainer prior the
+  #    strict cycle proved matters (11964 patched the symptom layer and failed).
+  #  - FIX DISCIPLINE / native-type: the systematic "web-format-default stringification"
+  #    class (11790; arXiv:2512.00215, model-agnostic) — POSITIVELY framed on purpose
+  #    (a negative "never stringify" backfires, Pink-Elephant). We can't add econ's
+  #    check-time typed-fidelity detector without re-creating the double-harness, so the
+  #    positively-framed preamble line is the only lever available in the native loop.
+  # DELIBERATELY EXCLUDED (conflict with the native harness): the oracle-inversion /
+  # "leave the bug-encoding test red" carve-out (== the removed Rule-4 that regressed
+  # 11885/12039; SWE-bench discards model test edits anyway) and all repro-first /
+  # finish-gate / M4-pin machinery (the native loop already owns verification).
+  # ESCALATION triggers rewritten from prose to COUNTABLE (Part V item 1 is the
+  # strongest-evidenced fix: 8/8 forensic reds ran 0 escalations; prose advisories
+  # never steered the cheap conductor — a countable trigger it can self-evaluate might).
+  # UPDATE 2026-07-15 (same day): priors3 shows the countable triggers above still
+  # under-fire in prose form — 0/3 forensic runs escalated (11848 bailed on an
+  # unverified "fix"; 11885 finished with 2 PASS_TO_PASS tests left red). Finish-gates
+  # are now MECHANICAL for this arm: a Stop hook (cc-harness-hooks.py, wired via
+  # settings.local.json in step 3.15) blocks a no-edit/regressed/unverified finish or
+  # an unescalated trigger (caps Z1/R1/V2/E1, overall 3, fail-open) — superseding the
+  # "finish-gate machinery" exclusion above for OPEN-MODELS only, since a hook gate
+  # is not prompt prose and can't double-harness (it fires once, at Stop, never mid-turn).
+  if [ "$OPEN_MODELS" = "1" ]; then
+    AUTONOMY_PROMPT="$AUTONOMY_PROMPT
+
+TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to write the plan down (one task per slice) and TaskUpdate each to completed as it lands; treat the tracker as your working memory across a long run, not bookkeeping, and clear it when the fix is done.
+
+FIX DISCIPLINE (applies to every edit you make):
+- Fix at the definition. Change the entity whose behavior the issue calls wrong at the site where it is DEFINED; a fix that coerces or special-cases at a downstream site where the value merely flows through is almost always the wrong layer.
+- Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.
+- Test files are read-only in this benchmark — the harness mechanically denies test edits; never attempt them, and never count a test edit as part of a fix.
+
+DELEGATION — use your agents when they pay, not by reflex:
+- unerr-junior (fast, cheap): parallel recon across many files, running test suites or repro scripts (it reports exact output), web lookups. Do a single quick lookup yourself.
+- unerr-worker (executor): scoped multi-file mechanical changes; run independent slices in parallel. Do a small single-file edit yourself.
+
+ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard instances are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct fix attempts the issue's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate defect sites and the evidence does not decide between them; (d) your fix turned a previously-passing test red and one rework did not recover it.
+Escalate by spawning unerr-opus AND unerr-fable IN PARALLEL (one message, two Task calls). Give each the SAME evidence brief — the issue text, what you observed, what you tried, and ALL candidate sites — but NOT your preferred hypothesis, so their reads stay independent. Instruct them to investigate and return a one-line root cause plus an exact minimal patch proposal WITHOUT editing files. Reconcile: if they agree, implement it; if they disagree, prefer the verdict that explains ALL observed evidence, then the one that fixes a definition site over one that compensates at a flow site. Exception — if a concrete fix already exists but has failed twice, run them in SEQUENCE instead: unerr-opus implements directly, then unerr-fable reviews the diff against the issue. At most one escalation round per problem; after reconciling, implement and finish. Triggers (b) and (d) are machine-checked at stop: if they have fired and you try to finish without having escalated, the stop gate blocks you and returns you to work.
+FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions):
+- After your final edit, re-run your reproduction of the issue AND the narrowest existing test module covering each edited file; a finish without a green post-edit verification run is blocked.
+- A test that passed before your change and fails after it is a regression caused by your fix — rework it until green; finishing while it is red is blocked.
+- If the stop gate blocks you, do exactly what its message names, then finish. Do not fight the gate; it releases after its condition is met."
+  fi
 fi
 SYSPROMPT_ARGS=( --append-system-prompt "$AUTONOMY_PROMPT" )
 
@@ -226,6 +369,9 @@ if [ "$MODE" = "on" ] && [ "$DEBUG_MCP_PROBE" = "1" ]; then
   mcp_probe_loop & PROBE_PID=$!
 fi
 
+hb_loop() { while :; do sleep 240; log "HB events_bytes=$(wc -c < /tmp/claude-events.jsonl 2>/dev/null | tr -d ' ' || echo 0)"; done; }
+hb_loop & HB_PID=$!
+
 timeout -k 20 "${CLAUDE_TIMEOUT}s" claude -p "$PROMPT" \
   --model "$CLAUDE_MODEL" \
   "${SYSPROMPT_ARGS[@]}" \
@@ -234,6 +380,7 @@ timeout -k 20 "${CLAUDE_TIMEOUT}s" claude -p "$PROMPT" \
   "${MCP_ARGS[@]}" \
   > /tmp/claude-events.jsonl 2>/tmp/claude.err
 CLAUDE_RC=$?
+kill "$HB_PID" 2>/dev/null; wait "$HB_PID" 2>/dev/null || true
 if [ -n "$PROBE_PID" ]; then
   kill "$PROBE_PID" 2>/dev/null; wait "$PROBE_PID" 2>/dev/null || true
   mcp_probe_once post   # is unerr STILL alive after the run completed?
@@ -243,6 +390,33 @@ fi
 [ "$CLAUDE_RC" = 124 ] && log "claude -p TIMED OUT after ${CLAUDE_TIMEOUT}s — capturing partial diff"
 log "claude -p exit=$CLAUDE_RC"
 [ "$CLAUDE_RC" -ne 0 ] && sed 's/^/[claude.err] /' /tmp/claude.err >&2
+
+# --- harness summary (-> stderr; survives into meta.jsonl stderr_tail) -------
+# The distributed bundle drops per-instance artifacts (n_artifacts:0), so the
+# deny/gate evidence in state.jsonl would die with the container. Summarize it
+# to stderr, which worker-loop keeps as stderr_tail — the ONE per-instance
+# harness signal that reaches the bundle. (Open-models arm only — the hooks
+# that write this state are installed only when OPEN_MODELS=1.)
+if [ -f /tmp/cc-harness/state.jsonl ]; then
+  HS="$("${PYBIN:-python3}" - <<'PYEOF' 2>/dev/null
+import json, collections
+c = collections.Counter(); denies = collections.Counter(); blocks = collections.Counter()
+try:
+    for l in open("/tmp/cc-harness/state.jsonl"):
+        l = l.strip()
+        if not l: continue
+        try: d = json.loads(l)
+        except Exception: continue
+        ev = d.get("ev", "?"); c[ev] += 1
+        if ev == "deny":  denies[d.get("rule", "?")] += 1
+        if ev == "block": blocks[d.get("gate", "?")] += 1
+    print(json.dumps({"events": dict(c), "denies": dict(denies), "blocks": dict(blocks)}, sort_keys=True))
+except Exception:
+    print("{}")
+PYEOF
+)"
+  log "HARNESS_SUMMARY ${HS:-{}}"
+fi
 
 # --- telemetry (-> stderr only; stdout stays the patch) ----------------------
 # Parse the claude stream-json so the host can verify, per instance: did unerr
@@ -312,7 +486,9 @@ fi
 # install footprint. `unerr install claude-code` writes .mcp.json, .claude/ and
 # CLAUDE.md and edits .gitignore; unerrd writes .unerr/. None of these are the
 # model's fix — left in, they pollute model_patch and break grading.
-INSTALL_ARTIFACTS=( ':(exclude).unerr' ':(exclude).claude' ':(exclude).mcp.json' ':(exclude)CLAUDE.md' ':(exclude).gitignore' )
+# repro_issue.* is the open-models repro-script convention (protocol says /tmp,
+# this is the safety net if the model writes it in the repo anyway).
+INSTALL_ARTIFACTS=( ':(exclude).unerr' ':(exclude).claude' ':(exclude).mcp.json' ':(exclude)CLAUDE.md' ':(exclude).gitignore' ':(exclude)repro_issue.*' )
 git add -A >/dev/null 2>&1 || true
-git reset -q -- .unerr .claude .mcp.json CLAUDE.md .gitignore >/dev/null 2>&1 || true
+git reset -q -- .unerr .claude .mcp.json CLAUDE.md .gitignore 'repro_issue.*' >/dev/null 2>&1 || true
 git diff --cached -- . "${INSTALL_ARTIFACTS[@]}"

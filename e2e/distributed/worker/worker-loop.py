@@ -30,7 +30,9 @@ import base64
 import glob
 import json
 import os
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -67,6 +69,96 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, "") or default)
     except (TypeError, ValueError):
         return default
+
+
+# Stall watchdog (S8): the resolve subprocess's stdout+stderr are captured to a
+# file (never streamed directly, since Popen replaces subprocess.run here) and
+# polled for progress. run-instance.sh's hb_loop appends an `HB events_bytes=<n>`
+# line to this SAME file every 240s regardless of whether claude is actually
+# doing anything, so heartbeat-LINE growth is EXCLUDED from the progress
+# signal — progress = EITHER a non-heartbeat log line changing (build/index/
+# claude tool output/grade output) OR the heartbeat's events_bytes VALUE
+# itself increasing (claude emitting new turns). Otherwise a hung claude
+# (events_bytes frozen, no non-heartbeat output) would still tick the file
+# size every 4 minutes and the stall clock would never fire. No progress for
+# stall_kill_s -> the resolve is killed so the attempt fails and the
+# coordinator re-leases it (a fresh restart).
+STALL_KILL_S = int(os.environ.get("STALL_KILL_S", "2700"))
+_HB_RE = re.compile(rb"HB events_bytes=")
+_EVENTS_BYTES_RE = re.compile(rb"events_bytes=(\d+)")
+
+
+def _progress_signal(logpath: str, tail_bytes: int = 65_536) -> tuple[int | None, bytes]:
+    """Read the last `tail_bytes` of `logpath` ONCE (never the whole file) and
+    derive BOTH progress signals from that single read: the last
+    `events_bytes=<n>` heartbeat value (None if no heartbeat has landed yet)
+    and the last line that is NOT a heartbeat line (b"" if the tail is empty
+    or entirely heartbeat lines). Heartbeat lines tick on a fixed timer
+    regardless of real progress, so they're excluded from the second signal —
+    only events_bytes' own value and non-heartbeat output count."""
+    try:
+        with open(logpath, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            chunk = f.read()
+    except OSError:
+        return None, b""
+    matches = _EVENTS_BYTES_RE.findall(chunk)
+    last_events_bytes = int(matches[-1]) if matches else None
+    last_non_hb_line = b""
+    for line in chunk.splitlines():
+        if not _HB_RE.search(line):
+            last_non_hb_line = line
+    return last_events_bytes, last_non_hb_line
+
+
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _watch_resolve(proc: "subprocess.Popen", logpath: str, deadline: float,
+                    timeout_s: float, *, stall_kill_s: int = STALL_KILL_S,
+                    poll_s: float = 30.0, sleep_fn=time.sleep,
+                    now_fn=time.time) -> str | None:
+    """Poll `proc` (writing to `logpath`) every `poll_s` until it exits, the
+    epoch `deadline` passes, or no progress — via `_progress_signal`: the
+    log's last `events_bytes=` heartbeat value increasing OR its last
+    non-heartbeat line changing (heartbeat-LINE growth alone does not count,
+    or a truly hung claude would never trip the clock) — is seen for
+    `stall_kill_s` seconds.
+
+    A deadline kills the process group and raises subprocess.TimeoutExpired
+    (mirroring subprocess.run(timeout=...), which this replaces). A stall
+    kills the process group and RETURNS an error string instead of raising,
+    so the caller can fold it into the existing error-reporting path rather
+    than a distinct exception type. Returns None when the process exited on
+    its own (the normal case)."""
+    last_sig: tuple[int | None, bytes] | None = None
+    last_progress = now_fn()
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            return None
+        now = now_fn()
+        if now >= deadline:
+            _kill_process_group(proc)
+            raise subprocess.TimeoutExpired(cmd=getattr(proc, "args", "resolve"),
+                                             timeout=timeout_s)
+        sig = _progress_signal(logpath)
+        if sig != last_sig:
+            last_sig = sig
+            last_progress = now
+        elif now - last_progress >= stall_kill_s:
+            _kill_process_group(proc)
+            return f"stalled: no log growth for {stall_kill_s}s (killed for restart)"
+        sleep_fn(poll_s)
 
 
 class CoordinatorError(Exception):
@@ -264,9 +356,39 @@ class Worker:
         # a no-op (the fly VM is already x86_64; forcing linux/amd64 is unnecessary).
         env["DOCKER_DEFAULT_PLATFORM"] = ""
         self.log(f"{iid}: resolve -> {' '.join(cmd)}")
-        proc = subprocess.run(cmd, env=env, timeout=self.timeout + 300)
-        self.log(f"{iid}: resolve rc={proc.returncode}")
-        return proc.returncode
+        # Captured (not streamed) so the stall watchdog can poll it for growth —
+        # start_new_session=True makes proc.pid a process-group leader so a
+        # stall/deadline kill takes the whole tree, not just the driver.
+        logpath = os.path.join(scratch, "resolve-output.log")
+        timeout_s = self.timeout + 300
+        deadline = time.time() + timeout_s
+        with open(logpath, "wb") as logf:
+            proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+            try:
+                stall_error = _watch_resolve(proc, logpath, deadline, timeout_s)
+            finally:
+                rc = proc.wait()
+                self._tail_log_to_stdout(iid, logpath)
+        if stall_error:
+            self.log(f"{iid}: resolve {stall_error}")
+            raise RuntimeError(stall_error)
+        self.log(f"{iid}: resolve rc={rc}")
+        return rc
+
+    # ── stall-watchdog debuggability: output no longer streams directly ──────
+    def _tail_log_to_stdout(self, iid: str, logpath: str, n: int = 40) -> None:
+        """Echo the last `n` lines of the captured resolve log to worker
+        stdout, prefixed with the instance id — preserves the pre-watchdog
+        fly-logs visibility now that resolve output is captured to a file
+        instead of streaming through this process directly."""
+        try:
+            with open(logpath, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            return
+        for line in lines[-n:]:
+            print(f"[{iid}] {line.rstrip()}", flush=True)
 
     # ── grade step (swebench harness, per-instance, in a scratch CWD) ────────
     def _grade(self, iid: str, scratch: str, preds_path: str,
@@ -473,7 +595,10 @@ class Worker:
     def _runner_path(self) -> str:
         # Each arm ships its resolver at a fixed /work path in the distributed image
         # (Slice E COPYs the arm's local-docker context there). econ is the v1 arm.
-        runners = {"econ": "/work/local-docker/run-benchmark.py"}
+        runners = {
+            "econ": "/work/local-docker/run-benchmark.py",
+            "claude": "/work/claude/local-docker/run-benchmark.py",
+        }
         return runners.get(self.arm, "/work/local-docker/run-benchmark.py")
 
 
