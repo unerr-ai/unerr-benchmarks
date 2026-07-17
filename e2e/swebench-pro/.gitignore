@@ -1,0 +1,4 @@
+# per-run mirror logs + retry list (regenerated each run)
+mirror-logs/
+# scratch venv bootstrapped for DATASET=verified (swebench + datasets), regenerated on demand
+.verified-venv/

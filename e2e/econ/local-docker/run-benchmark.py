@@ -46,13 +46,65 @@ TIERCOST_PY = ECON_ROOT / "econ-tier-cost.py"
 GRAPH_CACHE_ROOT = Path(os.environ.get("OC_GRAPH_CACHE", "/var/tmp/oc-graph-cache"))
 
 
-def docker_image_for(instance: dict) -> str:
-    """Official per-instance image name (mirrors mini-swe-agent's mapping)."""
+def _pro_image_uri(iid: str, username: str, repo_name: str) -> str:
+    """SWE-bench Pro per-instance image ref — a byte-for-byte replica of the
+    vendored e2e/distributed/swebench-pro/helper_code/image_uri.py
+    get_dockerhub_image_uri(). Resolve MUST land on the same
+    <user>/sweap-images:<tag> the Pro grader (swe_bench_pro_eval.py
+    --dockerhub_username) pulls, or the agent runs in a different/nonexistent
+    image than the one scored. The vendored module is imported in preference to
+    this replica when present (_load_pro_image_uri); this is the off-box
+    fallback, kept in sync with it."""
+    repo_base, repo_name_only = repo_name.lower().split("/")
+    hsh = iid.replace("instance_", "")
+    if iid == "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan":
+        repo_name_only = "element-web"
+    elif "element-hq" in repo_name.lower() and "element-web" in repo_name.lower():
+        repo_name_only = "element"
+        if hsh.endswith("-vnan"):
+            hsh = hsh[:-5]
+    elif hsh.endswith("-vnan"):
+        hsh = hsh[:-5]
+    tag = f"{repo_base}.{repo_name_only}-{hsh}"
+    if len(tag) > 128:
+        tag = tag[:128]
+    return f"{username}/sweap-images:{tag}"
+
+
+def _load_pro_image_uri():
+    """Return the vendored get_dockerhub_image_uri when importable (the fleet
+    worker bakes it at /work/swebench-pro/helper_code/image_uri.py — the SAME
+    copy grade_pro's evaluator uses, so resolve/grade agree by construction),
+    else the inline _pro_image_uri replica."""
+    for base in (os.environ.get("SWEBENCH_PRO_DIR", "/work/swebench-pro"),
+                 str(ECON_ROOT.parent / "distributed" / "swebench-pro")):
+        if (Path(base) / "helper_code" / "image_uri.py").is_file():
+            sys.path.insert(0, base)
+            try:
+                from helper_code.image_uri import get_dockerhub_image_uri
+                return get_dockerhub_image_uri
+            except Exception:
+                pass
+    return _pro_image_uri
+
+
+def docker_image_for(instance: dict, pro_username: str = "", pro_fn=None,
+                     namespace: str = "swebench") -> str:
+    """Per-instance image ref. Verified/Lite: the official swebench eval image
+    (or an image_name the row already carries), built under `namespace` (the
+    Docker Hub org — default "swebench"; "starryzhang" for SWE-bench Live).
+    SWE-bench Pro (pro_username set): the private sweap mirror ref forced by
+    the Pro eval's image_uri rule — the Pro row's own image_name is Scale's
+    private ECR URL we can't pull, so it is deliberately IGNORED in favour of
+    <pro_username>/sweap-images:<tag>."""
+    if pro_username:
+        return (pro_fn or _pro_image_uri)(
+            instance["instance_id"], pro_username, instance["repo"])
     name = instance.get("image_name") or instance.get("docker_image")
     if name:
         return name
     iid = instance["instance_id"].replace("__", "_1776_")
-    return f"docker.io/swebench/sweb.eval.x86_64.{iid}:latest".lower()
+    return f"docker.io/{namespace}/sweb.eval.x86_64.{iid}:latest".lower()
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -117,10 +169,14 @@ def _apply_cross_session_totals(telemetry: dict, tier_cost_db: dict) -> dict:
 
 
 def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
-                   label: str, out_dir: Path) -> tuple[str, dict]:
-    """Build + run one instance, return (patch, meta). Empty patch on failure."""
+                   label: str, out_dir: Path,
+                   pro_username: str = "", pro_fn=None,
+                   namespace: str = "swebench") -> tuple[str, dict]:
+    """Build + run one instance, return (patch, meta). Empty patch on failure.
+    pro_username set → SWE-bench Pro: image is the sweap mirror ref and repo_dir
+    is /app (the caller passes --repo-dir /app for Pro)."""
     iid = instance["instance_id"]
-    instance_image = docker_image_for(instance)
+    instance_image = docker_image_for(instance, pro_username, pro_fn, namespace)
     tag = f"unerr-econ-run:{iid.replace('__', '_1776_').lower()}"
 
     # ensure the official env image is present, then graft the toolbox onto it
@@ -254,6 +310,18 @@ def main() -> int:
     ap.add_argument("--out", default="results")
     ap.add_argument("--label", default="econ",
                     help="run label; output goes to <out>/<label>/")
+    ap.add_argument("--ids-jsonl", default="",
+                    help="load instance rows from this JSONL (one row per line) instead of "
+                         "HF load_dataset — the SWE-bench Pro path (rows carry repo/"
+                         "problem_statement; no HF pull, no Mini-50 allowlist)")
+    ap.add_argument("--dockerhub-username", default="",
+                    help="when set, resolve builds each instance FROM the private Pro image "
+                         "mirror <user>/sweap-images:<tag> (the image_uri rule) instead of "
+                         "the Verified swebench eval image — MUST match the Pro grader's "
+                         "--dockerhub_username so resolve+grade share one image")
+    ap.add_argument("--image-namespace", default="swebench",
+                    help="Docker Hub org for per-instance eval images (default swebench; "
+                         "starryzhang for SWE-bench Live)")
     args = ap.parse_args()
 
     # SWE-bench instance images are linux/amd64 only; force amd64 for build/run/pull
@@ -265,18 +333,43 @@ def main() -> int:
         print("ERROR: set LITELLM_API_KEY (econ routes all model tiers via it)", file=sys.stderr)
         return 1
 
-    from datasets import load_dataset  # lazy: only needed at run time
-    rows = list(load_dataset(args.dataset, split=args.split))
-    # --ids selects directly from the FULL dataset (targeted re-runs of ANY
-    # Verified instance); the Mini-50 allowlist does NOT gate it. Only when no
-    # explicit ids are given do we fall back to the pinned Mini-50 default.
+    # Row source: the Pro path reads the vendored JSONL (no HF pull; rows carry the
+    # `repo` field the sweap image_uri rule needs). Everything else loads the HF
+    # dataset named by --dataset.
+    if args.ids_jsonl:
+        if not os.path.isfile(args.ids_jsonl):
+            print(f"ERROR: --ids-jsonl {args.ids_jsonl} not found (SWE-bench Pro id source; "
+                  f"Dockerfile.dist bakes it at /work/swebench-pro/)", file=sys.stderr)
+            return 1
+        rows = []  # tolerant load — one bad line must not sink the whole resolve
+        with open(args.ids_jsonl, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rows.append(json.loads(ln))
+                except json.JSONDecodeError as e:
+                    print(f"WARNING: skipping malformed --ids-jsonl line ({e})", file=sys.stderr)
+        src = args.ids_jsonl
+    else:
+        from datasets import load_dataset  # lazy: only needed at run time
+        rows = list(load_dataset(args.dataset, split=args.split))
+        src = args.dataset
+    # --ids selects directly from the FULL source (targeted re-runs of ANY
+    # instance); the Mini-50 allowlist does NOT gate it. Only for the Verified HF
+    # path with no explicit ids do we fall back to the pinned Mini-50 default —
+    # the Pro jsonl has its own id space, so it runs whole (or --instances-capped).
     if args.ids:
         want = {s.strip() for s in args.ids.split(",") if s.strip()}
         rows = [r for r in rows if r["instance_id"] in want]
         absent = want - {r["instance_id"] for r in rows}
         if absent:
-            print(f"WARNING: {len(absent)} requested ids absent from {args.dataset}: "
+            print(f"WARNING: {len(absent)} requested ids absent from {src}: "
                   f"{sorted(absent)[:3]}...", file=sys.stderr)
+    elif args.ids_jsonl:
+        if args.instances > 0:
+            rows = rows[: args.instances]
     else:
         allow = set(MINI_50_IDS)
         rows = [r for r in rows if r["instance_id"] in allow]
@@ -298,7 +391,14 @@ def main() -> int:
 
     par = max(1, args.parallel)
     total = len(rows)
-    print(f"instances={total} dataset={args.dataset} label={args.label} parallel={par}",
+    # Pro image mode (from --dockerhub-username): resolve the image_uri callable
+    # ONCE (prefer the vendored copy the grader uses) and share it across the pool.
+    pro_username = args.dockerhub_username.strip()
+    pro_fn = _load_pro_image_uri() if pro_username else None
+    print(f"instances={total} src={src} label={args.label} parallel={par}"
+          + (f" pro_user={pro_username} repo_dir={args.repo_dir} "
+             f"image_uri={'vendored' if pro_fn is not _pro_image_uri else 'inline'}"
+             if pro_username else ""),
           file=sys.stderr)
 
     # preds.json is rewritten whole and meta.jsonl is appended after each instance;
@@ -322,7 +422,8 @@ def main() -> int:
         print(f"[{idx}/{total}] START {iid}", file=sys.stderr)
         try:
             patch, meta = solve_instance(
-                inst, api_key, args.repo_dir, args.timeout, args.label, out)
+                inst, api_key, args.repo_dir, args.timeout, args.label, out,
+                pro_username, pro_fn, args.image_namespace)
         except subprocess.TimeoutExpired:
             patch, meta = "", {"instance_id": iid, "label": args.label, "rc": "timeout"}
         except Exception as e:  # a build/run crash on ONE instance must not sink the pool

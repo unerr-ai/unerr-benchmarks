@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS tasks (
   instance_id     TEXT PRIMARY KEY,
   run_id          TEXT NOT NULL,
-  status          TEXT NOT NULL DEFAULT 'pending',   -- pending|leased|done|dead
+  status          TEXT NOT NULL DEFAULT 'pending',   -- pending|leased|done|dead|failed
   attempt_count   INTEGER NOT NULL DEFAULT 0,
   worker_id       TEXT,
   lease_until     INTEGER,                            -- epoch s
@@ -19,9 +19,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   err_txt         TEXT,                               -- S7b: raw agent stderr transcript
   db_b64          TEXT,                               -- S7b: base64 opencode.db (bounded, may be absent)
   engine_log      TEXT,                               -- S7c: tail-capped econ engine log (orchestration markers)
+  trajectory_json TEXT,                               -- harness_run (Terminal): Harbor agent trajectory
+  sessions_cast   TEXT,                               -- harness_run (Terminal): asciinema tmux session recording
+  harbor_run_log  TEXT,                               -- harness_run (Terminal): Harbor's captured stdout+stderr (catches SETUP-phase failures before trial_dir exists)
   completed_by    TEXT,
   completed_at    INTEGER,                            -- epoch s
-  failure_reason  TEXT                                 -- last /fail error (dead-instance capture, capped)
+  failure_reason  TEXT,                                -- last /fail error (dead-instance capture, capped)
+  fail_reruns     INTEGER NOT NULL DEFAULT 0           -- failure-rerun: times requeued from 'failed' (see server.py Queue.claim); capped by MAX_FAILURE_RERUN
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

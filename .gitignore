@@ -7,6 +7,9 @@ node_modules/
 results/runs/
 *.log
 
+# Scratch id lists / temp working files (e.g. scratchpad_pro_ids.txt)
+**/scratchpad_*.txt
+
 # Cloned target repos used as fixtures (regeneratable)
 **/hono-run/out/
 **/worktrees/
@@ -29,5 +32,15 @@ __pycache__/
 # Vendored agent binaries (build artifacts, >100MB; never commit — regenerate from the agent repo)
 **/vendor/opencode
 
+# Vendored SWE-bench Pro evaluator — Scale AI's SWE-bench_Pro-os snapshot (swe_bench_pro_eval.py
+# + helper_code/ + the 24M sweap_eval_full_v2.jsonl + 4565 run_scripts/ = ~54M of regeneratable
+# external data). Kept ON DISK for the local Pro image build (Dockerfile.dist COPYs it;
+# .dockerignore is independent of .gitignore, so the build is unaffected). Re-vendor from Scale
+# AI's SWE-bench_Pro-os repo when setting up a fresh clone for BENCHMARK=pro.
+e2e/distributed/swebench-pro/
+
 # local secrets (subscription token etc.) — never commit
 .env.local
+# Tigris archive creds for the host lookup tool (AWS keypair) — never commit
+.env.tigris
+**/.env.tigris

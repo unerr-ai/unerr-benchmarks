@@ -131,6 +131,30 @@ if [ "$MODE" = "on" ]; then
     log "WARNING: .mcp.json absent after install — unerr MCP may not load"
   fi
 
+  # 3.05 WEB SEARCH (optional, key-gated): merge Tavily's HOSTED MCP server into
+  #      the same .mcp.json --strict-mcp-config loads. Remote HTTP transport —
+  #      no npm install, no extra process; the key rides in the URL. Wired on
+  #      BOTH arms (see the OFF branch) so the A/B delta stays purely unerr.
+  #      NB: runs with web search are a SEPARATE result class — the agent can
+  #      find the actual upstream fix, so never compare them 1:1 against no-web
+  #      baselines (label them web-on; not leaderboard-submittable).
+  if [ -n "${TAVILY_API_KEY:-}" ] && [ -f "$REPO_DIR/.mcp.json" ]; then
+    if node -e '
+      const fs = require("fs");
+      const p = process.argv[1];
+      const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+      (cfg.mcpServers ??= {}).tavily = {
+        type: "http",
+        url: "https://mcp.tavily.com/mcp/?tavilyApiKey=" + process.env.TAVILY_API_KEY,
+      };
+      fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+    ' "$REPO_DIR/.mcp.json" 2>/tmp/tavily-merge.err; then
+      log "web-search: tavily hosted MCP merged into .mcp.json"
+    else
+      log "web-search: tavily merge FAILED (non-fatal, see /tmp/tavily-merge.err)"
+    fi
+  fi
+
   # 3.1 OPEN-MODELS: overwrite the just-installed agent files with our shipped,
   #     customized versions (Task-delegation policy tuned for the open-models
   #     arm). Shipped next to this script in the toolbox image under agents/.
@@ -236,9 +260,15 @@ EOF
     || log "recon: prime skipped (non-fatal; graph already built on disk)"
 else
   # OFF arm: guarantee a clean baseline — zero MCP servers regardless of any
-  # stray repo .mcp.json. Claude still has its native tools (Read/Edit/Bash/…),
-  # which is exactly the "disciplined bare agent" baseline.
-  echo '{"mcpServers":{}}' > /tmp/empty-mcp.json
+  # stray repo .mcp.json (plus tavily when TAVILY_API_KEY is set, mirroring the
+  # ON arm so web search never becomes the confound in the A/B). Claude still
+  # has its native tools (Read/Edit/Bash/…) — the "disciplined bare agent".
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    printf '{"mcpServers":{"tavily":{"type":"http","url":"https://mcp.tavily.com/mcp/?tavilyApiKey=%s"}}}\n' \
+      "$TAVILY_API_KEY" > /tmp/empty-mcp.json
+  else
+    echo '{"mcpServers":{}}' > /tmp/empty-mcp.json
+  fi
   MCP_ARGS=( --mcp-config /tmp/empty-mcp.json --strict-mcp-config )
 fi
 
@@ -258,6 +288,12 @@ AUTONOMY_PROMPT="You are operating fully autonomously in an automated benchmark,
 # out of the OFF baseline so the A/B delta stays purely "unerr on vs off".
 if [ "$MODE" = "on" ]; then
   AUTONOMY_PROMPT="$AUTONOMY_PROMPT Take the shortest correct path to a working fix. If you are unsure how to fix something, use web search to find the answer. Delegate independent sub-tasks to unerr subagents so they run in parallel. Do not modify test files unless the fix is impossible without it."
+  # Key-gated: make the web-search directive above ACTIONABLE. On open-models the
+  # native WebSearch tool hard-400s through the gateway (fireworks rejects the
+  # server-side web_search param) — point the model at the tavily MCP tools instead.
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    AUTONOMY_PROMPT="$AUTONOMY_PROMPT Web search runs through the tavily MCP tools (tavily_search to find pages, tavily_extract to pull a page's content); a single targeted search of the issue's key error message or symptom is often the fastest route to the root cause. MCP servers connect asynchronously — if the tavily tools are not in your tool list yet, call WaitForMcpServers once, then search. The built-in WebSearch tool is unavailable in this environment — never call it."
+  fi
   # OPEN-MODELS ONLY: orchestration + escalation contract (delegate to subagents;
   # escalate the hard tail). The prior in-prompt WORK PROTOCOL (reproduce-first /
   # typed-assert / leave-tests-red) was REMOVED 2026-07-14: appended on top
@@ -372,12 +408,19 @@ fi
 hb_loop() { while :; do sleep 240; log "HB events_bytes=$(wc -c < /tmp/claude-events.jsonl 2>/dev/null | tr -d ' ' || echo 0)"; done; }
 hb_loop & HB_PID=$!
 
+# Open-models: native WebSearch is a dead tool (server-side web_search param →
+# gateway 400 on fireworks); remove it so the model can't burn turns on it.
+# Real-Claude path keeps it (works there). WebFetch stays on both (client-side).
+WEB_ARGS=()
+[ "$OPEN_MODELS" = "1" ] && WEB_ARGS=( --disallowedTools "WebSearch" )
+
 timeout -k 20 "${CLAUDE_TIMEOUT}s" claude -p "$PROMPT" \
   --model "$CLAUDE_MODEL" \
   "${SYSPROMPT_ARGS[@]}" \
   --output-format stream-json --verbose \
   --dangerously-skip-permissions \
   "${MCP_ARGS[@]}" \
+  "${WEB_ARGS[@]}" \
   > /tmp/claude-events.jsonl 2>/tmp/claude.err
 CLAUDE_RC=$?
 kill "$HB_PID" 2>/dev/null; wait "$HB_PID" 2>/dev/null || true

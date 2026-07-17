@@ -187,6 +187,8 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 | `SWEBENCH_REGISTRY_MIRROR` | recommended | `http://swebench-registry.flycast:5000` — workers' dockerd mirrors docker.io through the shared cache (`lib/boot.sh:74-83`); registry app must be deployed (see `e2e/distributed/registry/README.md`) |
 | `PER_INSTANCE_TIMEOUT` | no | default **10800** (3 h) per-task resolve ceiling; claude budget = timeout − 1200 s (`run-benchmark.py:111`). Hard tasks that hang are handled by the stall watchdog, not a longer ceiling. |
 | `STALL_KILL_S` | no | default **2700** — the worker kills a resolve whose logs show ZERO progress (captured log not growing AND the `HB events_bytes=` heartbeat value not advancing) for this many seconds; the attempt then re-leases once (`MAX_ATTEMPTS=2`) = automatic stop-&-restart of stuck instances |
+| `WEBSEARCH=1` | no — **changes the result class** | STRICT opt-in web search. For `ARM=claude` it enables `TAVILY_API_KEY` (read from `e2e/econ/.env.local`, injected into workers) → `run-instance.sh` merges **Tavily's hosted MCP server** (`mcp.tavily.com`, HTTP transport, no npm dep) into the instance's `.mcp.json` on BOTH arms, and the ON-arm prompt points the model at `tavily_search`/`tavily_extract` (underscores!). Unset → ambient keys IGNORED, zero search tools. **A web-on run can look up the actual upstream fix — label it (e.g. `-web` suffix) and never compare it 1:1 against no-web baselines or submit it.** |
+| `TAVILY_API_KEY` | auto (only when `WEBSEARCH=1`) | claude-arm search key; econ arm uses `EXA_API_KEY` under the same gate |
 
 ---
 
@@ -260,17 +262,41 @@ escalate (§12), so the harness now mechanically gates the same behaviors.
 - **PreToolUse `deny`** (`cc-harness-hooks.py deny`):
   - Rule T — test files are read-only (hard deny; the grader runs its own tests, so
     editing them can only fake-green a failure; kills the edit-tests-to-pass class,
-    e.g. 11885).
-  - Rule B — ≥5 edits to one file with no green verification in between → deny with
-    an imperative to spawn `unerr-opus` + `unerr-fable` (max 2 fires) — the mechanical
-    escalation forcing function; prose triggers measurably never fire.
+    e.g. 11885). Test = a `tests`/`testing` path segment or a `test_*`/`*_test.py`
+    basename — deliberately NOT a bare `test` segment: `django/test/` is product
+    source (TestCase/Client), and denying it would leave a gold fix touching it
+    with no legal path.
+  - Rule B — ≥5 edits to one file with no green verification **AND** a prior V- or
+    R-block already fired → deny with an imperative to spawn `unerr-opus` + `unerr-fable`
+    (max 2 fires). The mechanical escalation forcing function, now **throttled to a
+    verification-revealed trigger**: raw edit-count alone no longer forces escalation
+    (Phase A showed count-triggered escalation billed the reasoner/oracle tiers for zero
+    conversions — see §12).
   - Rule C — convention divergence: introducing `datetime.now(` into a file that
     already uses `utcnow` denies once with an evidence-cited re-apply path (the exact
     11848 fatal token class).
 - **PostToolUse `record`** — silent event recorder → `/tmp/cc-harness/state.jsonl`.
 - **Stop `gate`** — Z (no edits) / R (regression) / V (unverified, cap 2) / E
-  (escalation trigger hit but never escalated; arms on hot-file ≥3 edits OR an
-  R-block OR ≥2 V-blocks). Overall cap 3, fail-open.
+  (escalation). Two behaviors landed after Phase A:
+  - **V requires a BROAD green run** — a recognized suite runner (`pytest`,
+    `runtests.py`, `-m unittest`, `manage.py test`, `tox`/`nox`, sympy's `bin/test`)
+    over a whole module/file/class. NARROW (does not satisfy V): a `::test_...`
+    method node id, a `-k` filter, or a dotted `Class.test_method` path — but a
+    django dotted whole-module (`runtests.py app.test_file`) and a `::TestClass`
+    whole-class run count as BROAD (case-sensitive, structural regex). A bare repro
+    script (`python repro_issue.py`) is NOT a suite run and never satisfies V. This
+    forces the edited module's suite to run so **Gate R can catch a PASS_TO_PASS
+    regression** — the failure class that sank django-11885 & pylint-7277 (solved
+    target, regressed a sibling test they never ran).
+  - **E is throttled** — the raw hot-file (≥3 edits) arm was removed; E now escalates
+    only on an R-block or ≥2 V-blocks (verification proved the agent is stuck), never on
+    edit count.
+  - **Caps:** overall cap 3 gates only the Z/R/V nudges; **Gate E is exempt** (else
+    `cap(3) == V_cap(2) + E_cap(1)` would let an early Z/V spend the budget and starve
+    the escalation — verified deadlock, now selftest-guarded). E is capped at 1, so the
+    hard ceiling is 4 blocks per run, then unconditional allow. Fail-open. Flow:
+    narrow-verify → V → V(cap) → E escalate → allow; broad-verify red → R rework;
+    broad-verify green → finish.
 - `HARNESS_SUMMARY {...}` is logged to stderr at the end of `run-instance.sh` and
   survives into `meta.jsonl`'s `stderr_tail` (the bundle drops artifacts, so this is
   the per-instance gate/deny evidence).
@@ -309,14 +335,41 @@ escalate (§12), so the harness now mechanically gates the same behaviors.
    everywhere, regenerate: `python3 e2e/reference/claude/local-docker/cost_report.py
    out/dist-<label>/bundle/results/<label> --mode on --grade <merged.json>`.
 6. **"cost" always means the real LiteLLM spend** (gateway `/spend/logs`), never the
-   Anthropic-priced `total_cost_usd` (which is renamed `telemetry.usd_anthropic_priced`).
+   Anthropic-priced `total_cost_usd` (renamed `telemetry.usd_anthropic_priced`). Claude Code
+   prices open-weight tokens at sonnet/opus rates and is 7–12× too high — **see §11b′ for the
+   mechanism, the gateway spot-check, and the numeric proof.**
 7. **A stuck instance (MCP hang, silent stall) no longer burns its full ceiling** — the
    stall watchdog kills at `STALL_KILL_S` of zero log growth and the attempt re-leases
    once. If an instance dead-letters with `stalled:` in its error, it stalled twice.
+8. **Web search: the native `WebSearch` tool NEVER works on the open-models arm** — it is
+   an Anthropic *server-side* tool (`web_search_20250305`); through the gateway fireworks
+   rejects it with `400: does not support parameters: ['web_search_options']` (verified
+   live). `run-instance.sh` passes `--disallowedTools WebSearch` when `OPEN_MODELS=1` so
+   the model can't burn turns on it. Real search = `WEBSEARCH=1` → Tavily hosted MCP (§6).
+   Three smoke-verified quirks: the tool names use **underscores** (`tavily_search`,
+   `tavily_extract`); MCP servers connect **asynchronously** (`status: pending` in the init
+   event) so a model that needs search on turn 1 must call `WaitForMcpServers` first — the
+   ON-arm prompt hint says exactly that; `WebFetch` works on both arms regardless (client-
+   side fetch; its summarize call routes through the haiku mapping).
 
 ---
 
 ## 10. Monitoring a live run
+
+Fastest path — the two read-only monitor scripts in `e2e/distributed/` (they resolve the coordinator
+and workers by fleet metadata, so pass the claude app as arg 2 or just let the label's `claude` fold
+infer it; see distributed [README §3](../../../distributed/README.md)):
+
+```bash
+cd e2e/distributed
+./status.sh <LABEL> swebench-agent-dist-claude --instances   # armed?, workers, counts, resolved/total + per-instance
+./status.sh <LABEL> swebench-agent-dist-claude --cost        # + total $ and per-tier (conductor/reasoner/oracle/fast) token·turn·cost, from LiteLLM spend
+./status.sh --matrix <id> --watch                            # live monitor a whole matrix every 15s
+./debug-workers.sh <LABEL> swebench-agent-dist-claude --grep 'worker-loop|index|scip|claude'   # what each worker is doing
+./debug-workers.sh <LABEL> swebench-agent-dist-claude --follow                                  # live-stream both workers
+```
+
+Or drop to the raw fly commands:
 
 ```bash
 APP=swebench-agent-dist-claude
@@ -349,11 +402,14 @@ by file-path import, so their numbers match the bundle exactly.
 **Bundle layout** — `out/dist-<label>/bundle/`:
 `results/<label>/meta.jsonl` (per-instance `telemetry{turns,tokens,tools}` + `cost{by_tier,by_model}`),
 `results/<label>/preds.json` (SWE format), `dead.jsonl`,
-`reports/merged.<label>.json` (swebench grade). **Note:** the default distributed bundle
-carries **no** per-instance `artifacts/<iid>/` (engine.log/events.jsonl/opencode.db) —
-the aggregate summary shows `n_artifacts: 0`. Only `report.json` + `meta` + `model_patch`
-survive to the bundle; for turn-by-turn engine logs you must SSH a **live** worker during
-the run (see §11d).
+`reports/merged.<label>.json` (swebench grade). **Per-instance traces** ride `/complete` into
+`results/<label>/artifacts/<iid>/` **when the arm/harness writes them** (descriptor-driven — see the
+distributed [README §8.1](../../../distributed/README.md#81-the-benchmark-axis-benchmark)):
+`terminal` always carries `trajectory.json` + `sessions.cast`; the econ resolve path carries
+`engine.log` + `events.jsonl` + `opencode.db`. **The Claude-arm verified/pro path historically wrote
+none** of those files into its artifact dir, so its bundle still shows `n_artifacts: 0` and
+`report.json` + `meta` + `model_patch` are the only per-instance survivors — for turn-by-turn engine
+logs there you SSH a **live** worker during the run (see §11d).
 
 ### 11a. Re-pull a bundle from a LIVE fleet (the `arm` flow, not `run`)
 
@@ -396,6 +452,44 @@ gateway `/spend/logs`, never Anthropic-priced.
   actually `cost.requests`, mislabeled; the `--detailed` §7 "Turns" column pulls the real
   `telemetry.turns` (e.g. a run may show §2 turns=44 but §7 turns=58 for the same instance).
 
+### 11b′. Why Claude Code's `usd` is NOT the cost on this arm — never trust it
+
+**This is the single most common cost mistake — read it before quoting any dollar figure.**
+
+Claude Code computes its own spend by applying **Anthropic list prices** to the token
+counts of the model *name* it thinks it called (`sonnet` / `opus` / `haiku`). On this arm
+those names are re-routed by LiteLLM to open-weight models (`minimax-m3` / `deepseek-v4-pro`
+/ `gpt-oss-120b` / `glm-5p2`), which are **~10× cheaper**. Claude Code never learns the real
+model or its price, so its figure — surfaced as `telemetry.usd_anthropic_priced` (and the
+raw `total_cost_usd` in the stream-json) — is **Anthropic-priced fiction, typically 7–12×
+the truth**. Do not put it in a report, a table, or a comparison.
+
+**The only real cost is the LiteLLM gateway's per-model spend.** `cost_report.py` already
+reconciles it into `cost.by_tier` / `cost.by_model` in the bundle. To spot-check a live or
+finished run straight from the gateway:
+
+```bash
+MK=$(grep -E '^LITELLM_MASTER_KEY=' ../econ-coding-agent/infra/litellm/.env.local | sed 's/^[^=]*=//; s/^"//; s/"$//')
+D=$(date -u +%F); T=$(date -u -v+1d +%F 2>/dev/null || date -u -d tomorrow +%F)
+# per-model spend for the day (window is a daily rollup; econ arm shares the gateway, so
+# run this only when econ is idle, or filter by the run's minted api_key hash).
+curl -s "https://econ-litellm.fly.dev/spend/logs?start_date=$D&end_date=$T" \
+  -H "Authorization: Bearer $MK" \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);r=d[0] if isinstance(d,list) else d;print(json.dumps(r.get("models",{}),indent=1))'
+```
+
+**Two proofs it's LiteLLM, not Claude Code:**
+1. **The breakdown is by open-weight model names** (`minimax-m3`, `deepseek-v4-pro`,
+   `glm-5p2`, `gpt-oss-120b`). Claude Code has no concept of these — it believes every call
+   was sonnet/opus/haiku. A per-`deepseek`/`glm` spend table can *only* come from the gateway.
+2. **Numeric reconciliation.** e.g. `django-11848` conductor used in=40 837, cache_read=952 333,
+   out=15 954. At LiteLLM minimax rates ($0.30/$1.20 per M, cache $0.06/M) that is **~$0.09**;
+   at Anthropic sonnet rates ($3/$15 per M) it is ~$0.65–1.08 — and Claude Code reported
+   **$1.0792**. The reported number tracks Anthropic, not the gateway. Real cost ≈ $0.09.
+
+LiteLLM per-model rates are the ground truth (`GET /model/info` → `input_cost_per_token` /
+`output_cost_per_token` / `cache_read_input_token_cost`). Lead with the LiteLLM number, always.
+
 ### 11c. SWE-bench Verified authorized submission format
 
 ```bash
@@ -436,9 +530,38 @@ Automatic at the end of `run` / all-in-one. Manual:
 live fleet before teardown, arm it with the **`arm`** subcommand instead of `run` (§5b),
 inspect, then `DESTROY_ONLY=1 …` to tear down.
 
+### 11f. Pull a whole matrix at once (`download-all.sh`)
+
+When you launched several arm×benchmark fleets with `bench.sh` (distributed
+[README §8.3](../../../distributed/README.md#83-fire-a-matrix-benchsh)), pull every one's
+results + traces in a single pass instead of running `pull_results.sh` per fleet:
+```bash
+e2e/distributed/download-all.sh --matrix <matrix-id>                 # reads out/bench-<id>/manifest.tsv
+e2e/distributed/download-all.sh --matrix <matrix-id> --submission    # + all_preds.jsonl per resolve_then_grade combo
+e2e/distributed/download-all.sh <label> <app> [<label> <app> ...]    # explicit fleets, no manifest
+```
+It calls `pull_results.sh` for each `(label, app)` in the matrix manifest, extracts to
+`out/dist-<label>/bundle/`, and prints a per-combo table (resolved/total, preds, artifacts, dead).
+`--submission` is skipped for `terminal` (fused harness run, no patch). `pull_results.sh` now tolerates
+an offline re-pull (a flyctl/token error no longer aborts it — it falls back to an already-local
+bundle), so re-running `download-all.sh` after teardown just re-summarizes what's on disk.
+
 > **Toolkit policy:** these scripts are the standard way to read any run's results. When a
 > new question needs data they don't yet surface, **extend the script** (add a flag/section)
 > rather than writing a throwaway — keep the toolkit complete and reusable.
+
+### 11g. Archive to Tigris (destroy the fleet, keep the data)
+
+Opt-in: the coordinator pushes each run's DATA (traces, grading, submission, logs, a generated
+`overview.json`, `bundle.tgz` — never agent source) to a Tigris bucket at end-of-run, so the fleet can be
+torn down and the run stays lookup-able. Full doc + taxonomy: distributed
+[README §9](../../../distributed/README.md). One-time: `FLY_ORG=<team-org> e2e/distributed/provision-tigris.sh`
+(billable, prints S3 keys once — attaches AWS_* secrets to the claude fleet app too). Enable per-run:
+```bash
+ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive ROOTFS_GB=50 CPU_KIND=performance ARM=claude ... ./run-distributed.sh
+```
+`overview.json` carries grade% + real-LiteLLM cost-by-tier (conductor/reasoner/oracle/fast). Look up later
+with no live fleet: `e2e/distributed/tools/tigris-archive.sh list | overview <label> | get <label>`.
 
 ---
 
@@ -450,16 +573,27 @@ inspect, then `DESTROY_ONLY=1 …` to tear down.
 | `claude-mini10-noharness` | + WORK PROTOCOL removed | 7/10 · $1.4019 LiteLLM |
 | `claude-mini10-priors3` | + fix-at-definition / native-type / countable-escalation priors, `ROOTFS_GB=50` | **8/10 · $1.3986 LiteLLM · 0 dead** |
 | `claude-gates-2inst` | Stop-gate only (V/E), no deny hooks | 0/2 on {11848, 11885} — gate fired (2× V-block) but converted neither; motivated the PreToolUse deny rules |
+| `claude-fixval-5` | + deny hooks (T/B/C), escalation now bills | **1/5 · $2.48 LiteLLM · 0 dead** on the 5 hardest fails {11848, 11885, matplotlib-23476, pylint-7277, sympy-15017} |
 
-Escalation still never fires (By-Tier 100% conductor / $0 reasoner+oracle) — the countable
-triggers in the appended prompt are advisory text minimax ignores; enforcement needs a
-mechanical forcing function, not prose. The two consistent Mini-10 failures (11848, 11885)
-are **not** localization gaps — in `priors3` both fixed at the right site:
-- `11848` under-fixed (0/2 FAIL_TO_PASS, patch algorithm nearly right) and **bailed at 17
-  turns without verifying** → a verification gap.
-- `11885` **solved** the target bug (1/1 FAIL_TO_PASS) but **regressed 2 PASS_TO_PASS**
-  (`test_large_delete*`) over 106 thrashing turns ($0.75 = 54% of the run) → an
-  over-edit / regression-check gap.
+**`claude-fixval-5` (Phase A validation, 2026-07-16)** proved the mechanisms fire and
+**fixed the $0-escalation bug** — By-Tier is no longer 100% conductor: reasoner (deepseek)
+$0.92 + oracle-tier (glm) $0.37 billed, i.e. Rule B now makes the conductor actually spawn
+`unerr-opus`/`unerr-fable`. `11848` converted (✅) — the **V-gate forced verification** (ran
+tests, correct `utcnow` patch), conductor-only, $0.09. But the 4 fails exposed the next levers:
+- **2 of 4 (11885, pylint-7277) are the "solved-target-but-regressed-a-sibling-test" class** —
+  escalation fired and billed but converted neither → motivated the **broad-verify V gate + R**
+  (§8.5): force the module suite to run so the regression is caught pre-finish.
+- escalation fired on **all 4** fails and converted **0** (added $1.29, 52% of cost) →
+  motivated the **escalation throttle** (E drops the edit-count arm; Rule B needs a
+  verification block). The 2 remaining fails (matplotlib, sympy) are wrong-fix / localization
+  (F2P 0/1) — model-capability, not a harness gap.
+- **Cost is LiteLLM-reconciled, not Anthropic** — the gateway *daily* rollup ($10+) is
+  contaminated by shared traffic; the per-instance `by_tier` ($2.48) is the real number (§11b′).
 
-See the memory notes `claude-workprotocol-regression` and `claude-openmodels-mini10-result`
-for the fuller autopsies.
+The earlier consistent Mini-10 failures (11848, 11885) were **not** localization gaps — in
+`priors3` both fixed at the right site: `11848` under-verified (a verification gap, now closed
+by the V-gate); `11885` regressed 2 PASS_TO_PASS (`test_large_delete*`) — the regression-check
+gap the broad-verify V gate now targets.
+
+See the memory notes `claude-workprotocol-regression`, `claude-openmodels-mini10-result`, and
+`claude-fixval5-phaseA-result` for the fuller autopsies.

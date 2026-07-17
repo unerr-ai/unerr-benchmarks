@@ -38,6 +38,11 @@
 #                        fleet and aggregating whatever is done (default 14400)
 #   PORT                 coordinator server.py listen port (default 8080)
 #   DB_PATH              queue sqlite path (default /data/queue.db)
+#   MAX_FAILURE_RERUN    failure-rerun budget: once the fresh queue drains,
+#                        server.py's /claim gives a `failed` (attempts-
+#                        exhausted) instance this many more tries, replacing
+#                        the earlier failure with the rerun's result on
+#                        success (default 1; 0 disables — original behaviour)
 #   REPORT_PY             path to report.py (default /work/report.py; guard
 #                        for arm-specific report paths)
 set -uo pipefail
@@ -51,7 +56,8 @@ mkdir -p "$OUT" "$REPORTS" "$LOGDIR"
 PY="${PYTHON_BIN:-python3}"
 PORT="${PORT:-8080}"
 DB_PATH="${DB_PATH:-/data/queue.db}"
-export PORT DB_PATH
+MAX_FAILURE_RERUN="${MAX_FAILURE_RERUN:-1}"
+export PORT DB_PATH MAX_FAILURE_RERUN
 
 LABEL="${LABEL:-${RUN_ID:-dist}}"
 RUN_ID="${RUN_ID:-$LABEL}"
@@ -59,8 +65,29 @@ ARM="${ARM:-econ}"
 DATASET="${DATASET:-princeton-nlp/SWE-bench_Verified}"
 SPLIT="${SPLIT:-test}"
 HOLD="${HOLD:-5400}"
-MAXWAIT="${MAXWAIT:-14400}"
+MAXWAIT="${MAXWAIT:-172800}"   # absolute drain backstop (48h); the wait below is PROGRESS-aware (wedged-only early giveup), not a flat timer
 REPORT_PY="${REPORT_PY:-/work/report.py}"
+BENCHMARK="${BENCHMARK:-verified}"
+# ── Tigris archive (opt-in): upload results/traces/grading/submission/overview to
+#    S3 at end-of-run so the fleet can be destroyed and the data still be looked
+#    up. AWS_* creds arrive as fleet-app secrets (flyctl storage create -a <app>);
+#    a failed archive is NON-fatal (the bundle is still held for the host pull).
+ARCHIVE_TIGRIS="${ARCHIVE_TIGRIS:-0}"
+TIGRIS_BUCKET="${TIGRIS_BUCKET:-}"
+TIGRIS_PREFIX="${TIGRIS_PREFIX:-runs}"
+RUN_STARTED_AT="${RUN_STARTED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+export BENCHMARK TIGRIS_BUCKET TIGRIS_PREFIX RUN_STARTED_AT
+ARCHIVE_PY="/work/distributed/tools/tigris_archive.py"
+# tigris_archive.py lazily `import boto3` on its UPLOAD path (§8). boto3 lives in
+# the /work/.venv venv (Dockerfile.dist), NOT the base-image python3 that $PY
+# defaults to — so running the archive under $PY makes the upload raise "boto3 not
+# installed", upload nothing, and beacon archive_failed (the "N objects" line is the
+# PLAN, printed before the upload). Run the archive under the venv python, which has
+# boto3 + pandas + everything the overview/submission builders need. Fall back to
+# $PY for a host/standalone run where /work/.venv is absent.
+ARCHIVE_PYBIN="/work/.venv/bin/python"; [ -x "$ARCHIVE_PYBIN" ] || ARCHIVE_PYBIN="$PY"
+# harness_run benchmarks (Terminal) have no git patch → no submission to build.
+ARCHIVE_NOSUB=""; [ "$BENCHMARK" = "terminal" ] && ARCHIVE_NOSUB="--no-submission"
 
 BASE="http://127.0.0.1:${PORT}"
 RUNDIR="$OUT/$LABEL"
@@ -157,15 +184,24 @@ except Exception: print(0)' 2>/dev/null || echo 0)
 done
 
 # ── 3. Wait for drain (work-stealing fleet claims/completes/fails rows) ─────
-log "waiting for queue to drain (poll 20s, status log ~60s, maxwait ${MAXWAIT}s)"
+# PROGRESS-aware wait, NOT a flat wall-clock timer: a real 500-instance run with
+# >4h hard tasks legitimately takes many hours, so keep waiting as long as the
+# fleet completes work (done+dead rising) OR has anything actively leased. Give up
+# EARLY only when the fleet is WEDGED — nothing leased AND no completion for
+# NO_PROGRESS_GIVEUP seconds (workers gone, tasks stranded pending). MAXWAIT is an
+# absolute anti-runaway backstop, not the normal limiter.
+NO_PROGRESS_GIVEUP="${NO_PROGRESS_GIVEUP:-7200}"
+log "waiting for queue to drain (poll 20s, status ~60s, maxwait ${MAXWAIT}s, wedged-giveup ${NO_PROGRESS_GIVEUP}s)"
 START_TS=$(date +%s)
 LAST_STATUS_LOG=0
+LAST_PROGRESS_TS=$START_TS
+LAST_TERMINAL=-1
 DRAINED=0
 while :; do
   NOW=$(date +%s)
   ELAPSED=$((NOW - START_TS))
   if [ "$ELAPSED" -ge "$MAXWAIT" ]; then
-    log "MAXWAIT (${MAXWAIT}s) exceeded — fleet did not drain, aggregating whatever is done"
+    log "MAXWAIT (${MAXWAIT}s) absolute backstop hit — aggregating whatever is done"
     emit '"drain_timeout"'
     break
   fi
@@ -180,6 +216,22 @@ while :; do
     STATUS_JSON="$(curl -sf "$BASE/status" 2>/dev/null || true)"
     log "status (t+${ELAPSED}s): ${STATUS_JSON:-<no response>}"
     LAST_STATUS_LOG=$ELAPSED
+    # Wedged detection: parse "done+dead" (terminal) and "leased" from /status.
+    STATS="$(printf '%s' "$STATUS_JSON" | "$PY" -c 'import sys,json
+try:
+  c=json.load(sys.stdin).get("counts",{}); print(int(c.get("done",0))+int(c.get("dead",0)), int(c.get("leased",0)))
+except Exception: print(-1,-1)' 2>/dev/null)"
+    TERMINAL="${STATS%% *}"; LEASED="${STATS##* }"
+    if [ "${TERMINAL:--1}" -ge 0 ] 2>/dev/null; then
+      if [ "$TERMINAL" -gt "$LAST_TERMINAL" ]; then
+        LAST_TERMINAL="$TERMINAL"
+        LAST_PROGRESS_TS="$NOW"
+      elif [ "${LEASED:-0}" -eq 0 ] && [ $((NOW - LAST_PROGRESS_TS)) -ge "$NO_PROGRESS_GIVEUP" ]; then
+        log "WEDGED: nothing leased + no completion for $((NOW - LAST_PROGRESS_TS))s (workers gone?) — aggregating whatever is done"
+        emit '"drain_wedged"'
+        break
+      fi
+    fi
   fi
   sleep 20
 done
@@ -208,17 +260,21 @@ dead_rows = []
 for row in rows:
     counts[row["status"]] = counts.get(row["status"], 0) + 1
     row_keys = row.keys()
-    if row["status"] == "dead":
+    if row["status"] in ("dead", "failed"):
         # dead-instance capture: dump while the queue DB is still live so
         # WAL-mode rows are visible — an offline `sqlite3 queue.db` copy in
         # the bundle sees zero rows (no bundled -wal sidecar). This plain
-        # file is what survives for tools/collect-failed.py.
+        # file is what survives for tools/collect-failed.py. `failed` rows
+        # reach here only once /drain reports drained, so any that remain
+        # have spent their MAX_FAILURE_RERUN budget (server.py Queue.drain
+        # gates on `_pending_reruns()==0`) — captured the same as `dead`.
         dead_rows.append({
             "instance_id": row["instance_id"],
             "failure_reason": row["failure_reason"] if "failure_reason" in row_keys else None,
             "attempt_count": row["attempt_count"] if "attempt_count" in row_keys else None,
             "worker_id": row["worker_id"] if "worker_id" in row_keys else None,
             "last_heartbeat": row["last_heartbeat"] if "last_heartbeat" in row_keys else None,
+            "fail_reruns": row["fail_reruns"] if "fail_reruns" in row_keys else None,
         })
         continue
     if row["status"] != "done":
@@ -236,7 +292,15 @@ for row in rows:
     err_txt = row["err_txt"] if "err_txt" in row_keys else None
     db_b64 = row["db_b64"] if "db_b64" in row_keys else None
     engine_log = row["engine_log"] if "engine_log" in row_keys else None
-    if events_jsonl or err_txt or db_b64 or engine_log:
+    # harness_run (Terminal) traces — NULL for resolve_then_grade benchmarks.
+    trajectory_json = row["trajectory_json"] if "trajectory_json" in row_keys else None
+    sessions_cast = row["sessions_cast"] if "sessions_cast" in row_keys else None
+    # Harbor's own captured stdout+stderr — the only place a SETUP-phase
+    # RuntimeError (before the agent ever runs, so trial_dir/events_jsonl/
+    # err_txt don't exist yet) is ever captured.
+    harbor_run_log = row["harbor_run_log"] if "harbor_run_log" in row_keys else None
+    if (events_jsonl or err_txt or db_b64 or engine_log or trajectory_json
+            or sessions_cast or harbor_run_log):
         art_dir = rundir / "artifacts" / iid
         art_dir.mkdir(parents=True, exist_ok=True)
         if events_jsonl:
@@ -245,6 +309,12 @@ for row in rows:
             (art_dir / "err.txt").write_text(err_txt, encoding="utf-8")
         if engine_log:
             (art_dir / "engine.log").write_text(engine_log, encoding="utf-8")
+        if trajectory_json:
+            (art_dir / "trajectory.json").write_text(trajectory_json, encoding="utf-8")
+        if sessions_cast:
+            (art_dir / "sessions.cast").write_text(sessions_cast, encoding="utf-8")
+        if harbor_run_log:
+            (art_dir / "harbor-run.log").write_text(harbor_run_log, encoding="utf-8")
         if db_b64:
             try:
                 (art_dir / "opencode.db").write_bytes(base64.b64decode(db_b64))
@@ -327,14 +397,61 @@ fi
 emit '"resolve_summary"'
 echo "----- COST REPORT (begin) -----"; cat "$RUNDIR/cost-report.md" 2>/dev/null; echo "----- COST REPORT (end) -----"
 
-# ── 7. Bundle the durable output and HOLD so the host can SFTP it ───────────
+# ── 6.9 Generate overview.json + submission BEFORE bundling ─────────────────
+#      so both ride bundle.tgz (host pull) as well as the Tigris archive below.
+#      Runs regardless of ARCHIVE_TIGRIS (cheap, and the overview is useful in
+#      every bundle); the actual S3 upload in §8 is what's gated.
+if [ -f "$ARCHIVE_PY" ]; then
+  log "generating overview.json + submission (results/$LABEL/)"
+  "$ARCHIVE_PYBIN" "$ARCHIVE_PY" --data-dir "$DATA" --label "$LABEL" --arm "$ARM" \
+    --benchmark "$BENCHMARK" --dataset "$DATASET" $ARCHIVE_NOSUB --generate-only \
+    >"$LOGDIR/overview-gen.log" 2>&1 || { log "overview/submission gen: nonzero (non-fatal) — tail:"; tail -15 "$LOGDIR/overview-gen.log" >&2; }
+fi
+
+# ── 7. Bundle the durable output (archived in §8, host-pulled after §9) ──────
 log "bundling /data -> bundle.tgz"
 QDB_BASENAME="$(basename "$DB_PATH")"
 tar czf "$DATA/bundle.tgz" -C "$DATA" results reports logs "$QDB_BASENAME" 2>/dev/null || true
 BSZ=$(du -h "$DATA/bundle.tgz" 2>/dev/null | cut -f1)
 
-log "ALL DONE — bundle.tgz=${BSZ:-?} ready on $DATA; holding ${HOLD}s for host pull"
+log "bundle.tgz=${BSZ:-?} built on $DATA"
+
+# ── 8. Archive the DATA to Tigris (opt-in) — BEFORE signalling bundle_ready ───
+#      Uploads traces/grading/submission/overview/logs/bundle under a stable
+#      taxonomy. NON-fatal: a failed upload never blocks the host pull. Creds
+#      come from fleet-app secrets (AWS_*); bucket from TIGRIS_BUCKET.
+#      MUST run before `emit bundle_ready`: the host tears the fleet down (destroys
+#      the coordinator machine + its volume) the instant it sees bundle_ready, so a
+#      post-signal upload would race teardown and silently never finish.
+if [ "$ARCHIVE_TIGRIS" = "1" ] && [ -f "$ARCHIVE_PY" ]; then
+  export RUN_FINISHED_AT; RUN_FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  log "archiving run to Tigris (bucket=${TIGRIS_BUCKET:-<unset>} prefix=$TIGRIS_PREFIX)"
+  if "$ARCHIVE_PYBIN" "$ARCHIVE_PY" --data-dir "$DATA" --label "$LABEL" --arm "$ARM" \
+       --benchmark "$BENCHMARK" --dataset "$DATASET" $ARCHIVE_NOSUB \
+       >"$LOGDIR/tigris-archive.log" 2>&1; then
+    log "tigris archive: done -> $(grep -oE 's3://[^ ]+' "$LOGDIR/tigris-archive.log" | tail -1)"
+    emit "\"archived\",\"bucket\":\"${TIGRIS_BUCKET:-}\""
+  else
+    log "tigris archive: FAILED (non-fatal) — tail:"; tail -25 "$LOGDIR/tigris-archive.log" >&2
+    emit '"archive_failed"'
+  fi
+else
+  log "ARCHIVE_TIGRIS=$ARCHIVE_TIGRIS — Tigris upload skipped (results held for host pull only)"
+fi
+
+# ── 9. Signal ready + HOLD so the host can SFTP the bundle, then exit ─────────
+#      Emitted AFTER §8: the host pulls the bundle and destroys the fleet on this
+#      beacon, so signalling here (not before §8) is what keeps the archive safe.
+log "ALL DONE — bundle.tgz=${BSZ:-?} ready on $DATA"
 emit "\"bundle_ready\",\"path\":\"/data/bundle.tgz\",\"size\":\"${BSZ:-?}\""
+# Durable, race-safe terminal sentinel on /data (written AFTER §8 archive, same as
+# the beacon → tearing down on it can't clobber the archive). The host polls this
+# over the reliable `ssh curl /status` channel, so a dropped `flyctl logs` stream
+# (which silently strands the stdout beacon on long runs) can no longer hang the
+# launcher past MAXWAIT. Content = the same beacon line for host-side triage.
+printf '{"ev":"bundle_ready","path":"/data/bundle.tgz","size":"%s"}\n' "${BSZ:-?}" > "$DATA/BUNDLE_READY"
 sync
+
+log "holding ${HOLD}s for host pull"
 sleep "$HOLD"
 exit 0

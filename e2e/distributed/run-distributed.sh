@@ -20,6 +20,8 @@
 #   MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
 #   MACHINES=25 ARM=econ LABEL=full-verified ./run-distributed.sh          # SUITE defaults to full Verified
 #   MACHINES=25 ARM=econ LABEL=full-ded DEDICATED_CONDUCTOR=1 ./run-distributed.sh  # ephemeral dedicated-GPU conductor (see README §2); ~$80/hr while up
+#   BENCHMARK=pro SUITE=smoke MACHINES=3 ARM=econ LABEL=pro-smoke ./run-distributed.sh   # BENCHMARK selects the task set (default verified); SUITE selects SIZE (full/smoke/mini/explicit)
+#   PLAN_ONLY=1 BENCHMARK=pro SUITE=smoke ARM=econ ./run-distributed.sh                  # print the resolved plan and exit — no fly calls, no LABEL/MACHINES required
 #   DESTROY_ONLY=1 LABEL=dist-smoke ./run-distributed.sh                   # just tear a fleet down
 #
 #   # prepare/run split — warm the fleet (build the ~10-min toolbox) BEFORE raising
@@ -42,13 +44,36 @@ cd "$HERE"
 ORG="${FLY_ORG:-your-fly-org}"               # fly org; override via FLY_ORG
 REGION="${REGION:-iad}"
 ARM="${ARM:-econ}"
+# BENCHMARK (verified|lite|pro|terminal|live_verified) is ORTHOGONAL to ARM: ARM
+# picks the runner (econ/claude), BENCHMARK picks the task set + grading —
+# tools/benchmarks.py is the single source of truth (do not duplicate its
+# descriptors here). Default verified keeps every pre-BENCHMARK invocation
+# byte-identical.
+BENCHMARK="${BENCHMARK:-verified}"
+case "$BENCHMARK" in
+  verified|lite|pro|terminal|live_verified) ;;
+  *) echo "BENCHMARK must be one of: verified|lite|pro|terminal|live_verified (got '$BENCHMARK')"; exit 1 ;;
+esac
 # App default is arm-aware (ARM must be known first, above): econ keeps the
 # original fixed app name byte-for-byte; claude gets its own app so the two
-# arms' fleets never collide.
+# arms' fleets never collide. One app per ARM serves EVERY benchmark — the
+# worker dispatches by the BENCHMARK env (below); benchmarks get their own
+# FLEET (via the LABEL fold, next), not their own app.
 DEFAULT_APP="swebench-agent-dist"
 [ "$ARM" = "claude" ] && DEFAULT_APP="swebench-agent-dist-claude"
 APP="${APP:-$DEFAULT_APP}"                  # FIXED app; each run scoped by fleet=<LABEL> metadata
-LABEL="${LABEL:-}"                          # REQUIRED, unique per run — doubles as RUN_ID + fleet metadata
+RAW_LABEL="${LABEL:-}"                      # the LABEL as the caller typed it — echoed back in follow-up commands (prepare/run/arm), so a second invocation folds identically
+LABEL="$RAW_LABEL"                          # REQUIRED, unique per run — doubles as RUN_ID + fleet metadata
+# Fold BENCHMARK into LABEL so an (arm × benchmark × runid) triple always gets
+# its own fleet: ARM already gets its own app (above), but BENCHMARK does not —
+# two benchmarks sharing a LABEL under the same app/ARM would otherwise collide
+# on the SAME fleet=<LABEL> metadata (machines, coordinator volume, OUTDIR,
+# teardown scope). BENCHMARK=verified (the default) leaves LABEL untouched —
+# byte-identical to pre-BENCHMARK behavior. Re-supply the SAME BENCHMARK on any
+# follow-up prepare/run/arm/destroy invocation for a non-default benchmark run.
+if [ -n "$LABEL" ] && [ "$BENCHMARK" != "verified" ]; then
+  LABEL="${LABEL}-${BENCHMARK}"
+fi
 MACHINES="${MACHINES:-}"                    # REQUIRED (unless DESTROY_ONLY) — worker count N
 DESTROY_ONLY="${DESTROY_ONLY:-0}"           # 1 = only tear down the fleet named by LABEL, then exit
 IMAGE="${IMAGE:-}"                          # reuse a prior built image ref (skip the remote build)
@@ -91,23 +116,109 @@ COORD_VOL_GB="${COORD_VOL_GB:-10}"
 SUITE="${SUITE:-}"
 TASKS="${TASKS:-}"
 TASKS_FILE="${TASKS_FILE:-}"
-SPLIT="${SPLIT:-test}"
-# Grade against the dataset the suite came from unless DATASET is pinned.
+# SPLIT default is benchmark-aware: only live_verified's frozen "verified split"
+# (tools/benchmarks.py _LIVE_VERIFIED) differs from the `test` default every
+# other benchmark uses. An explicit SPLIT= always wins.
+if [ -z "${SPLIT:-}" ]; then
+  case "$BENCHMARK" in
+    live_verified) SPLIT="verified" ;;
+    terminal)      SPLIT="2.1" ;;
+    *)             SPLIT="test" ;;
+  esac
+fi
+# BENCHMARK selects WHICH benchmark; SUITE selects its SIZE. Map (BENCHMARK,
+# SUITE) -> the suite.py --suite selector (tools/benchmarks.py owns the actual
+# id resolution — this is only the selector string). TASKS/TASKS_FILE keep
+# their existing precedence over SUITE in suite.py itself, unaffected here.
+case "$(printf '%s' "${SUITE:-}" | tr 'A-Z' 'a-z')" in
+  ''|full|all) SUITE_SELECTOR="$BENCHMARK" ;;          # full set for the benchmark
+  smoke)       SUITE_SELECTOR="${BENCHMARK}-mini" ;;   # 5-id smoke set
+  mini)        SUITE_SELECTOR="mini" ;;                # LEGACY Verified Mini-10 — byte-for-byte, never remapped
+  *)           SUITE_SELECTOR="$SUITE" ;;              # explicit passthrough (e.g. pro-mini, terminal)
+esac
+# Grade against the dataset the benchmark uses unless DATASET is pinned. Legacy
+# SUITE=lite (pre-BENCHMARK invocations, BENCHMARK left at its verified default)
+# is checked FIRST so that path stays byte-identical; BENCHMARK is the fallback
+# for everything else (including BENCHMARK=lite with no SUITE=lite literal).
 if [ -z "${DATASET:-}" ]; then
   case "$(printf '%s' "${SUITE:-}" | tr 'A-Z' 'a-z')" in
     lite) DATASET="princeton-nlp/SWE-bench_Lite" ;;
-    *)    DATASET="princeton-nlp/SWE-bench_Verified" ;;
+    *)
+      case "$BENCHMARK" in
+        lite)          DATASET="princeton-nlp/SWE-bench_Lite" ;;
+        pro)           DATASET="ScaleAI/SWE-bench_Pro" ;;
+        terminal)      DATASET="terminal-bench-2-1" ;;  # Harbor terminal-bench-2-1 (2.1); label only — harness_terminal ignores it, ids come from the vendored task dir
+        live_verified) DATASET="SWE-bench-Live/SWE-bench-Live" ;;
+        *)             DATASET="princeton-nlp/SWE-bench_Verified" ;;
+      esac
+      ;;
   esac
 fi
 
 HOLD="${HOLD:-3600}"                        # coordinator holds open this long after bundle for the pull
-MAXWAIT="${MAXWAIT:-172800}"                # host poll ceiling (48h — covers long/large runs; the fleet self-stops on drain regardless of this)
-PER_INSTANCE_TIMEOUT="${PER_INSTANCE_TIMEOUT:-10800}"  # per-task resolve ceiling (3h normal; stall watchdog handles hangs — STALL_KILL_S)
+MAXWAIT="${MAXWAIT:-172800}"                # absolute coordinator drain backstop (48h) — propagated to the coordinator; NOT a normal limiter (a 500-run legitimately takes many hours, so the coordinator waits PROGRESS-aware, giving up early only when wedged — see NO_PROGRESS_GIVEUP)
+NO_PROGRESS_GIVEUP="${NO_PROGRESS_GIVEUP:-7200}"  # coordinator gives up EARLY only if the fleet is WEDGED: nothing leased AND no completion for this long (workers gone, tasks stranded). Passed to the coordinator.
+MAX_FAILURE_RERUN="${MAX_FAILURE_RERUN:-1}"  # coordinator's failure-rerun-on-drain budget per instance; read by coordinator-entrypoint.sh
+# PER_INSTANCE_TIMEOUT and its per-benchmark siblings are FALLBACKS ONLY — left
+# UNSET unless the caller explicitly set them, so the worker's per-benchmark
+# descriptor default wins (verified 2700s + difficulty tiers, pro 10800s,
+# terminal 3600s; see tools/benchmarks.py). Forcing a value here would clobber
+# that default for every benchmark (Verified's difficulty tiers already
+# override per-instance regardless, so this only matters for untiered ids).
+PER_INSTANCE_TIMEOUT="${PER_INSTANCE_TIMEOUT:-}"
+TIMEOUT_ENV=()
+[ -n "$PER_INSTANCE_TIMEOUT" ]              && TIMEOUT_ENV+=(-e PER_INSTANCE_TIMEOUT="$PER_INSTANCE_TIMEOUT")
+[ -n "${PRO_PER_INSTANCE_TIMEOUT:-}" ]      && TIMEOUT_ENV+=(-e PRO_PER_INSTANCE_TIMEOUT="$PRO_PER_INSTANCE_TIMEOUT")
+[ -n "${TERMINAL_PER_INSTANCE_TIMEOUT:-}" ] && TIMEOUT_ENV+=(-e TERMINAL_PER_INSTANCE_TIMEOUT="$TERMINAL_PER_INSTANCE_TIMEOUT")
+[ -n "${TIER_TIMEOUT_EASY:-}" ]             && TIMEOUT_ENV+=(-e TIER_TIMEOUT_EASY="$TIER_TIMEOUT_EASY")
+[ -n "${TIER_TIMEOUT_MEDIUM:-}" ]           && TIMEOUT_ENV+=(-e TIER_TIMEOUT_MEDIUM="$TIER_TIMEOUT_MEDIUM")
+[ -n "${TIER_TIMEOUT_HARD:-}" ]             && TIMEOUT_ENV+=(-e TIER_TIMEOUT_HARD="$TIER_TIMEOUT_HARD")
+[ -n "${TIER_TIMEOUT_VERYHARD:-}" ]         && TIMEOUT_ENV+=(-e TIER_TIMEOUT_VERYHARD="$TIER_TIMEOUT_VERYHARD")
+[ -n "${PRO_TIER_TIMEOUT_EASY:-}" ]         && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_EASY="$PRO_TIER_TIMEOUT_EASY")
+[ -n "${PRO_TIER_TIMEOUT_MEDIUM:-}" ]       && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_MEDIUM="$PRO_TIER_TIMEOUT_MEDIUM")
+[ -n "${PRO_TIER_TIMEOUT_HARD:-}" ]         && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_HARD="$PRO_TIER_TIMEOUT_HARD")
+[ -n "${PRO_TIER_TIMEOUT_VERYHARD:-}" ]     && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_VERYHARD="$PRO_TIER_TIMEOUT_VERYHARD")
 GRADE_WORKERS="${GRADE_WORKERS:-6}"         # swebench harness --max_workers on the worker
-STALL_KILL_S="${STALL_KILL_S:-2700}"        # seconds of zero log growth before a resolve is killed for restart
+# Stall window (zero log-growth before a resolve is killed for restart): 15min for
+# econ — its host-mounted events.jsonl gives the watchdog a real LIVE progress
+# signal — vs 45min for claude, whose in-container signal is buffered/weaker. Both
+# overridable via STALL_KILL_S.
+STALL_KILL_S="${STALL_KILL_S:-$([ "$ARM" = econ ] && echo 900 || echo 2700)}"
 HEARTBEAT_TIMEOUT="${HEARTBEAT_TIMEOUT:-300}"          # coordinator reaps a lease after this much heartbeat silence (10 beats @30s)
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
+
+# Tigris end-of-run archive (OPT-IN, default off): opt-in end-of-run archive of
+# results/traces to Tigris; needs the fleet app storage-attached (flyctl storage
+# create -a <app>) so AWS_* inject as app secrets — never forwarded here, only
+# the ARCHIVE flag + bucket NAME (the bucket name is not a secret).
+ARCHIVE_TIGRIS="${ARCHIVE_TIGRIS:-0}"
+TIGRIS_BUCKET="${TIGRIS_BUCKET:-}"
+TIGRIS_PREFIX="${TIGRIS_PREFIX:-runs}"
+RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # captured once, run-scoped — passed to the coordinator for archive key naming
+
+# ── PLAN_ONLY / --print-plan: print the resolved config and exit 0 BEFORE any
+# fly auth or API call — proves the BENCHMARK×SUITE selector map, the LABEL
+# fold, and the worker/coordinator env additions without touching fly. ────────
+if [ "${PLAN_ONLY:-0}" = "1" ] || [ "${1:-}" = "--print-plan" ]; then
+  echo "==> PLAN_ONLY: resolved config (no fly API calls made)"
+  echo "    ARM=$ARM"
+  echo "    BENCHMARK=$BENCHMARK"
+  echo "    SUITE=${SUITE:-<unset>} -> suite selector=$SUITE_SELECTOR"
+  echo "    APP=$APP"
+  echo "    LABEL=${LABEL:-<unset>} (raw=${RAW_LABEL:-<unset>})"
+  echo "    DATASET=$DATASET SPLIT=$SPLIT"
+  echo "    worker env additions: BENCHMARK=$BENCHMARK"
+  if [ "${#TIMEOUT_ENV[@]}" -gt 0 ]; then
+    for ((_ti = 1; _ti < ${#TIMEOUT_ENV[@]}; _ti += 2)); do
+      echo "      ${TIMEOUT_ENV[_ti]}"
+    done
+  else
+    echo "      PER_INSTANCE_TIMEOUT: not forced — worker uses the per-benchmark descriptor default"
+  fi
+  echo "    coordinator env additions: ARM=$ARM BENCHMARK=$BENCHMARK MAX_FAILURE_RERUN=$MAX_FAILURE_RERUN"
+  exit 0
+fi
 
 log()  { printf '[dist] %s\n' "$*" >&2; }
 
@@ -352,6 +463,22 @@ fi
   && echo "==> EXA_API_KEY: set (len ${#EXA_API_KEY}) — web search ENABLED (NOT baseline-comparable)" \
   || echo "==> EXA_API_KEY: unset — web search disabled (clean, baseline-comparable run)"
 
+# TAVILY web-search key — the claude arm's search path (Tavily hosted MCP, wired
+# by run-instance.sh into the instance's .mcp.json). Same STRICT opt-in contract
+# as EXA above: only WEBSEARCH=1 enables it; an ambient TAVILY_API_KEY is IGNORED
+# otherwise. Web-on runs are a separate result class — label them accordingly.
+if [ "${WEBSEARCH:-0}" = "1" ]; then
+  if [ -z "${TAVILY_API_KEY:-}" ] && [ -f "$ECON_DIR/.env.local" ]; then
+    TAVILY_API_KEY="$(grep -E '^TAVILY_API_KEY=' "$ECON_DIR/.env.local" | head -1 | sed 's/^TAVILY_API_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
+  fi
+  export TAVILY_API_KEY="${TAVILY_API_KEY:-}"
+else
+  export TAVILY_API_KEY=""   # ignore any ambient key unless WEBSEARCH=1
+fi
+[ -n "$TAVILY_API_KEY" ] \
+  && echo "==> TAVILY_API_KEY: set (len ${#TAVILY_API_KEY}) — claude-arm web search ENABLED (NOT baseline-comparable)" \
+  || echo "==> TAVILY_API_KEY: unset — claude-arm web search disabled"
+
 # ── vendor the LOCAL econ build into the TOOLBOX build context (from run.sh) ───
 # The fleet image bakes the arm toolbox, so the vendored glibc binary must be in
 # econ/local-docker/context/vendor/ before the remote build (as run.sh does).
@@ -409,9 +536,9 @@ elif [ "$ARM" = "claude" ]; then
 fi
 
 # ── resolve the task set → INSTANCE_IDS (comma-separated) ─────────────────────
-echo "==> resolving task set (suite=${SUITE:-full} tasks=${TASKS:+set} file=${TASKS_FILE:-none})"
+echo "==> resolving task set (benchmark=$BENCHMARK suite=${SUITE:-full} selector=$SUITE_SELECTOR tasks=${TASKS:+set} file=${TASKS_FILE:-none})"
 INSTANCE_IDS="$("$PY_HOST" "$HERE/tools/suite.py" \
-  ${SUITE:+--suite "$SUITE"} ${TASKS:+--tasks "$TASKS"} ${TASKS_FILE:+--file "$TASKS_FILE"} \
+  --suite "$SUITE_SELECTOR" ${TASKS:+--tasks "$TASKS"} ${TASKS_FILE:+--file "$TASKS_FILE"} \
   --dataset "$DATASET" --split "$SPLIT")"
 [ -n "$INSTANCE_IDS" ] || { echo "suite.py resolved 0 ids"; exit 1; }
 NUM_IDS="$(printf '%s' "$INSTANCE_IDS" | tr ',' '\n' | grep -c .)"
@@ -554,6 +681,32 @@ run_machine() {                             # run_machine <logfile> <flyctl mach
     if flyctl machine run "$@" >"$logf" 2>&1; then
       return 0
     fi
+    # Slow placement: fly CREATED the machine (it has a "Machine ID:" in the log)
+    # but didn't confirm 'started' inside flyctl's own start-wait window, so the
+    # command exits non-zero even though the machine reaches 'started' seconds
+    # later. Common when iad is capacity-tight or another fleet is churning
+    # placement in parallel — treating it as fatal is exactly what stops
+    # independent fleets from coming up side by side. So poll the created machine
+    # before giving up; downstream scrapes the machine id from THIS same log, so a
+    # slow-but-started machine just works. Only recreate if it truly never starts.
+    if grep -qi 'failed to reach desired start state' "$logf"; then
+      local mid; mid="$(grep -oE 'Machine ID: [0-9a-f]+' "$logf" | head -1 | awk '{print $3}')"
+      if [ -n "$mid" ]; then
+        log "  machine $mid created but slow to start (try $tries/$max) — polling up to ${SLOW_START_WAIT:-240}s (iad placement lag / parallel-fleet contention)"
+        local waited=0 st
+        while [ "$waited" -lt "${SLOW_START_WAIT:-240}" ]; do
+          st="$(flyctl machine status "$mid" -a "$APP" 2>/dev/null | grep -ioE 'state *= *[a-z]+' | head -1)"
+          if printf '%s' "$st" | grep -qi started; then
+            log "  machine $mid reached 'started' after slow placement — proceeding"
+            return 0
+          fi
+          sleep 10; waited=$((waited + 10))
+        done
+        log "  machine $mid never started in ${SLOW_START_WAIT:-240}s — destroying orphan + retrying (same image)"
+        flyctl machine destroy "$mid" -a "$APP" --force >/dev/null 2>&1 || true
+        sleep $((tries * 5)); continue
+      fi
+    fi
     if grep -qiE 'MANIFEST_UNKNOWN|429|rate limit|capacity|please try again' "$logf"; then
       log "  transient machine-create error (try $tries/$max): $(grep -ioE 'MANIFEST_UNKNOWN|429|rate limit|capacity' "$logf" | head -1) — retry in $((tries * 5))s (same image)"
       sleep $((tries * 5)); continue
@@ -572,9 +725,13 @@ run_machine "$OUTDIR/coord-run.log" "$IMG" \
   --volume "$COORD_VOL:/data" --restart no \
   --entrypoint /work/distributed/coordinator/coordinator-entrypoint.sh \
   --metadata fleet="$LABEL" --metadata role=coordinator \
-  -e RUN_ID="$LABEL" -e TASKS="$INSTANCE_IDS" \
+  -e RUN_ID="$LABEL" -e TASKS="$INSTANCE_IDS" -e ARM="$ARM" -e BENCHMARK="$BENCHMARK" \
   -e DATASET="$DATASET" -e SPLIT="$SPLIT" -e HOLD="$HOLD" \
   -e HEARTBEAT_TIMEOUT="$HEARTBEAT_TIMEOUT" -e COORD_ARMED="$COORD_ARMED_VAL" \
+  -e MAXWAIT="$MAXWAIT" -e NO_PROGRESS_GIVEUP="$NO_PROGRESS_GIVEUP" \
+  -e MAX_FAILURE_RERUN="$MAX_FAILURE_RERUN" \
+  -e ARCHIVE_TIGRIS="$ARCHIVE_TIGRIS" -e TIGRIS_BUCKET="$TIGRIS_BUCKET" \
+  -e TIGRIS_PREFIX="$TIGRIS_PREFIX" -e RUN_STARTED_AT="$RUN_STARTED_AT" \
   || { echo "coordinator create failed — see $OUTDIR/coord-run.log"; exit 1; }
 cat "$OUTDIR/coord-run.log"
 COORD_MID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/coord-run.log" | head -1 | awk '{print $3}')"
@@ -623,13 +780,14 @@ for i in $(seq 1 "$MACHINES"); do
       --restart no \
       --entrypoint /work/distributed/worker/worker-entrypoint.sh \
       --metadata fleet="$LABEL" --metadata role=worker \
-      -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e RUN_ID="$LABEL" \
+      -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e BENCHMARK="$BENCHMARK" -e RUN_ID="$LABEL" \
       -e DATASET="$DATASET" -e SPLIT="$SPLIT" \
-      -e PER_INSTANCE_TIMEOUT="$PER_INSTANCE_TIMEOUT" -e GRADE_WORKERS="$GRADE_WORKERS" \
-      -e STALL_KILL_S="${STALL_KILL_S:-2700}" \
+      -e GRADE_WORKERS="$GRADE_WORKERS" \
+      -e STALL_KILL_S="$STALL_KILL_S" \
       -e MAX_ARTIFACT_TEXT_BYTES="${MAX_ARTIFACT_TEXT_BYTES:-5000000}" -e MAX_ARTIFACT_DB_BYTES="${MAX_ARTIFACT_DB_BYTES:-8000000}" \
       -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY" \
-      "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${MIRROR_ENV[@]+"${MIRROR_ENV[@]}"}"; then
+      -e TAVILY_API_KEY="$TAVILY_API_KEY" \
+      "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${MIRROR_ENV[@]+"${MIRROR_ENV[@]}"}" "${TIMEOUT_ENV[@]+"${TIMEOUT_ENV[@]}"}"; then
     WID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/worker-$i-run.log" | head -1 | awk '{print $3}')"
     WORKERS_OK=$((WORKERS_OK + 1))
     echo "    worker $i/$MACHINES: ${WID:-?}"
@@ -666,9 +824,9 @@ except Exception: print(0)' 2>/dev/null || echo 0)"
   cat <<EOF
 ==> Fleet '$LABEL' is PREPARED — warm, holding, no work started, no GPU up.
     Release it (raise your GPU first if using DEDICATED_CONDUCTOR):
-      LABEL=$LABEL ARM=$ARM DEDICATED_CONDUCTOR=${DEDICATED_CONDUCTOR} ./run-distributed.sh run
+      LABEL=$RAW_LABEL ARM=$ARM BENCHMARK=$BENCHMARK DEDICATED_CONDUCTOR=${DEDICATED_CONDUCTOR} ./run-distributed.sh run
     Or just flip the gate without babysitting the pull:
-      LABEL=$LABEL ./run-distributed.sh arm
+      LABEL=$RAW_LABEL BENCHMARK=$BENCHMARK ./run-distributed.sh arm
 EOF
   exit 0
 fi
@@ -693,6 +851,18 @@ while [ "$WAITED" -lt "$MAXWAIT" ]; do
   if grep -q '"bundle_ready"' "$OUTDIR/coord.log" 2>/dev/null; then
     echo "==> bundle_ready after ${WAITED}s"; break
   fi
+  # Stream-independent terminal check: the coordinator writes /data/BUNDLE_READY
+  # AFTER the Tigris archive (race-safe, same moment as the stdout beacon). Poll it
+  # over the reliable `ssh curl` channel so a dropped `flyctl logs` stream can't
+  # strand a finished run past MAXWAIT (observed live: coordinator done+archived,
+  # launcher stuck polling done=None for hours). Synthesize the beacon into
+  # coord.log so the downstream bundle-pull + teardown gate fires unchanged.
+  if flyctl ssh console -a "$APP" --machine "$COORD_MID" \
+       -C 'cat /data/BUNDLE_READY 2>/dev/null' 2>/dev/null \
+       | grep -q '"bundle_ready"'; then
+    echo '{"ev":"bundle_ready","via":"sentinel"}' >> "$OUTDIR/coord.log"
+    echo "==> bundle_ready (durable sentinel; log stream had dropped the beacon) after ${WAITED}s"; break
+  fi
   S="$(poll_status || true)"
   if [ -n "$S" ]; then
     printf '%s' "$S" | "$PY_HOST" -c '
@@ -702,10 +872,13 @@ try:
     d = json.loads(raw)
 except Exception:
     print("    /status:", raw[:200]); raise SystemExit
-done = d.get("done", d.get("completed"))
+c = d.get("counts", {}) or {}
 total = d.get("total")
 res = d.get("resolved")
-print(f"    progress: done={done} total={total} resolved={res} raw={json.dumps(d)[:160]}")
+# /status has no top-level "done" — the completed tally lives in counts.done.
+print(f"    progress: done={c.get('done',0)}/{total} resolved={res} "
+      f"pending={c.get('pending',0)} leased={c.get('leased',0)} "
+      f"dead={c.get('dead',0)} failed={c.get('failed',0)}")
 ' 2>/dev/null || echo "    /status: $S"
     STOPPED=0
   else

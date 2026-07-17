@@ -111,6 +111,17 @@ def ids_from_report(rep):
         unresolved.update(rep.get("unresolved_ids") or [])
         error.update(rep.get("error_ids") or [])
         return submitted, resolved, unresolved, error
+    # Flat per-instance shape (SWE-bench Pro grade_pro): a single report with
+    # top-level instance_id + resolved (+ fail_to_pass/pass_to_pass/passed_tests/
+    # tests). The nested loop below cannot see it — none of its top-level VALUES
+    # is a dict — so without this branch a correct Pro grade (resolved:true)
+    # merged as 0/0 despite a valid 15KB report.json. Keep this ABOVE the nested
+    # loop; both use "resolved" but only this shape carries a top-level instance_id.
+    if "instance_id" in rep and "resolved" in rep:
+        iid = rep["instance_id"]
+        submitted.add(iid)
+        (resolved if bool(rep.get("resolved")) else unresolved).add(iid)
+        return submitted, resolved, unresolved, error
     # Per-instance shape: {"<iid>": {"resolved": bool, ...}}.
     for iid, inner in rep.items():
         if not isinstance(inner, dict) or "resolved" not in inner:

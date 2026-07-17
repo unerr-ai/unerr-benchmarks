@@ -42,6 +42,19 @@ import time
 import urllib.error
 import urllib.request
 
+# The benchmark descriptor registry (verified|pro|terminal) lives next to suite.py
+# under /work/distributed/tools. Add it to the path so the worker dispatches grade,
+# timeout, and trace-collection per benchmark. benchmarks.py is itself stdlib-only
+# at import, so the worker's "stdlib only" property holds. DIST_TOOLS_DIR overrides
+# the baked path (used when running from the repo checkout in tests).
+for _tools_dir in (
+    os.environ.get("DIST_TOOLS_DIR", "/work/distributed/tools"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"),
+):
+    if os.path.isdir(_tools_dir) and _tools_dir not in sys.path:
+        sys.path.insert(0, _tools_dir)
+import benchmarks  # noqa: E402  — sibling module (added to sys.path just above)
+
 
 # run-benchmark.py and the swebench harness live in the image's /work/.venv, where
 # `datasets` + `swebench` are installed (NOT on the system python — Dockerfile.dist).
@@ -69,6 +82,25 @@ def _int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, "") or default)
     except (TypeError, ValueError):
         return default
+
+
+def _load_difficulty(dirpath: str) -> "dict[str, str]":
+    """Map each instance_id -> SWE-bench difficulty tier by reading the shipped
+    swebench-verified-difficulty/<tier>.ids.txt lists (easy/medium/hard/
+    veryhard). Returns {} when the dir is absent, so callers fall back to the
+    flat PER_INSTANCE_TIMEOUT and behaviour is unchanged off the distributed
+    image (Lite/mini/local runs)."""
+    tiers: "dict[str, str]" = {}
+    for tier in ("easy", "medium", "hard", "veryhard"):
+        try:
+            with open(os.path.join(dirpath, f"{tier}.ids.txt"), encoding="utf-8") as fh:
+                for line in fh:
+                    iid = line.strip()
+                    if iid:
+                        tiers[iid] = tier
+        except OSError:
+            continue
+    return tiers
 
 
 # Stall watchdog (S8): the resolve subprocess's stdout+stderr are captured to a
@@ -125,8 +157,8 @@ def _kill_process_group(proc: "subprocess.Popen") -> None:
 
 def _watch_resolve(proc: "subprocess.Popen", logpath: str, deadline: float,
                     timeout_s: float, *, stall_kill_s: int = STALL_KILL_S,
-                    poll_s: float = 30.0, sleep_fn=time.sleep,
-                    now_fn=time.time) -> str | None:
+                    poll_s: float = 30.0, extra_paths: "tuple[str, ...]" = (),
+                    sleep_fn=time.sleep, now_fn=time.time) -> str | None:
     """Poll `proc` (writing to `logpath`) every `poll_s` until it exits, the
     epoch `deadline` passes, or no progress — via `_progress_signal`: the
     log's last `events_bytes=` heartbeat value increasing OR its last
@@ -140,7 +172,7 @@ def _watch_resolve(proc: "subprocess.Popen", logpath: str, deadline: float,
     so the caller can fold it into the existing error-reporting path rather
     than a distinct exception type. Returns None when the process exited on
     its own (the normal case)."""
-    last_sig: tuple[int | None, bytes] | None = None
+    last_sig: object = None
     last_progress = now_fn()
     while True:
         rc = proc.poll()
@@ -151,7 +183,12 @@ def _watch_resolve(proc: "subprocess.Popen", logpath: str, deadline: float,
             _kill_process_group(proc)
             raise subprocess.TimeoutExpired(cmd=getattr(proc, "args", "resolve"),
                                              timeout=timeout_s)
-        sig = _progress_signal(logpath)
+        # Progress = the captured driver-log signal (heartbeat value / non-HB
+        # line) OR any live artifact file growing (econ's host-mounted
+        # events.jsonl/err.txt). extra_paths absent -> just the driver signal.
+        sig = (_progress_signal(logpath),
+               tuple(os.path.getsize(p) if os.path.exists(p) else 0
+                     for p in extra_paths))
         if sig != last_sig:
             last_sig = sig
             last_progress = now
@@ -177,11 +214,35 @@ class Worker:
             or socket.gethostname()
         )
         self.arm = os.environ.get("ARM", "econ")
+        # BENCHMARK (verified|pro|terminal) is orthogonal to ARM: the arm picks the
+        # runner, the benchmark descriptor picks the dataset/grade/timeout/traces/flow.
+        self.benchmark = os.environ.get("BENCHMARK", benchmarks.DEFAULT_BENCHMARK)
+        self.bench = benchmarks.get(self.benchmark)
+        self.flow = self.bench["flow"]
         self.run_id = os.environ.get("RUN_ID", "dist")
-        self.dataset = os.environ.get("DATASET", "princeton-nlp/SWE-bench_Verified")
-        self.split = os.environ.get("SPLIT", "test")
-        self.timeout = _int_env("PER_INSTANCE_TIMEOUT", 2700)
+        # Grade dataset/split come from the descriptor (Verified keeps its exact
+        # defaults); env still overrides for ad-hoc runs.
+        self.dataset = os.environ.get(
+            "DATASET", self.bench.get("grade_dataset") or self.bench.get("dataset"))
+        self.split = os.environ.get("SPLIT", self.bench.get("split", "test"))
+        _tmo = self.bench.get("timeout", {})
+        self.timeout = _int_env(_tmo.get("default_env", "PER_INSTANCE_TIMEOUT"),
+                                _tmo.get("default", 2700))
         self.grade_workers = _int_env("GRADE_WORKERS", 6)
+        # Difficulty-aware per-instance ceiling: SWE-bench Verified tasks span
+        # "<15 min" to ">4 hours" of expected effort, so one flat timeout either
+        # starves hard tasks or over-waits on easy ones. For Verified the tiers come
+        # from the shipped difficulty id-lists (DIFFICULTY_DIR); benchmarks whose
+        # descriptor doesn't use that source keep the flat self.timeout until their
+        # adapter loads per-instance tiers. Unknown ids always keep self.timeout.
+        self.difficulty = (
+            _load_difficulty(os.environ.get(
+                "DIFFICULTY_DIR", "/work/swebench-verified-difficulty"))
+            if _tmo.get("difficulty") == "verified_difficulty_dir" else {})
+        self.tier_timeouts = {
+            tier: _int_env(_tmo.get("tier_env", {}).get(tier, ""), secs)
+            for tier, secs in _tmo.get("tiers", {}).items()
+        }
 
     # ── logging ──────────────────────────────────────────────────────────────
     def log(self, msg: str) -> None:
@@ -300,23 +361,34 @@ class Worker:
         # (success/timeout/exception) this run took.
         run_dir = os.path.join(scratch, self.run_id)
         try:
-            preds_path = os.path.join(run_dir, "preds.json")
-            meta_path = os.path.join(run_dir, "meta.jsonl")
-
-            rc = self._resolve(iid, scratch)
-            patch, model_name = self._read_patch(preds_path, iid)
-            meta_text = self._read_meta(meta_path, iid)
-
-            if not patch:
-                # Surface WHY: run-benchmark writes the container's driver rc + stderr
-                # tail into meta.jsonl even on an empty diff. Fold it into the /fail
-                # reason so it reaches the coordinator log (the only reliable sink —
-                # worker stdout is lost when the machine self-stops on drain).
-                error = f"resolve produced no patch (rc={rc}); {self._meta_diag(meta_text)}"
-            elif abandon.is_set():
-                pass  # lease reaped mid-resolve — skip grade + report below
+            if self.flow == benchmarks.FLOW_HARNESS_RUN:
+                # Fused run+grade (Terminal-Bench): the benchmark harness runs the
+                # agent INSIDE its task container and grades with pytest — there is
+                # no intermediate git patch. Delegated to the vendored harness
+                # module; it returns the verdict + its own report/transcript/patch.
+                resolved, report_text, patch, meta_text = self._run_harness(
+                    iid, scratch, abandon)
+                if not abandon.is_set() and not resolved and not report_text:
+                    error = "harness run produced no result"
             else:
-                resolved, report_text = self._grade(iid, scratch, preds_path, model_name)
+                # resolve_then_grade (Verified/Pro): arm runner -> preds.json -> grade.
+                preds_path = os.path.join(run_dir, "preds.json")
+                meta_path = os.path.join(run_dir, "meta.jsonl")
+
+                rc = self._resolve(iid, scratch)
+                patch, model_name = self._read_patch(preds_path, iid)
+                meta_text = self._read_meta(meta_path, iid)
+
+                if not patch:
+                    # Surface WHY: run-benchmark writes the container's driver rc + stderr
+                    # tail into meta.jsonl even on an empty diff. Fold it into the /fail
+                    # reason so it reaches the coordinator log (the only reliable sink —
+                    # worker stdout is lost when the machine self-stops on drain).
+                    error = f"resolve produced no patch (rc={rc}); {self._meta_diag(meta_text)}"
+                elif abandon.is_set():
+                    pass  # lease reaped mid-resolve — skip grade + report below
+                else:
+                    resolved, report_text = self._grade(iid, scratch, preds_path, model_name)
         except subprocess.TimeoutExpired as e:
             error = f"timeout: {str(e)[:300]}"
         except Exception as e:  # noqa: BLE001 — convert to /fail below (unless abandoned)
@@ -338,35 +410,99 @@ class Worker:
                      f"new owner will finish it")
             return
 
-        if error or not patch:
+        # resolve_then_grade requires a patch to /complete; harness_run has none —
+        # a graded result (resolved True or False, with a report) IS a completion.
+        harness = self.flow == benchmarks.FLOW_HARNESS_RUN
+        if error or (not harness and not patch):
             self._post_fail(iid, error or "resolve produced no patch")
             self.log(f"{iid}: reported /fail ({error or 'empty patch'})")
         else:
             self._post_complete(iid, patch, report_text, meta_text, resolved, artifacts)
             self.log(f"{iid}: reported /complete resolved={resolved}")
 
+    # ── fused run+grade (harness_run flow, e.g. Terminal-Bench) ──────────────
+    def _run_harness(self, iid: str, scratch: str,
+                     abandon: threading.Event) -> tuple[bool, str, str, str]:
+        """Run+grade one task via the benchmark's OWN harness and return
+        (resolved, report_text, patch, meta_text). Delegates to the module named by
+        the descriptor's `harness_module` (e.g. Terminal -> harness_terminal), which
+        exposes `run(worker, iid, scratch, abandon)`. A missing/broken module raises,
+        which _process turns into a /fail with the reason — never a silent pass."""
+        mod_name = self.bench.get("harness_module")
+        if not mod_name:
+            raise RuntimeError(
+                f"benchmark '{self.benchmark}' uses harness_run flow but its "
+                f"descriptor names no harness_module")
+        mod = __import__(mod_name)
+        return mod.run(self, iid, scratch, abandon)
+
+    # ── difficulty-aware per-instance ceiling ────────────────────────────────
+    def _instance_timeout(self, iid: str) -> int:
+        """Per-instance resolve ceiling in seconds by SWE-bench difficulty tier
+        (easy/medium 3h, hard 5h, veryhard 8h — all env-overridable). Falls back
+        to the flat PER_INSTANCE_TIMEOUT for ids with no tier data."""
+        tier = self.difficulty.get(iid)
+        if not tier:
+            return self.timeout
+        return self.tier_timeouts.get(tier, self.timeout)
+
     # ── resolve step (shell out to the arm's runner) ─────────────────────────
     def _resolve(self, iid: str, scratch: str) -> int:
         runner = self._runner_path()
+        inst_timeout = self._instance_timeout(iid)
         cmd = [VENV_PY, runner, "--ids", iid, "--out", scratch,
-               "--label", self.run_id, "--timeout", str(self.timeout), "--parallel", "1"]
+               "--label", self.run_id, "--timeout", str(inst_timeout), "--parallel", "1"]
+        # Both resolve_then_grade runners (econ, claude) are dataset-parameterized
+        # (their --dataset defaults to Verified). Hand them the ACTIVE benchmark's
+        # dataset/split + — for Pro — the vendored id-source, the sweap image
+        # namespace, and the /app repo dir off the descriptor, so it stops
+        # resolving Pro ids against Verified (the smoke's "no instances after
+        # filter" → empty-patch bug). For Verified this is a no-op — --dataset
+        # equals the runner's own default.
+        if self.arm in ("econ", "claude"):
+            cmd += ["--dataset", self.dataset, "--split", self.split]
+            ids_jsonl = self.bench.get("ids_jsonl")
+            if ids_jsonl:
+                cmd += ["--ids-jsonl", ids_jsonl]
+            dh_user = self.bench.get("dockerhub_username")
+            if dh_user:
+                cmd += ["--dockerhub-username", dh_user]
+            repo_dir = self.bench.get("repo_dir")
+            if repo_dir:
+                cmd += ["--repo-dir", repo_dir]
+            # resolve-side eval-image org (runner defaults to swebench; starryzhang for SWE-bench Live)
+            ns = self.bench.get("image_namespace")
+            if ns:
+                cmd += ["--image-namespace", ns]
         env = os.environ.copy()
         # Mirror the proven single-machine econ path (fullresolve/entrypoint.sh §3):
         # clear DOCKER_DEFAULT_PLATFORM so run-benchmark's os.environ.setdefault stays
         # a no-op (the fly VM is already x86_64; forcing linux/amd64 is unnecessary).
         env["DOCKER_DEFAULT_PLATFORM"] = ""
-        self.log(f"{iid}: resolve -> {' '.join(cmd)}")
+        self.log(f"{iid}: resolve (ceiling={inst_timeout}s "
+                 f"tier={self.difficulty.get(iid, 'default')}) -> {' '.join(cmd)}")
         # Captured (not streamed) so the stall watchdog can poll it for growth —
         # start_new_session=True makes proc.pid a process-group leader so a
         # stall/deadline kill takes the whole tree, not just the driver.
         logpath = os.path.join(scratch, "resolve-output.log")
-        timeout_s = self.timeout + 300
+        # The econ arm writes its event stream straight onto the host-mounted
+        # artifact dir (run-instance.sh -> $OUT/events.jsonl), so it grows LIVE
+        # here even though run-benchmark buffers the container's stdout/stderr.
+        # Watching it gives the stall clock a real in-agent progress signal the
+        # captured driver log alone lacks during the (buffered) agent phase;
+        # absent (claude arm, pre-agent phases) it stays 0 and the driver-log
+        # signal stands — so this only ADDS liveness, never removes it.
+        art_dir = os.path.join(scratch, self.run_id, "artifacts", iid)
+        live_paths = (os.path.join(art_dir, "events.jsonl"),
+                      os.path.join(art_dir, "err.txt"))
+        timeout_s = inst_timeout + 300
         deadline = time.time() + timeout_s
         with open(logpath, "wb") as logf:
             proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT,
                                      start_new_session=True)
             try:
-                stall_error = _watch_resolve(proc, logpath, deadline, timeout_s)
+                stall_error = _watch_resolve(proc, logpath, deadline, timeout_s,
+                                             extra_paths=live_paths)
             finally:
                 rc = proc.wait()
                 self._tail_log_to_stdout(iid, logpath)
@@ -390,9 +526,40 @@ class Worker:
         for line in lines[-n:]:
             print(f"[{iid}] {line.rstrip()}", flush=True)
 
-    # ── grade step (swebench harness, per-instance, in a scratch CWD) ────────
+    # ── grade step (benchmark-dispatched) ────────────────────────────────────
     def _grade(self, iid: str, scratch: str, preds_path: str,
                model_name: str | None) -> tuple[bool, str]:
+        """Grade one prediction for the ACTIVE benchmark and return
+        (resolved, report_text). Verified/Lite use the swebench harness in-process
+        (below); a benchmark whose descriptor names a `grade_module` (e.g. Pro ->
+        grade_pro) delegates to that vendored module. Best-effort throughout: any
+        grader failure yields (False, "") so a valid patch still /completes."""
+        mod_name = self.bench.get("grade_module")
+        if mod_name:
+            return self._grade_via_module(mod_name, iid, scratch, preds_path, model_name)
+        return self._grade_swebench(iid, scratch, preds_path, model_name)
+
+    def _grade_via_module(self, mod_name: str, iid: str, scratch: str,
+                          preds_path: str, model_name: str | None) -> tuple[bool, str]:
+        """Delegate grading to a benchmark-specific module (e.g. grade_pro) that
+        exposes `grade(worker, iid, scratch, preds_path, model_name) -> (bool, str)`.
+        The module is vendored by that benchmark's adapter; if it isn't present yet,
+        log and treat as unresolved rather than sinking the instance."""
+        try:
+            mod = __import__(mod_name)
+        except Exception as e:  # noqa: BLE001 — module not vendored / import error
+            self.log(f"{iid}: grade module '{mod_name}' unavailable ({e}) — "
+                     f"treating as unresolved")
+            return False, ""
+        try:
+            return mod.grade(self, iid, scratch, preds_path, model_name)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"{iid}: grade via {mod_name} crashed ({e}) — unresolved")
+            return False, ""
+
+    # ── grade step (swebench harness, per-instance, in a scratch CWD) ────────
+    def _grade_swebench(self, iid: str, scratch: str, preds_path: str,
+                        model_name: str | None) -> tuple[bool, str]:
         grade_cwd = os.path.join(scratch, "grade")
         os.makedirs(grade_cwd, exist_ok=True)
         cmd = [VENV_PY, "-m", "swebench.harness.run_evaluation",
@@ -400,6 +567,14 @@ class Worker:
                "--predictions_path", preds_path, "--run_id", self.run_id,
                "--instance_ids", iid, "--max_workers", str(self.grade_workers),
                "--cache_level", "env", "--clean", "True", "--timeout", str(self.timeout)]
+        # Optional private-registry namespace: SWEBENCH_NAMESPACE=51jaswanth15 makes the
+        # harness pull eval images from the private Verified mirror
+        # (51jaswanth15/sweb.eval.x86_64.*, the _1776_-normalized names the mirror
+        # produced) instead of the public swebench org. Unset -> harness default, so
+        # Verified grading is unchanged unless the launcher opts in.
+        namespace = os.environ.get("SWEBENCH_NAMESPACE")
+        if namespace:
+            cmd += ["--namespace", namespace]
         self.log(f"{iid}: grade -> {' '.join(cmd)}")
         # Grade is best-effort: a grade crash/timeout still leaves us a valid patch
         # to /complete (resolved=False) rather than requeuing a solved instance.
@@ -466,12 +641,17 @@ class Worker:
             except OSError:
                 db_b64 = None
 
-        return {
-            "events_jsonl": _read_text("events.jsonl"),
-            "err_txt": _read_text("err.txt"),
-            "engine_log": _read_text("engine.log", MAX_ENGINE_LOG_BYTES),
-            "db_b64": db_b64,
-        }
+        # Descriptor-driven text traces: each (filename, /complete field) in the
+        # active benchmark's trace list. engine.log keeps the larger cap. Verified/Pro
+        # yield exactly events_jsonl/err_txt/engine_log (unchanged); Terminal's extra
+        # traces (trajectory.json/sessions.cast) are read here too and ride once the
+        # coordinator accepts those fields (wired by the Terminal adapter).
+        out: dict = {}
+        for fname, field in self.bench.get("traces", ()):
+            cap = MAX_ENGINE_LOG_BYTES if fname == "engine.log" else MAX_ARTIFACT_TEXT_BYTES
+            out[field] = _read_text(fname, cap)
+        out["db_b64"] = db_b64
+        return out
 
     def _find_report(self, grade_cwd: str, iid: str, model_name: str | None) -> str | None:
         # logs/run_evaluation/<run_id>/<model>/<instance_id>/report.json
@@ -541,7 +721,7 @@ class Worker:
                        meta_json: str, resolved: bool,
                        artifacts: dict | None = None) -> None:
         artifacts = artifacts or {}
-        self._request("/complete", {
+        payload = {
             "instance_id": iid,
             "worker_id": self.worker_id,
             "patch": patch,
@@ -550,11 +730,17 @@ class Worker:
             "resolved": bool(resolved),
             # S7b/S7c: the per-instance transcript, synced here because the
             # distributed worker has no volume that survives the machine.
-            "events_jsonl": artifacts.get("events_jsonl"),
-            "err_txt": artifacts.get("err_txt"),
-            "engine_log": artifacts.get("engine_log"),
             "db_b64": artifacts.get("db_b64"),
-        }, max_attempts=8)
+        }
+        # Forward exactly the trace fields the active benchmark's descriptor
+        # declares, under their /complete field names — resolve_then_grade sends
+        # events_jsonl/err_txt/engine_log; harness_run (Terminal) sends
+        # events_jsonl/err_txt/trajectory_json/sessions_cast. Descriptor-driven so
+        # a new trace type needs a descriptor entry + a coordinator column only,
+        # never a worker edit. Unknown fields the coordinator ignores.
+        for _fname, field in self.bench.get("traces", ()):
+            payload[field] = artifacts.get(field)
+        self._request("/complete", payload, max_attempts=8)
 
     def _post_fail(self, iid: str, error: str) -> None:
         # Capped above _meta_diag's 10000-char stderr tail so widening that cap

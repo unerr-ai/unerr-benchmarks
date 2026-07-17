@@ -23,16 +23,20 @@ Subcommands (each reads one hook-event JSON object from stdin):
            {"decision":"block","reason":"..."} so Claude Code returns the
            agent to work instead of ending the turn. An OVERALL cap (3 total
            blocks, across all gates) guarantees this can never loop forever
-           even if the agent never satisfies a gate. Gate E fires on any of:
-           a hot (3+ edited) file, a prior R-block, or 2+ prior V-blocks.
+           even if the agent never satisfies a gate. Gate V requires a BROAD
+           green run (a whole test module, not a single method) so sibling
+           tests catch regressions the target test misses. Gate E escalates
+           only on a VERIFICATION-revealed trigger: a prior R-block or 2+ prior
+           V-blocks (the raw edit-count arm was removed — see Phase A findings).
   deny     PreToolUse hook. Reads the state log, evaluates the deny rules in
            a fixed order (T, B, C — first match wins), and on a match prints
            a hookSpecificOutput permissionDecision:"deny" object so Claude
            Code refuses the tool call before it runs. T (test files are
            read-only) and C (time-source convention divergence) are cheap
-           per-call checks; B (edit budget blown -> forced escalation) reads
-           the same state log gate uses. Every deny also appends a "deny"
-           event to the state log.
+           per-call checks; B (5+ un-greened edits AND verification has already
+           blocked -> forced escalation) reads the same state log gate uses —
+           it no longer fires on edit-count alone. Every deny also appends a
+           "deny" event to the state log.
 
 State lives at $CC_HARNESS_STATE/state.jsonl (default /tmp/cc-harness/),
 deliberately OUTSIDE the repo — it must never appear in the graded
@@ -58,14 +62,43 @@ DEFAULT_STATE_DIR = "/tmp/cc-harness"
 
 EDIT_TOOL_RE = re.compile(r"^(Edit|Write|MultiEdit|NotebookEdit|mcp__unerr__file_edit)$")
 TEST_CMD_RE = re.compile(
-    r"(runtests\.py|pytest|py\.test|-m unittest|manage\.py test|\btox\b|\brepro\w*\.(py|sh))",
+    r"(runtests\.py|pytest|py\.test|-m\s+unittest|manage\.py\s+test|\btox\b"
+    r"|\bbin/test\b|\brepro\w*\.(py|sh))",
     re.IGNORECASE,
+)
+# A BROAD verification runs a recognized test-suite runner over a whole
+# module/file/class/dir/app; only that exercises the sibling tests a regression
+# hides in. A bare reproduction script (`python repro_issue.py`) is NOT a suite
+# run — it must never satisfy the regression gate, or an agent that only reruns
+# its repro after each edit would sail through (adversarial-review finding 4).
+_SUITE_RUNNER_RE = re.compile(
+    r"(runtests\.py|pytest|py\.test|-m\s+unittest|manage\.py\s+test|\btox\b|\bnox\b"
+    r"|\bbin/test\b)",  # sympy's native runner — its docs point agents at bin/test, not pytest
+    re.IGNORECASE,
+)
+# A verification is NARROW when it targets a single method/function: a pytest
+# `::test_...` function/method node id (a `::TestClass` whole-class run stays
+# BROAD), a `-k` keyword filter, or a dotted `CapWordsClass.test_method` path (a
+# lowercase `module.test_file` dotted path is a whole MODULE and stays BROAD —
+# django names test files `test_*.py`; adversarial-review findings 2/3).
+# Case-sensitive on purpose: `::test` vs `::Test` and the leading Capital in
+# `Class.test_method` are the discriminating signals.
+NARROW_TEST_RE = re.compile(
+    r"(::test[A-Za-z0-9_]*"
+    r"|(^|\s)-k(\s|=)"
+    r"|[A-Z][A-Za-z0-9_]*\.test_[A-Za-z0-9_]+(\s|$|::))"
 )
 
 OVERALL_CAP = 3
 GATE_CAPS = {"Z": 1, "R": 1, "V": 2, "E": 1}
 
-TEST_PATH_SEGMENTS = {"tests", "test", "testing"}
+# Deliberately NO bare "test": django/test/ is real product source (TestCase,
+# Client, override_settings live there), and every benchmark repo's actual test
+# tree is `tests/` (plural) or `testing/` (pytest). A gold fix touching
+# django/test/*.py must stay editable — denying it leaves the agent no legal
+# path to the fix (adversarial-review finding). Loose test_*.py files anywhere
+# are still caught by is_test_path's basename rules.
+TEST_PATH_SEGMENTS = {"tests", "testing"}
 RULE_B_EDIT_THRESHOLD = 5
 RULE_B_DENY_CAP = 2
 
@@ -153,22 +186,42 @@ def cmd_record():
 
 # ── gate ──────────────────────────────────────────────────────────────────
 
+def is_broad_test(key):
+    """True only if `key` invokes a recognized test-suite runner over a broad
+    target. Two gates: (1) it must match `_SUITE_RUNNER_RE` — a bare repro
+    script (`python repro_issue.py`) never counts; (2) it must carry no NARROW
+    signal (a `::test_...` method node id, a `-k` filter, or a dotted
+    `Class.test_method` path). A whole-module/class/app suite run passes both."""
+    k = key or ""
+    if not _SUITE_RUNNER_RE.search(k):
+        return False
+    return not NARROW_TEST_RE.search(k)
+
+
 def evaluate_gate(events):
     """Pure: full event list -> None (allow) or (gate_letter, reason) to
     block. Evaluated in fixed order Z, R, V, E; first hit wins. The overall
-    cap is checked before any individual gate."""
+    cap gates the Z/R/V nudges; Gate E (one-shot escalation) is EXEMPT so it
+    stays deliverable even after the cap is spent."""
     edits = [e for e in events if e.get("ev") == "edit"]
     tests = [e for e in events if e.get("ev") == "test"]
     tasks = [e for e in events if e.get("ev") == "task"]
     blocks = [e for e in events if e.get("ev") == "block"]
 
-    if len(blocks) >= OVERALL_CAP:
-        return None  # never loop forever
-
     block_counts = Counter(b.get("gate") for b in blocks)
+    # The overall cap stops the "keep working" nudges (Z/R/V) from nagging
+    # forever. Gate E — the one-shot terminal escalation — is EXEMPT from it:
+    # OVERALL_CAP (3) == V_cap (2) + E_cap (1), so a run that spends its cap on
+    # Z/V blocks would otherwise short-circuit here and never deliver the
+    # escalation instruction (the verification-revealed trigger unreachable —
+    # adversarial-review finding 1). E is capped independently at 1, so
+    # exempting it stays bounded. NB: any 3-block combo reaching the cap
+    # necessarily includes an R-block or 2 V-blocks, so hitting the cap
+    # guarantees E's trigger is satisfiable.
+    over_cap = len(blocks) >= OVERALL_CAP
 
     # Gate Z — nothing was ever edited.
-    if block_counts.get("Z", 0) < GATE_CAPS["Z"]:
+    if not over_cap and block_counts.get("Z", 0) < GATE_CAPS["Z"]:
         if len(edits) == 0:
             return (
                 "Z",
@@ -178,7 +231,7 @@ def evaluate_gate(events):
             )
 
     # Gate R — a verification command that used to pass now fails.
-    if block_counts.get("R", 0) < GATE_CAPS["R"]:
+    if not over_cap and block_counts.get("R", 0) < GATE_CAPS["R"]:
         by_key = {}
         for e in tests:
             by_key.setdefault(e.get("key", ""), []).append(bool(e.get("ok")))
@@ -197,50 +250,71 @@ def evaluate_gate(events):
                 "rework cannot recover it, escalate per the escalation contract.",
             )
 
-    # Gate V — edited but never re-verified afterward.
-    if block_counts.get("V", 0) < GATE_CAPS["V"]:
+    # Gate V — edited but never re-verified with a BROAD run afterward. A
+    # narrow single-method green does NOT satisfy V: it leaves sibling tests in
+    # the touched module unrun, which is exactly how a fix that passes its
+    # target test still regresses PASS_TO_PASS tests (django-11885, pylint-7277).
+    # Requiring a broad green forces the module suite to run, so Gate R (above)
+    # can then catch any regression it surfaces.
+    if not over_cap and block_counts.get("V", 0) < GATE_CAPS["V"]:
         if edits:
             last_edit_t = max(e.get("t", 0) for e in edits)
-            ok_after = any(
-                e.get("ok") and e.get("t", 0) > last_edit_t for e in tests
-            )
-            if not ok_after:
+            ok_after = [
+                e for e in tests
+                if e.get("ok") and e.get("t", 0) > last_edit_t
+            ]
+            broad_ok_after = any(is_broad_test(e.get("key", "")) for e in ok_after)
+            if not broad_ok_after:
                 seen = []
                 for e in edits:
                     f = e.get("file", "?")
                     if f not in seen:
                         seen.append(f)
                 basenames = ", ".join(os.path.basename(f) for f in seen[:5])
-                return (
-                    "V",
-                    "You edited source files but ran no successful verification "
-                    "afterward. Re-run your reproduction of the issue AND the "
-                    "narrowest existing test module covering each edited file "
-                    f"(files edited: {basenames}); make them pass, then finish.",
-                )
+                if ok_after:
+                    # verified, but only NARROWLY — demand the full module run.
+                    reason = (
+                        "Your only post-edit verification was NARROW — a single "
+                        "method, a -k filter, or just a reproduction script, not "
+                        "the existing test suite. Run the FULL existing test "
+                        "module/file for each edited file — the whole module, not "
+                        f"just the target test (files edited: {basenames}) — and "
+                        "make ALL of them pass. The sibling tests in that module "
+                        "are what catch regressions your targeted test cannot. "
+                        "Then finish."
+                    )
+                else:
+                    reason = (
+                        "You edited source files but ran no successful "
+                        "verification afterward. Re-run your reproduction of the "
+                        "issue AND the full existing test module covering each "
+                        f"edited file (files edited: {basenames}); make them "
+                        "pass, then finish."
+                    )
+                return ("V", reason)
 
-    # Gate E — an escalation trigger fired but no unerr-opus/unerr-fable ran.
-    # Three arms: a hot (3+ edited) file, a prior R-block, or 2+ prior
-    # V-blocks (V has capped out without a successful finish — hand off to
-    # escalation rather than let the agent keep retrying an exhausted gate).
+    # Gate E — a VERIFICATION-REVEALED escalation trigger fired but no
+    # unerr-opus/unerr-fable ran. Two arms only: a prior R-block (a regression
+    # one rework did not recover) or 2+ prior V-blocks (verification has capped
+    # without a green finish). The old raw-edit-count arm (a "hot" 3+-edited
+    # file) is deliberately GONE: Phase A showed edit-count escalation fires on
+    # hard cases the sub-agents can't fix either, billing the reasoner/oracle
+    # tiers for zero conversions. Escalate only when verification proves the
+    # agent is stuck, not merely because it edited a file several times. This
+    # gate is reached even when over_cap (see the exemption above), so a run
+    # whose cap was spent on Z/V blocks still receives the escalation.
     if block_counts.get("E", 0) < GATE_CAPS["E"]:
-        file_counts = Counter(e.get("file", "?") for e in edits)
-        hot_file, hot_n = None, 0
-        for f, n in file_counts.items():
-            if n >= 3 and n > hot_n:
-                hot_file, hot_n = f, n
         r_already = block_counts.get("R", 0) >= 1
         v_capped = block_counts.get("V", 0) >= 2
         escalated = any(
             t.get("agent") in ("unerr-opus", "unerr-fable") for t in tasks
         )
-        if (hot_file is not None or r_already or v_capped) and not escalated:
-            if hot_file is not None:
-                trigger = f"file {os.path.basename(hot_file)} edited {hot_n} times"
-            elif r_already:
-                trigger = "a previously-passing test was regressed"
-            else:
-                trigger = "the verification gate (V) has blocked twice without a successful finish"
+        if (r_already or v_capped) and not escalated:
+            trigger = (
+                "a previously-passing test was regressed and one rework did not recover it"
+                if r_already
+                else "the verification gate (V) has blocked twice without a green finish"
+            )
             return (
                 "E",
                 f"Escalation trigger hit: {trigger}. Per the escalation contract: "
@@ -289,8 +363,9 @@ TEST_DENY_MSG = (
 
 def is_test_path(file_path):
     """Rule T predicate. True if file_path (any separator style, resolved
-    case-sensitive) names a test file: a `tests`/`test`/`testing` path
-    segment, or a basename starting `test_` / ending `_test.py`."""
+    case-sensitive) names a test file: a `tests`/`testing` path segment, or
+    a basename starting `test_` / ending `_test.py`. A bare `test` segment
+    is NOT a test marker — django/test/ is product source."""
     if not file_path:
         return False
     posix = str(file_path).replace("\\", "/")
@@ -326,6 +401,18 @@ def rule_b(events, file_path):
     if not file_path:
         return None
     if _edits_since_last_good_test(events, file_path) < RULE_B_EDIT_THRESHOLD:
+        return None
+    # Throttle: force-escalate only once verification has REVEALED a gap — a
+    # prior V-block (a verification was demanded and not met) or an R-block (a
+    # regression was flagged). Raw edit-thrash alone no longer triggers
+    # escalation: Phase A showed count-triggered escalation billed the
+    # reasoner/oracle tiers for zero conversions on cases the sub-agents could
+    # not fix either. The 5+-edit threshold above stays as the "still stuck"
+    # guard; this adds "and verification says so".
+    verification_revealed = any(
+        e.get("ev") == "block" and e.get("gate") in ("V", "R") for e in events
+    )
+    if not verification_revealed:
         return None
     escalated = any(
         e.get("ev") == "task"
@@ -492,16 +579,19 @@ def run_selftest():
         r = gate_once()
         check("pass-then-fail -> R", r is not None and r[0] == "R")
 
-        # Case 4: same file edited 3x, verified clean, no escalation -> E.
-        fresh_dir("case4-hot-file-no-escalation")
+        # Case 4: same file edited 3x, BROAD-verified clean, no V/R block ->
+        # the hot-file arm is GONE, so this now ALLOWS (no escalation on raw
+        # edit count). A broad green satisfies V; nothing else triggers.
+        fresh_dir("case4-hot-file-no-longer-escalates")
         append_event({"t": 1.0, "ev": "edit", "file": "c.py"})
         append_event({"t": 2.0, "ev": "edit", "file": "c.py"})
         append_event({"t": 3.0, "ev": "edit", "file": "c.py"})
         append_event({"t": 4.0, "ev": "test", "key": "pytest tests/test_c.py", "ok": True})
         r = gate_once()
-        check("3-edits-one-file no-escalation -> E", r is not None and r[0] == "E")
+        check("3-edits + broad green, no V/R block -> ALLOW (hot-file arm removed)", r is None)
 
-        # Case 5: same hot-file trigger, but unerr-opus already ran -> no E.
+        # Case 5: same setup with an unerr-opus Task -> still allow (no trigger,
+        # and escalated anyway).
         fresh_dir("case5-escalated")
         append_event({"t": 1.0, "ev": "edit", "file": "d.py"})
         append_event({"t": 2.0, "ev": "edit", "file": "d.py"})
@@ -509,16 +599,34 @@ def run_selftest():
         append_event({"t": 4.0, "ev": "test", "key": "pytest tests/test_d.py", "ok": True})
         append_event({"t": 5.0, "ev": "task", "agent": "unerr-opus"})
         r = gate_once()
-        check("task unerr-opus recorded -> E not fired", r is None)
+        check("broad green + unerr-opus task -> no block", r is None)
 
-        # Case 6: overall cap — 3 prior blocks means always allow, even with
-        # a live Gate-Z condition (zero edits) still true.
-        fresh_dir("case6-overall-cap")
+        # Case 6: overall cap reached AND escalation already done -> terminal
+        # allow. Gate E is exempt from the cap but capped independently at 1;
+        # the recorded unerr-opus task satisfies `escalated`, so nothing blocks
+        # and the agent may finish.
+        fresh_dir("case6-overall-cap-terminal")
         append_event({"t": 1.0, "ev": "block", "gate": "Z"})
         append_event({"t": 2.0, "ev": "block", "gate": "V"})
         append_event({"t": 3.0, "ev": "block", "gate": "V"})
+        append_event({"t": 4.0, "ev": "task", "agent": "unerr-opus"})
         r = gate_once()
-        check("overall cap (3 prior blocks) -> always allow", r is None)
+        check("overall cap + already escalated -> terminal allow", r is None)
+
+        # Case 6b: DEADLOCK REGRESSION GUARD (adversarial-review finding 1) — the
+        # overall cap is reached by Z + V + V (== OVERALL_CAP) with NO escalation
+        # yet. Gate E must STILL fire (it is exempt from the cap); otherwise the
+        # verification-revealed escalation is unreachable and the run silently
+        # allows without ever escalating.
+        fresh_dir("case6b-cap-does-not-starve-E")
+        append_event({"t": 1.0, "ev": "edit", "file": "z.py"})
+        append_event({"t": 2.0, "ev": "test", "key": "pytest tests/test_z.py", "ok": True})
+        append_event({"t": 3.0, "ev": "block", "gate": "Z"})
+        append_event({"t": 4.0, "ev": "block", "gate": "V"})
+        append_event({"t": 5.0, "ev": "block", "gate": "V"})
+        r = gate_once()
+        check("cap spent on Z+V+V, not escalated -> E still fires (no deadlock)",
+              r is not None and r[0] == "E")
 
         # Case 7: Rule T — test paths denied, non-test path allowed.
         fresh_dir("case7-rule-t")
@@ -528,20 +636,42 @@ def run_selftest():
         check("rule T denies tests/test_x.py", rt1 is not None and rt1[0] == "T")
         check("rule T denies tests/regressiontests/foo.py", rt2 is not None and rt2[0] == "T")
         check("rule T allows src/utils.py", rt3 is None)
+        # Case 7b: django/test/ is PRODUCT SOURCE (TestCase/Client live there) —
+        # a bare `test` segment must NOT deny, or a gold fix touching it has no
+        # legal path (adversarial-review finding). Basename + plural-segment
+        # rules still catch actual test files.
+        rt4 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "django/test/utils.py", "new_string": "x"}})
+        rt5 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "django/test/testcases.py", "new_string": "x"}})
+        rt6 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "test_requests.py", "new_string": "x"}})
+        rt7 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "testing/code/source.py", "new_string": "x"}})
+        check("rule T allows django/test/utils.py (product source)", rt4 is None)
+        check("rule T allows django/test/testcases.py (product source)", rt5 is None)
+        check("rule T denies root-level test_requests.py (basename rule)", rt6 is not None and rt6[0] == "T")
+        check("rule T denies testing/ segment (pytest's suite dir)", rt7 is not None and rt7[0] == "T")
 
-        # Case 8: Rule B — 5 prior un-greened edits on one file -> deny the
-        # 6th edit attempt on that file.
+        # Case 8: Rule B — 5 prior un-greened edits on one file AND a prior
+        # V-block (verification revealed the gap) -> deny the 6th edit attempt.
         fresh_dir("case8-rule-b-fires")
         for i in range(5):
             append_event({"t": float(i + 1), "ev": "edit", "file": "e.py"})
+        append_event({"t": 6.0, "ev": "block", "gate": "V"})
         rb1 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "e.py", "new_string": "x"}})
-        check("rule B denies 6th un-greened edit", rb1 is not None and rb1[0] == "B")
+        check("rule B denies 6th un-greened edit (with prior V-block)", rb1 is not None and rb1[0] == "B")
 
-        # Case 9: Rule B — same setup, but an unerr-opus Task already ran ->
-        # no deny.
+        # Case 8b: THROTTLE — 5 un-greened edits but NO verification block yet
+        # -> Rule B does NOT fire (raw edit-thrash alone is not enough).
+        fresh_dir("case8b-rule-b-throttled")
+        for i in range(5):
+            append_event({"t": float(i + 1), "ev": "edit", "file": "e2.py"})
+        rb_throttle = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "e2.py", "new_string": "x"}})
+        check("rule B throttled: 5 edits but no V/R block -> allow", rb_throttle is None)
+
+        # Case 9: Rule B — same eligible setup, but an unerr-opus Task already
+        # ran -> no deny.
         fresh_dir("case9-rule-b-escalated")
         for i in range(5):
             append_event({"t": float(i + 1), "ev": "edit", "file": "f.py"})
+        append_event({"t": 6.0, "ev": "block", "gate": "V"})
         append_event({"t": 10.0, "ev": "task", "agent": "unerr-opus"})
         rb2 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "f.py", "new_string": "x"}})
         check("rule B not fired once unerr-opus task recorded", rb2 is None)
@@ -550,6 +680,7 @@ def run_selftest():
         fresh_dir("case10-rule-b-cap")
         for i in range(5):
             append_event({"t": float(i + 1), "ev": "edit", "file": "g.py"})
+        append_event({"t": 6.0, "ev": "block", "gate": "V"})
         rb3a = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "g.py", "new_string": "x"}})
         rb3b = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "g.py", "new_string": "x"}})
         rb3c = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "g.py", "new_string": "x"}})
@@ -586,6 +717,52 @@ def run_selftest():
         append_event({"t": 4.0, "ev": "block", "gate": "V"})
         r = gate_once()
         check("2 prior V-blocks -> E's V-block arm fires", r is not None and r[0] == "E")
+
+        # Case 13: is_broad_test — narrow signals vs broad runs.
+        check("is_broad_test: bare file is broad", is_broad_test("pytest lib/x/tests/test_foo.py"))
+        check("is_broad_test: django app run is broad", is_broad_test("./tests/runtests.py delete"))
+        check("is_broad_test: pytest node id is narrow", not is_broad_test("pytest tests/test_foo.py::test_bar"))
+        check("is_broad_test: -k filter is narrow", not is_broad_test("pytest tests/ -k test_large"))
+        check("is_broad_test: dotted Class.test_method is narrow",
+              not is_broad_test("./tests/runtests.py delete.tests.DeletionTests.test_large_delete"))
+        # Case 13b: findings 2/3 — commands that LOOK narrow but run a whole
+        # module/class must stay BROAD.
+        check("is_broad_test: django dotted whole-module is broad",
+              is_broad_test("./tests/runtests.py utils_tests.test_datastructures"))
+        check("is_broad_test: `-m unittest` dotted module is broad",
+              is_broad_test("python -m unittest tests.test_foo"))
+        check("is_broad_test: pytest ::TestClass (whole class) is broad",
+              is_broad_test("pytest tests/test_foo.py::TestFooClass"))
+        check("is_broad_test: pytest ::Class::method (single method) is narrow",
+              not is_broad_test("pytest tests/test_foo.py::TestFooClass::test_bar"))
+        # Case 13c: finding 4 — a bare reproduction script is NOT a suite run,
+        # so it never satisfies the regression gate.
+        check("is_broad_test: bare repro script is not broad",
+              not is_broad_test("python repro_issue.py"))
+        # Case 13d: sympy's native runner — bin/test must be recognized by BOTH
+        # the recorder (TEST_CMD_RE, else no test events at all -> Gate R blind)
+        # and the classifier (whole-file run -> broad).
+        check("TEST_CMD_RE records sympy bin/test",
+              TEST_CMD_RE.search("./bin/test -C --verbose sympy/core/tests/test_basic.py") is not None)
+        check("is_broad_test: sympy bin/test whole-file run is broad",
+              is_broad_test("./bin/test -C --verbose sympy/core/tests/test_basic.py"))
+
+        # Case 14: REGRESSION GATE — edited, but the only post-edit green run is
+        # NARROW (a single method) -> V blocks and demands the full module.
+        fresh_dir("case14-narrow-only-verify")
+        append_event({"t": 1.0, "ev": "edit", "file": "django/db/models/deletion.py"})
+        append_event({"t": 2.0, "ev": "test",
+                      "key": "./tests/runtests.py delete.tests.DeletionTests.test_target", "ok": True})
+        r = gate_once()
+        check("narrow-only green -> V blocks", r is not None and r[0] == "V")
+        check("narrow-only V message demands the full module", r is not None and "NARROW" in r[1])
+
+        # Case 15: broad green after edit -> V satisfied, nothing else triggers.
+        fresh_dir("case15-broad-verify-ok")
+        append_event({"t": 1.0, "ev": "edit", "file": "django/db/models/deletion.py"})
+        append_event({"t": 2.0, "ev": "test", "key": "./tests/runtests.py delete", "ok": True})
+        r = gate_once()
+        check("broad green after edit -> allow", r is None)
     finally:
         if orig_env is None:
             os.environ.pop(STATE_ENV, None)

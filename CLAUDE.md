@@ -155,6 +155,24 @@ server-side (kept for audit, excluded from queries).
 <!-- benchmark-runbooks: kept OUTSIDE the unerr-managed block so `unerr install` won't wipe it -->
 ## Benchmark runbooks (keep these updated on any change to the run/results flow)
 
+- **Multi-benchmark + matrix orchestration hub (any arm × any benchmark, all at once):**
+  [`e2e/distributed/README.md` §8](e2e/distributed/README.md) — the operator doc for the
+  `BENCHMARK=verified|lite|pro|terminal|live_verified` axis and the matrix tooling: `bench.sh` (fire any subset of
+  `arm:benchmark` combos as independent LABEL-scoped fleets, parallel or `--seq`, modes
+  run/prepare/start/destroy — `run` = full one-shot per combo, `prepare`+`start` bracket a GPU
+  window — writes `out/bench-<matrix>/manifest.tsv`), `gpu-flip.sh` (you raise
+  dedicated Fireworks GPUs per tier and pass ids; it flips the `econ-litellm` gateway secrets —
+  conductor/oracle/reasoner/executor — never launches GPUs itself), and `download-all.sh` (pull every
+  fleet's results+traces via the matrix manifest, `--submission` per resolve_then_grade combo).
+  **Monitor a live run** with the two read-only scripts (both take `<LABEL> [APP]`, `--matrix <id>`, or
+  no-args = newest matrix, single-sourcing fleet lookup via `tools/fleet-common.sh`): `status.sh`
+  (per-fleet `/status` one-liner — armed?, workers_seen, pending/leased/done/dead/failed, resolved/total +
+  grade % + retries/up-for-retry/dead; `--watch` = live monitor, `--instances` = per-instance→worker table,
+  `--cost` = total $ + per-tier conductor/oracle/reasoner/executor token·turn·cost read live from the
+  coordinator queue.db meta — econ telemetry/tier_cost_db, claude litellm_spend_logs, always real LiteLLM
+  spend) and `debug-workers.sh` (per worker:
+  what it holds + a `»»`-flagged `flyctl logs` tail; `--follow` streams, `--grep`/`--lines`/`--instance`).
+  See distributed README §3. Per-benchmark contract lives in `tools/benchmarks.py` (dataset/images/grade/timeout/traces/flow).
 - **Claude arm on SWE-bench (unerr ON + open-weight ensemble, distributed on fly):**
   [`e2e/reference/claude/fly-remote/README.md`](e2e/reference/claude/fly-remote/README.md)
   — the authoritative runbook: exact `run-distributed.sh` command (incl. the mandatory
@@ -162,6 +180,42 @@ server-side (kept for audit, excluded from queries).
   split, env vars, gotchas, monitoring, and **§11 Download & process results** (the reusable
   `tools/` scripts: `pull_results.sh`, `cost_report.py --detailed`, `make_submission.py`,
   `debug_instance.py`).
+- **SWE-bench Pro image mirror (own private copy of Scale AI's instance images):**
+  [`e2e/swebench-pro/README.md`](e2e/swebench-pro/README.md) — on-demand, idempotent,
+  resumable `crane` mirror of `jefzda/sweap-images` (~1002 tags) into
+  `51jaswanth15/sweap-images`, so the Pro eval runs against an account we control
+  (`swe_bench_pro_eval.py --dockerhub_username=51jaswanth15`). Run it whenever:
+  `./mirror-sweap-images.sh` (needs a **Read & Write** Docker Hub PAT). This is a
+  Docker-Hub→Docker-Hub image mirror, distinct from the fly Tigris pull-through cache
+  in `e2e/distributed/registry/`.
+- **SWE-bench-Live (verified split) benchmark:** `BENCHMARK=live_verified` — same
+  `resolve_then_grade` flow as Verified/Pro, but against HF `SWE-bench-Live/SWE-bench-Live` split
+  `verified` (500 frozen ids, not the rolling live split). Descriptor `_LIVE_VERIFIED` in
+  `e2e/distributed/tools/benchmarks.py`. Per-instance images are the public
+  `starryzhang/sweb.eval.x86_64.<key>` namespace (Live's harness hard-codes it — no private mirror),
+  fronted by the `SWEBENCH_REGISTRY_MIRROR` pull-through cache like Verified. Graded by Live's OWN
+  vendored harness via `e2e/distributed/tools/grade_live.py` (`grade_module=grade_live`; harness
+  pinned in `Dockerfile.dist` at `/work/swebench-live`), not stock swebench. Two non-obvious bake
+  requirements there (both learned from a failed smoke): the Live harness installs into an ISOLATED
+  `/work/.venv-live` (its own package is confusingly named `swebench` v1.0.0 and would clobber the
+  real `swebench>=4.1` the Verified/Pro grade path needs), and its `launch/` git submodule
+  (`microsoft/RepoLaunch`) must be init'd recursively (an un-init'd clone → `ModuleNotFoundError:
+  launch.core`). Smoke suite:
+  `live_verified-mini` (5 ids). See distributed [README §8.2](e2e/distributed/README.md).
+- **Archive a run's data to Tigris (relieve the fleet, keep the traces/grades/submission):**
+  [`e2e/distributed/README.md` §9](e2e/distributed/README.md) — opt-in coordinator-side upload of every
+  run's DATA (execution traces, grading, submission, logs, a generated `overview.json`, `bundle.tgz` — never
+  agent source) to a Tigris bucket at end-of-run, sorted `<prefix>/<benchmark>/<arm>/<date>/<label>/<category>/`,
+  so coordinator+workers can be destroyed and the run stays lookup-able. Uploader:
+  `tools/tigris_archive.py` (runs on the coordinator, also standalone against a pulled bundle; `boto3`;
+  builds `overview.json` = grade% + real-LiteLLM cost-by-tier the same way as `status.sh --cost`). Enable
+  per-run: `ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive` on `run-distributed.sh`/`bench.sh` (default
+  off, non-fatal on failure, `terminal`→`--no-submission`). One-time provisioning (billable, prints S3 keys
+  once → run it yourself): `FLY_ORG=<team-org> ./provision-tigris.sh` (creates the bucket, attaches AWS_*
+  secrets to BOTH fleet apps, writes gitignored `.env.tigris`). Look runs up with no live fleet:
+  `./tools/tigris-archive.sh list|overview <label>|get <label> [--only traces|grading|submission|bundle]`
+  (creds from env or `.env.tigris`; never prints secrets). Wiring lives in `coordinator-entrypoint.sh`
+  §6.9+§8, `Dockerfile.dist` (`boto3`), `run-distributed.sh` (env passthrough — never AWS_*).
 - **Rule:** when you change the distributed run flow, the model map, or the result scripts,
   update that README in the SAME change. The result scripts live in
   `e2e/distributed/tools/` (+ `e2e/reference/claude/local-docker/cost_report.py`) — extend

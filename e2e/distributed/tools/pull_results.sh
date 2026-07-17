@@ -47,7 +47,12 @@ for m in ms:
     md = (m.get("config") or {}).get("metadata") or {}
     if md.get("fleet") == label and md.get("role") == "coordinator":
         print(m.get("id"))
-' "$LABEL" | head -1)"
+' "$LABEL" | head -1 || true)"
+# ^ trailing `|| true`: a flyctl error (expired/absent token, unknown app) exits
+# non-zero and, under `set -e` + pipefail, would kill the script BEFORE the
+# graceful "no coordinator machine -> fall back to a local bundle" path below.
+# Swallow it so COORD_MID just goes empty and that fallback runs (lets an offline
+# re-pull of an already-local bundle succeed instead of hard-failing).
 
 if [ -z "$COORD_MID" ]; then
   log "no coordinator machine for fleet=$LABEL on app $APP — fleet already torn down (or never existed on this app)."

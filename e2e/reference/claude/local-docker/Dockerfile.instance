@@ -11,4 +11,14 @@
 ARG INSTANCE_IMAGE
 FROM ${INSTANCE_IMAGE}
 COPY --from=unerr-claude-toolbox /opt/toolbox /opt/toolbox
+# Normalize the entrypoint. SWE-bench Pro's sweap base images set
+# ENTRYPOINT ["/bin/bash"]; the runner launches every instance as
+# `docker run <img> bash -c "<driver>"`, which with that base becomes
+# `/bin/bash bash -c "<driver>"` — bash then resolves the bare `bash` operand
+# on PATH and tries to source the bash *binary* as a script, failing with
+# "/bin/bash: /bin/bash: cannot execute binary file" (rc=126) → every Pro
+# instance produces an empty patch. We always pass the full command at run
+# time, so the inherited entrypoint must be cleared. No-op for Verified (its
+# swebench eval images set no entrypoint).
+ENTRYPOINT []
 ENV PATH=/opt/toolbox/node/bin:/opt/toolbox/bin:${PATH}

@@ -1,8 +1,15 @@
-# Distributed SWE-bench runner
+# Distributed benchmark runner
 
-A work-stealing fleet that runs SWE-bench resolve+grade across N fly.io machines in
+A work-stealing fleet that runs a coding-agent benchmark across N fly.io machines in
 parallel instead of one machine serially. Full design in [`PLAN.md`](./PLAN.md) — this
 is the concise operator doc: launch, monitor, pull, teardown.
+
+Two independent axes: **`ARM`** picks the agent (`econ` | `claude`), **`BENCHMARK`** picks the
+dataset (`verified` | `lite` | `pro` | `terminal` | `live_verified`, default `verified`). §1–§7 below describe a
+single fleet (the historical SWE-bench Verified + econ path); **[§8](#8-other-benchmarks--the-matrix-launcher)
+is the multi-benchmark + matrix layer** — run any subset of arm×benchmark combos as independent
+fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everything with
+`download-all.sh`. Read §8 first if you're running anything other than Verified.
 
 ## 0. Invariants (do not violate)
 - **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`.
@@ -49,6 +56,21 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   multi-hour resolve stays leased for its whole duration. `MAXWAIT` (default `172800` = 48 h) is only
   the *host's* poll ceiling — if it's hit the fleet keeps running and self-stops on drain; you just
   pull + destroy manually (§4, §5).
+- **Completion signal is stream-independent.** The host detects "done" two ways: the `bundle_ready`
+  beacon in the streamed `flyctl logs`, AND a durable `/data/BUNDLE_READY` sentinel the coordinator
+  writes *after* the Tigris archive (race-safe — same moment as the beacon), polled over the reliable
+  `ssh curl /status` channel. So a silently-dropped log stream on a long run (observed live: coordinator
+  finished + archived, launcher stuck polling `done=None` past MAXWAIT) can no longer strand a finished
+  run — the sentinel breaks the poll and the normal pull + teardown proceeds.
+- **Parallel fleets + slow placement.** Multiple fleets run concurrently on the one app — each is scoped
+  by `fleet=<LABEL>` metadata, so a run only ever seeds/polls/tears down its own LABEL (this is what
+  `bench.sh` relies on to fan out combos). Under placement contention (iad tight, or another fleet
+  churning bakes in parallel) fly can CREATE a machine but not confirm `started` inside flyctl's
+  start-wait window, so `flyctl machine run` exits non-zero even though the machine comes up seconds
+  later. `run_machine` no longer treats that as fatal: it scrapes the created machine's id and polls it
+  up to `SLOW_START_WAIT` (default `240` s) for `started`, proceeding if it comes up and only
+  recreating if it truly never does. Without this a second fleet launched during a first fleet's churn
+  would abort at "failed to reach desired start state" and orphan a coordinator that started moments later.
 - Prereqs: `flyctl` logged in (token auto-read from `~/.fly/config.yml`); `FLY_ORG` set (§0);
   `LITELLM_API_KEY` exported or in `e2e/econ/.env.local`; `python3` on `PATH` (+ the `datasets`
   package if `SUITE=full/verified/lite`). The launcher rebuilds the econ binary from live source in its
@@ -62,6 +84,14 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   MANIFEST_UNKNOWN retried) → poll → pull → teardown, all in one run. It is safe to `Ctrl-C` — nothing
   about the fleet depends on the launcher process staying alive; fall back to the out-of-band commands
   in §3–§5 (status curl, `tools/pull_results.sh`, `run-distributed.sh destroy`).
+- **Never edit `run-distributed.sh` while a launcher is running it.** Bash re-reads the script from disk
+  by byte offset as it executes, so an edit mid-run shifts the offsets and corrupts the live read —
+  crashing the running process (observed live: a cosmetic label edit during a run crashed teardown at
+  `line 895: syntax error near 'done'`, leaving the coordinator up for a manual `destroy`). `bash -n`
+  passing does NOT protect you — the file is valid; the running shell's read position is what breaks.
+  Coordinator-baked files (`coordinator-entrypoint.sh`, `harness_*.py`) are safe to edit mid-run (already
+  frozen in the image) — only the host-side launcher is read live. Edit it between runs, or check
+  `pgrep -fl run-distributed.sh` first.
 
 ### Dedicated conductor (opt-in — `DEDICATED_CONDUCTOR=1`)
 The conductor (`minimax/minimax-m3`, a 428B MoE) is served from Fireworks **serverless** by
@@ -100,17 +130,52 @@ MACHINES=25 ARM=econ LABEL=full-dedicated DEDICATED_CONDUCTOR=1 ./run-distribute
 
 ## 3. Monitor
 While it runs, `run-distributed.sh` streams the coordinator's `progress:` line
-(`done`/`total`/`resolved` + per-instance status) every 30 s — that is the primary monitor. For an
-out-of-band check (the launcher died or you `Ctrl-C`'d it), find the fleet's coordinator machine and
-curl its `/status` on 6PN — the same call the launcher makes internally
-([`run-distributed.sh`](./run-distributed.sh) `:233`):
+(`done`/`total`/`resolved` + per-instance status) every 30 s — that is the primary monitor when the
+launcher is in the foreground. For an out-of-band check — a `bench.sh` matrix (backgrounded per combo),
+the launcher died, or you `Ctrl-C`'d it — use the two read-only monitor scripts (both take a `<LABEL>
+[APP]`, a `--matrix <id>`, or **no args = the run you most recently launched**, reading the same
+`out/bench-*/manifest.tsv` `download-all.sh` uses; neither ever touches the fleet):
+
+```bash
+./status.sh                          # newest matrix: one line per fleet — armed?, workers, counts, resolved/total
+./status.sh --matrix smk-e --watch   # live monitor (re-print every 15s) for a whole matrix
+./status.sh smk-e-econ --instances   # one fleet + its per-instance table (id, status, resolved, which worker)
+./status.sh --matrix smk-e --cost    # + total $ and per-tier (conductor/oracle/reasoner/executor) token·turn·cost
+./status.sh <LABEL> --json           # raw /status JSON for a fleet
+
+./debug-workers.sh                   # for every worker: what it holds (per /status) + a flagged log tail
+./debug-workers.sh smk-e-econ --lines 120           # deeper per-worker tail of one fleet
+./debug-workers.sh smk-e-econ --grep worker-loop    # only the claim/resolve lines (skip HF/httpx noise)
+./debug-workers.sh smk-e-econ --follow              # live-stream both workers' logs, prefixed by machine id
+./debug-workers.sh smk-e-econ --instance django__django-11999   # only the worker holding that instance
+```
+
+`status.sh` reads each fleet's coordinator `/status`; the default line now carries the **grade %**
+(`resolved/total (NN%)`) and **retries** (`reatt`=re-attempts so far, `up4retry`=failed rows the fleet
+reruns at drain, `dead`=permanently failed). `--cost` adds a **cost + per-tier breakdown** — total `$`,
+`turns`, tokens, and a conductor/oracle/reasoner/executor split (`$`, %-share, in/out tokens, calls,
+instance-count) — read live from each completed instance's `meta_json` in the coordinator's
+`/data/queue.db` (the same numbers the final report uses: econ from `telemetry`/`tier_cost_db`, claude
+from `litellm_spend_logs` — always **real LiteLLM spend**, never Anthropic-priced). A multi-fleet view
+folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs). `debug-workers.sh`
+additionally pulls each worker machine's `flyctl logs` and flags (`»»`) the boot/work state lines
+(dockerd up, toolbox build, `claimed`, `resolve (ceiling=… tier=…)`, `Instances resolved`, `dead`,
+`ERROR`). Reach for `status.sh` first ("where is every combo, and what's it costing?"), then
+`debug-workers.sh` when one looks stuck / a patch came back empty.
+
+Both are thin wrappers over the underlying mechanism — find the coordinator by metadata and curl its
+`/status` on 6PN (the same call the launcher makes internally,
+[`run-distributed.sh`](./run-distributed.sh) `poll_status`) — which you can still run by hand:
 ```bash
 flyctl machines list -a swebench-agent-dist    # pick the machine with role=coordinator, fleet=<LABEL>
 flyctl ssh console -a swebench-agent-dist --machine <COORD_ID> -C "curl -s localhost:8080/status"
 ```
-`/status` returns `counts` (`pending`/`leased`/`done`/`dead`), `resolved`/`total`, and a per-instance
-array. Live per-instance **cost/turns/pull_s aren't in `/status`** — they land in the coordinator's
-`/data/queue.db` `tasks` table (completion-meta JSON) and in the final bundle.
+`/status` returns `armed`, `workers_seen`, `counts` (`pending`/`leased`/`done`/`dead`/`failed`),
+`resolved`/`total`, and a per-instance array (each row's `worker_id` is what `--instances` /
+`debug-workers.sh` use to map instance→worker). Per-instance **cost/turns/by-tier aren't in `/status`**
+— they live in the coordinator's `/data/queue.db` `tasks` table (completion-meta JSON), which is exactly
+what `status.sh --cost` reads over ssh (no rebake, no LiteLLM query). The lookup/token/`/status`/queue.db
+plumbing is single-sourced in [`tools/fleet-common.sh`](./tools/fleet-common.sh) (sourced by both scripts).
 
 > The old `tools/bench-ctl.sh distributed-*` control surface was **removed** in the public-release
 > reorg. There is no `bench-ctl.sh`; use the §3–§5 commands here.
@@ -177,3 +242,228 @@ wired by default — this is the flagged escape hatch, not the steady-state path
   shape (`{"<iid>": {"resolved": bool, ...}}`) the worker actually posts — if you see 0/0, confirm
   `tools/merge-reports.py` still carries `ids_from_report()`; it corrects both `merged.json` and the
   downstream `cost-report.md`.
+
+## 8. Other benchmarks & the matrix launcher
+Everything above runs one fleet. This section adds the **benchmark axis** and the tools that fan a
+whole **arm × benchmark matrix** out as independent fleets. The single source of truth for every
+benchmark's dataset / images / grade / timeout / traces / flow is
+[`tools/benchmarks.py`](./tools/benchmarks.py) — one descriptor per benchmark; `run-distributed.sh`,
+`suite.py`, and the worker all read it, so adding a benchmark is one descriptor, not a code sweep.
+
+### 8.1 The benchmark axis (`BENCHMARK=`)
+Set `BENCHMARK` on any `run-distributed.sh` invocation (default `verified`). It is orthogonal to
+`ARM`. It selects the app suffix, the ids, the grader, the timeout, and the trace set:
+
+| `BENCHMARK` | flow | ids from | per-instance image | grade | default timeout | traces (extra) |
+|---|---|---|---|---|---|---|
+| `verified` (default) | resolve→grade | HF `princeton-nlp/SWE-bench_Verified` | `swebench/sweb.eval.x86_64.<key>` (public harness build/pull) or private mirror | swebench harness | 2700 s + difficulty tiers | events/err/**engine** |
+| `lite` | resolve→grade | HF `princeton-nlp/SWE-bench_Lite` | same as Verified | swebench harness | 2700 s | events/err/engine |
+| `pro` | resolve→grade | vendored `swebench-pro/sweap_eval_full_v2.jsonl` (no HF pull) | `51jaswanth15/sweap-images:<tag>` (mirror) | `tools/grade_pro.py` (Scale eval, `--use_local_docker`) | 10800 s (3 h) | events/err/engine |
+| `terminal` | **harness run** (fused, no patch) | vendored `terminal-bench/tasks/` dirs | built per-task from each task's Dockerfile (DinD; no registry) | `tools/harness_terminal.py` (Harbor `harbor run`, pytest end-state) | 3600 s + per-task `task.yaml` limit | events/err/**trajectory/sessions** |
+| `live_verified` | resolve→grade | HF `SWE-bench-Live/SWE-bench-Live` split `verified` (500 frozen ids) | `starryzhang/sweb.eval.x86_64.<key>` (public, own namespace) | SWE-bench-Live's OWN harness via `tools/grade_live.py` (trusts its `report.json`) | 2700 s + difficulty tiers (Verified defaults) | events/err/engine |
+
+- **App scoping + LABEL fold.** `ARM=econ` uses app `swebench-agent-dist`; `ARM=claude` uses
+  `swebench-agent-dist-claude`. For non-`verified` benchmarks the launcher folds `-<benchmark>` onto
+  your `LABEL` (e.g. `LABEL=run1 BENCHMARK=pro` → fleet `run1-pro`), so different benchmarks of the
+  same arm never collide on the same app. `verified` keeps the raw LABEL (back-compat).
+- **Two flows.** `resolve_then_grade` (verified/lite/pro/live_verified) runs the arm → `preds.json` → grade, and
+  yields a leaderboard-submittable patch. `harness_run` (terminal) runs the agent *inside* the task
+  container and grades with pytest — **there is no git patch**, so there is no submission for it.
+- **Timeouts (tune per §-intent: too high hides a wedge, too low kills a legit long resolve).** Each
+  benchmark's descriptor sets the default + difficulty tiers. Override with the benchmark's env var
+  (unset = descriptor default wins): `PER_INSTANCE_TIMEOUT` (verified/lite/live_verified — live_verified
+  inherits Verified's timeout knobs verbatim), `PRO_PER_INSTANCE_TIMEOUT`
+  (pro), `TERMINAL_PER_INSTANCE_TIMEOUT` (terminal), plus per-tier `TIER_TIMEOUT_{EASY,MEDIUM,HARD,VERYHARD}`
+  (and the `PRO_`-prefixed siblings).
+- **Failure-rerun (`MAX_FAILURE_RERUN`, default 1).** When the fresh queue drains, the coordinator
+  gives each `failed` instance up to this many extra tries; a rerun's success overwrites the earlier
+  failure in place (the bundle shows the rerun outcome). Set `0` to disable (exhausted attempts
+  dead-letter straight to `dead`), or higher to retry more. Applies to every benchmark. Watch it live
+  via `status.sh`'s `reatt`/`up4retry`/`dead` counters (§3). The invariant (rerun outcome persists over
+  the initial failure) has a deterministic offline test: `python3 coordinator/test_failure_rerun.py`
+  (drives the real `Queue` through fail→failed→rerun→complete-overwrite; no fly/docker).
+- **Traces.** Every completed instance's transcript rides `/complete` and lands under
+  `results/<label>/artifacts/<iid>/`: `events.jsonl` + `err.txt` for all; `engine.log` + `opencode.db`
+  for the econ resolve path; `trajectory.json` + `sessions.cast` (Harbor agent trajectory + asciinema
+  recording) for terminal. The set is descriptor-driven — a new trace type needs a descriptor entry
+  and a coordinator column only.
+
+### 8.2 Per-benchmark quick how-to
+Each is one `run-distributed.sh` (or `bench.sh`) call with `BENCHMARK=` set. **Always smoke first**
+with `MACHINES=2 SUITE=smoke` (the descriptor's 5-id set).
+
+**Verified** (default) — nothing extra:
+```bash
+MACHINES=2 ARM=econ LABEL=v-smoke BENCHMARK=verified SUITE=smoke ./run-distributed.sh run
+```
+Images come from the public swebench harness. To pull from our **private mirror** instead (Hub
+rate-limit insurance), set `SWEBENCH_NAMESPACE=51jaswanth15` — the worker's grade adds `--namespace`
+and the harness pulls `51jaswanth15/sweb.eval.x86_64.*`. Populate that mirror with
+`e2e/swebench-pro/mirror-sweap-images.sh DATASET=verified` (see that README).
+
+**SWE-bench-Live (verified split)** — same flow/knobs as Verified, own dataset + harness:
+```bash
+MACHINES=2 ARM=econ LABEL=live-smoke BENCHMARK=live_verified SUITE=smoke ./run-distributed.sh run
+```
+Same shape as Verified (`resolve_then_grade`, 1 coordinator + N workers, submission-capable) — the
+**only** delta is the task list: SWE-bench-Live's **verified split** (500 frozen instances, HF
+`SWE-bench-Live/SWE-bench-Live` split `verified`, not the rolling live split) and images from the
+public `starryzhang/*` Docker Hub namespace (`starryzhang/sweb.eval.x86_64.<key>`, the same
+`__`→`_1776_` key transform as swebench) — front a multi-worker run with `SWEBENCH_REGISTRY_MIRROR` to
+dodge Docker Hub rate limits, same knob as Verified; no `SWEBENCH_NAMESPACE` needed (the namespace is
+already public). Graded by SWE-bench-Live's **own** vendored harness (`grade_module=grade_live`,
+pinned in `Dockerfile.dist` at `/work/swebench-live`), NOT stock swebench — `tools/grade_live.py`
+trusts the harness's own `report.json` "resolved" verdict rather than recomputing it. Two
+non-obvious bake requirements (both learned from a failed smoke, see `Dockerfile.dist`): the harness
+installs into an **isolated `/work/.venv-live`** because SWE-bench-Live's own pip package is
+confusingly named `swebench` v1.0.0 and a shared-venv `pip install -e .` would **clobber** the real
+`swebench>=4.1` that Verified/Pro grading depends on; and its `launch/` git submodule
+(`microsoft/RepoLaunch`) is init'd **recursively** (a plain clone leaves it empty →
+`ModuleNotFoundError: launch.core` at grade time). `grade_live.py` shells `/work/.venv-live/bin/python`.
+`SUITE=live_verified-mini` is the 5-id smoke set. The arm axis is orthogonal — both `econ` and
+`claude` run it.
+
+**Pro** — vendored ids + mirrored images, longer timeout:
+```bash
+MACHINES=2 ARM=econ LABEL=pro-smoke BENCHMARK=pro SUITE=smoke ./run-distributed.sh run
+```
+Ids resolve from the vendored `swebench-pro/sweap_eval_full_v2.jsonl` (no HF pull). **Resolve wiring
+(econ arm):** `worker-loop.py._resolve` hands the econ runner the Pro descriptor fields —
+`--ids-jsonl` (the vendored jsonl, not HF), `--dockerhub-username 51jaswanth15` (build each instance
+FROM `51jaswanth15/sweap-images:<tag>`, the *same* image the grader pulls — the row's own `image_name`
+is Scale's private ECR URL and is ignored), and `--repo-dir /app` (Pro repos live at `/app`, not
+Verified's `/testbed`; the agent must edit + `git diff` there or grade applies an empty patch). The
+image tag is computed by the exact `helper_code/image_uri.py` rule the grader uses, so resolve and
+grade share one image. Mirror the full image set once with
+[`e2e/swebench-pro/`](../swebench-pro/README.md) (`./mirror-sweap-images.sh`, needs a R/W Docker Hub
+PAT). Grade is Scale's `swe_bench_pro_eval.py --use_local_docker --dockerhub_username 51jaswanth15`
+via `tools/grade_pro.py`, which computes the verdict itself (Scale's `eval_results.json` reads
+lowercase keys the jsonl doesn't have).
+
+**Terminal-Bench 2.1** — Harbor registry dataset `terminal-bench/terminal-bench-2-1` (89 tasks; `2.0`/`2.1` are distinct dataset *names*, not `@version` tags), vendored at build via `harbor dataset download`, fused run+grade, no per-instance registry:
+```bash
+MACHINES=2 ARM=claude LABEL=tb-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
+```
+Ids are the vendored `terminal-bench/tasks/` directory names. Each task's image is built at run time
+from its own Dockerfile inside the worker's DinD — nothing to mirror. `tools/harness_terminal.py`
+shells `harbor run --agent {claude-code|opencode} --model <m> --env docker` and grades on the pytest
+end-state; the result rides `/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`,
+no submission).
+
+### 8.3 Fire a matrix: `bench.sh`
+Run any subset of `arm:benchmark` combos as **independent, LABEL-scoped fleets**, in parallel
+(default) or `--seq`. Each combo is its own coordinator + workers.
+```bash
+# explicit combos (3 independent fleets, in parallel):
+./bench.sh run econ:verified claude:pro econ:terminal
+
+# cartesian product (2 arms × 3 benchmarks = 6 fleets):
+./bench.sh run --arms econ,claude --benches verified,pro,terminal --matrix july16
+
+# preview only — resolves every combo's app/label/dataset, makes NO fly calls:
+PLAN_ONLY=1 ./bench.sh run --arms econ,claude --benches verified,pro,terminal
+```
+- **Modes:** `run` = full one-shot per combo (build+seed+create+arm+poll+pull+teardown — this is
+  run-distributed.sh's default no-subcommand mode); `prepare` = build + create each fleet WARM
+  (coordinator holding `/claim`, workers idle) then exit; `start` = arm each **prepared** fleet + poll
+  + pull + teardown (the second half after a `prepare` + GPU flip — maps to run-distributed's `run`
+  subcommand); `destroy` = tear every combo's fleet down. No `status` mode.
+- Any `run-distributed.sh` env (`MACHINES`, `ROOTFS_GB`, `CPU_KIND`, `DEDICATED_CONDUCTOR`, …) set
+  once on the `bench.sh` call is inherited by **every** combo. `--suite <s>` and `--matrix <id>` apply
+  to all.
+- `bench.sh` writes `out/bench-<matrix>/manifest.tsv` (arm, benchmark, **resolved** label, app — read
+  back from each combo's own PLAN output so the fold/app rules stay single-sourced). `download-all.sh`
+  reads it. Per-combo logs are `out/bench-<matrix>/<arm>-<bench>.log`.
+
+### 8.4 Dedicated GPUs: `gpu-flip.sh` (you raise them; the flip routes to them)
+You raise a dedicated Fireworks deployment per tier **manually** and pass its deployment id here.
+`gpu-flip.sh` sets the matching `<TIER>_DEPLOYMENT_PATH` secret on the `econ-litellm` gateway; the
+gateway's `econ-entrypoint.sh` rewrites just that tier's upstream to the dedicated `#deployments/…`
+form at boot. Unset = serverless again. Runnable any time, any subset of tiers, independent of any run.
+Tier → base-model slug mirrors `ECON_TIER_BINDING`: `conductor=minimax-m3 oracle=glm-5p2
+reasoner=deepseek-v4-pro executor=gpt-oss-120b`.
+```bash
+./gpu-flip.sh --conductor <dep-id> [--oracle <id>] [--reasoner <id>] [--executor <id>]
+./gpu-flip.sh --status                 # which tiers are currently dedicated vs serverless
+./gpu-flip.sh --serverless             # revert ALL tiers
+./gpu-flip.sh --revert --oracle        # revert just one tier (put --revert BEFORE the tier flag)
+# prefix any command with --dry-run to print the flyctl call without running it
+```
+> This flips the **shared** gateway for everyone — don't run a second econ campaign against
+> `econ-litellm` while a dedicated flip is live. `DEDICATED_CONDUCTOR=1` (§2) is the automatic,
+> ephemeral, conductor-only alternative when you want the runner to own the GPU's lifecycle.
+
+### 8.5 Recommended GPU-backed matrix flow (prepare → flip → start)
+Warm the fleets before the GPU meter starts, so you only pay for the GPU while workers are actually
+resolving:
+```bash
+M=july16
+./bench.sh prepare --arms econ,claude --benches verified,pro,terminal --matrix $M   # warm, no GPU yet
+# ... raise your dedicated GPUs on Fireworks, then route to them:
+./gpu-flip.sh --conductor <id> --oracle <id> --reasoner <id>
+./bench.sh start   --arms econ,claude --benches verified,pro,terminal --matrix $M   # arm gates → poll → pull → teardown
+./download-all.sh --matrix $M --submission          # re-summarize every bundle + traces (+ submissions)
+./gpu-flip.sh --serverless                          # revert the gateway
+```
+
+### 8.6 Pull everything: `download-all.sh`
+One pass over a matrix's manifest — pulls each fleet's `bundle.tgz` (via `tools/pull_results.sh`),
+extracts to `out/dist-<label>/bundle/`, and prints a per-combo summary (resolved/total, preds,
+artifacts, dead):
+```bash
+./download-all.sh --matrix july16                       # pull all combos of that matrix
+./download-all.sh --matrix july16 --submission --model-name unerr-claude-openmodels
+./download-all.sh <label> <app> [<label> <app> ...]     # explicit fleets, no manifest
+```
+`--submission` also emits the leaderboard `all_preds.jsonl` (via `tools/make_submission.py`) for each
+`resolve_then_grade` combo; it's skipped for `terminal` (fused run, no patch). Traces for every
+instance are under `out/dist-<label>/bundle/results/<label>/artifacts/<iid>/`.
+
+## 9. Archive to Tigris (opt-in — tear the fleet down, keep the data)
+Every run's DATA — execution traces, grading, submission, logs, a generated `overview.json`, and the
+`bundle.tgz` — can be pushed to **Tigris** (fly's S3-compatible store) at end-of-run, so the coordinator
+and workers can be destroyed and the run is still fully lookup-able. The coordinator uploads *itself*
+(after it bundles, before it holds); a failed upload is **non-fatal** (the host SFTP pull still works).
+This is code data only (traces/logs/grades/submissions) — never the agent source.
+
+**S3 layout** (sorted by category → date → runid → test):
+```
+s3://<bucket>/<prefix>/<benchmark>/<arm>/<YYYY-MM-DD>/<label>/
+    overview.json          run summary: grade{resolved,total,pct} + cost{usd,by_tier,turns} + counts + per-instance
+    bundle.tgz             the full tarball (one-shot restore)
+    submission/            preds.json + all_preds.jsonl   (resolve_then_grade: verified/lite/pro/live_verified; skipped for terminal)
+    grading/               merged.json + <iid>/report.json
+    traces/<iid>/          events.jsonl, err.txt, engine.log, opencode.db (econ), trajectory.json + sessions.cast (terminal)
+    results/               preds.json, meta.jsonl, dead.jsonl, cost-report.md
+    logs/ ; db/queue.db
+```
+`overview.json` is the submissable/at-a-glance summary for Verified, Pro, and Terminal-2.1 alike — grade
+% + **real-LiteLLM cost** + per-tier token/turn split, computed the same way as `status.sh --cost`.
+
+**One-time provisioning** (billable Tigris bucket; prints S3 keys once → run it yourself):
+```bash
+FLY_ORG=<your-team-org> ./provision-tigris.sh          # creates bucket swebench-dist-archive,
+                                                        # attaches it to BOTH fleet apps (econ+claude),
+                                                        # saves the keypair to .env.tigris (gitignored)
+```
+This sets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` as **fleet-app secrets** (auto-injected into every
+coordinator) and writes the same keypair to `e2e/distributed/.env.tigris` for the host lookup tool.
+
+**Enable on a run** (needs a fresh bake — the coordinator image gained the uploader + `boto3`):
+```bash
+ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive MACHINES=2 ARM=econ SUITE=smoke ./run-distributed.sh
+ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive ./bench.sh run econ:verified claude:pro --suite smoke
+```
+Watch for the coordinator's `archived` beacon (or `archive_failed`, non-fatal). `ARCHIVE_TIGRIS` defaults
+to `0` (off) — behaviour is unchanged unless you opt in.
+
+**Look runs up later** (no live fleet — reads `.env.tigris` or env for creds; never prints them):
+```bash
+./tools/tigris-archive.sh list                          # every archived run: label, grade, cost
+./tools/tigris-archive.sh list --benchmark pro --arm econ --date 2026-07-16
+./tools/tigris-archive.sh overview <label>              # fast: just that run's overview.json (grade + cost + tiers)
+./tools/tigris-archive.sh get <label> [--only traces|grading|submission|bundle] [--dest out/archive/<label>]
+```
+The uploader (`tools/tigris_archive.py`) also runs standalone against a pulled bundle
+(`--data-dir out/dist-<label>/bundle --label <label> --arm <arm> --benchmark <b>`), and `--dry-run` prints
+the exact object plan + overview without touching S3.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve a task set to a SWE-bench instance-id list for the distributed runner.
+"""Resolve a task set to a benchmark instance-id list for the distributed runner.
 
 The host launcher (run-distributed.sh) calls this to turn a high-level SUITE
 selector — or an explicit id list / file — into the comma-separated INSTANCE_IDS
@@ -8,17 +8,25 @@ it seeds the coordinator queue with (`-e TASKS=<ids>`).
 Precedence (highest first): explicit --tasks/$TASKS  >  --file/$TASKS_FILE  >
 --suite/$SUITE  >  default (full Verified). CLI flags override the matching env.
 
-Suites:
-  full | verified  all SWE-bench_Verified test ids (from the HF dataset)  [default]
-  mini             the fixed Mini-10 django ids from the fullresolve runbook
-  lite             all SWE-bench_Lite test ids (from the HF dataset)
+The suite branch delegates to `benchmarks.resolve_ids` — the ONE benchmark-aware
+id source (SWE-bench Verified/Lite, SWE-bench Pro, Terminal-Bench). This file owns
+only the precedence + dedupe glue so run commands and the CLI stay unchanged.
 
-`datasets` (pip) is only needed for full/verified/lite. --suite mini and explicit
---tasks/--file resolve with the stdlib alone — the common smoke/mini path stays
+Suites (from benchmarks.py):
+  full | verified   all SWE-bench_Verified test ids (HF dataset)          [default]
+  mini              the fixed Mini-10 django ids (legacy Verified alias)
+  lite              all SWE-bench_Lite test ids (HF dataset)
+  pro | pro-mini    SWE-bench Pro (vendored snapshot) / its 5-id smoke set
+  terminal | terminal-mini   Terminal-Bench (vendored task set) / 5-id smoke
+  <bench>-mini      the 5-id smoke set for any benchmark (1 coord + 2 workers)
+
+`datasets` (pip) is only needed for the full HF suites. Every *-mini suite and
+explicit --tasks/--file resolve with the stdlib alone — the smoke path stays
 dependency-free.
 
 Usage:
   suite.py --suite mini            -> django__django-11790,django__django-11815,...
+  suite.py --suite pro-mini        -> first 5 SWE-bench Pro ids
   suite.py --tasks "a,b,c"         -> a,b,c   (passthrough, deduped)
   suite.py --file ids.txt          -> reads newline/comma-separated ids
   suite.py                         -> full Verified (needs `datasets`)
@@ -28,34 +36,12 @@ import argparse
 import os
 import sys
 
-# The Mini-10 django ids (RUNBOOK §5) — hardcoded so the smoke/mini path needs no
-# HF download. Keep in sync with e2e/econ/fly-remote/fullresolve/RUNBOOK.md.
-MINI_IDS = [
-    f"django__django-{n}"
-    for n in (
-        "11790", "11815", "11848", "11880", "11885",
-        "11951", "11964", "11999", "12039", "12050",
-    )
-]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import benchmarks  # noqa: E402  — sibling module, the benchmark-aware id source
 
-VERIFIED = "princeton-nlp/SWE-bench_Verified"
-LITE = "princeton-nlp/SWE-bench_Lite"
-
-
-def _hf_ids(dataset, split):
-    """All instance_ids in an HF SWE-bench dataset split."""
-    try:
-        from datasets import load_dataset
-    except Exception as e:  # ImportError or a broken install
-        sys.stderr.write(
-            f"suite.py: the `datasets` package is required for this suite "
-            f"({dataset}): {e}\n"
-            f"  pip install datasets   "
-            f"(not needed for --suite mini or explicit --tasks/--file)\n"
-        )
-        sys.exit(2)
-    ds = load_dataset(dataset, split=split)
-    return [r["instance_id"] for r in ds]
+# Kept for back-compat with anything importing suite.MINI_IDS directly; the
+# canonical list now lives in benchmarks._VERIFIED_MINI10.
+MINI_IDS = list(benchmarks._VERIFIED_MINI10)
 
 
 def _split_ids(s):
@@ -69,24 +55,16 @@ def _read_file(path):
 
 
 def resolve(suite=None, tasks=None, tasks_file=None, dataset=None, split="test"):
-    """Return the ordered, deduped instance-id list for the given selectors."""
+    """Return the ordered, deduped instance-id list for the given selectors.
+
+    Explicit --tasks/--file win; otherwise the suite selector is resolved by the
+    benchmark-aware `benchmarks.resolve_ids` (verified/lite/pro/terminal + minis)."""
     if tasks:
         ids = _split_ids(tasks)
     elif tasks_file:
         ids = _read_file(tasks_file)
     else:
-        s = (suite or "full").lower()
-        if s in ("full", "verified"):
-            ids = _hf_ids(dataset or VERIFIED, split)
-        elif s == "mini":
-            ids = list(MINI_IDS)
-        elif s == "lite":
-            ids = _hf_ids(dataset or LITE, split)
-        else:
-            sys.stderr.write(
-                f"suite.py: unknown suite '{suite}' (full|verified|mini|lite)\n"
-            )
-            sys.exit(2)
+        ids = benchmarks.resolve_ids(suite, dataset, split)
 
     seen = set()
     out = []

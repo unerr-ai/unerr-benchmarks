@@ -28,14 +28,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       docker.io git curl ca-certificates procps iproute2 jq \
  && rm -rf /var/lib/apt/lists/*
 
+# Docker Compose V2 CLI plugin. Debian's `docker.io` ships the engine + CLI but
+# NOT the `docker compose` subcommand, and the Terminal-Bench (Harbor) harness
+# orchestrates every task's environment with `docker compose --project-name ...`
+# (Compose V2 syntax). Without the plugin, `docker compose` is parsed as `docker`
+# with `compose` as an unknown positional -> `--project-name` is rejected as a
+# global flag (rc=125) -> Harbor raises RuntimeError at env setup and the agent
+# never runs (n_trials=0). Install the V2 binary into a CLI-plugins search dir so
+# `docker compose` works for the harness_terminal flow (no-op for verified/pro).
+RUN mkdir -p /usr/libexec/docker/cli-plugins \
+ && curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+      -o /usr/libexec/docker/cli-plugins/docker-compose \
+ && chmod +x /usr/libexec/docker/cli-plugins/docker-compose \
+ && docker compose version
+
 WORKDIR /work
 
 # Grading + dataset deps in a venv (the swebench harness pulls a heavy tree).
 # aiohttp = the coordinator queue server; requests = the worker HTTP client;
-# swebench + datasets = per-worker in-place resolve/grade. One venv, both roles.
+# swebench + datasets = per-worker in-place resolve/grade; boto3 = the
+# coordinator's end-of-run Tigris archive upload (tools/tigris_archive.py).
+# One venv, both roles.
 RUN python -m venv /work/.venv \
  && /work/.venv/bin/pip install --no-cache-dir --upgrade pip \
- && /work/.venv/bin/pip install --no-cache-dir "swebench>=4.1" datasets aiohttp requests
+ && /work/.venv/bin/pip install --no-cache-dir "swebench>=4.1" datasets aiohttp requests \
+      pandas tqdm docker boto3
 
 # ── arm pipeline (econ) — mirror the single-machine Dockerfile's layout ────────
 # run-benchmark.py builds each instance image with context = its own dir
@@ -67,6 +84,72 @@ COPY distributed/coordinator/coordinator-entrypoint.sh /work/distributed/coordin
 # Shared tools (Slice E/D): suite resolver + per-instance report merge.
 COPY distributed/tools/suite.py            /work/distributed/tools/suite.py
 COPY distributed/tools/merge-reports.py    /work/distributed/tools/merge-reports.py
+# Benchmark descriptor registry (verified|pro|terminal) — the SINGLE source of truth
+# imported by BOTH suite.py and worker-loop.py (via sys.path /work/distributed/tools).
+# worker-loop.py does `import benchmarks` at load, so this COPY is load-bearing.
+COPY distributed/tools/benchmarks.py       /work/distributed/tools/benchmarks.py
+# SWE-bench Pro grade adapter (worker._grade -> grade_module=grade_pro) + Scale AI's
+# vendored evaluator, run offline: swe_bench_pro_eval.py + helper_code/ + dockerfiles/
+# + run_scripts/ + the eval snapshot. benchmarks.py _PRO["ids_jsonl"] expects the
+# jsonl at exactly /work/swebench-pro/sweap_eval_full_v2.jsonl.
+COPY distributed/tools/grade_pro.py        /work/distributed/tools/grade_pro.py
+COPY distributed/swebench-pro              /work/swebench-pro
+# SWE-bench-Live grade adapter (worker._grade -> grade_module=grade_live,
+# benchmarks.py _LIVE_VERIFIED) + SWE-bench-Live's OWN evaluator, pinned. Two
+# non-obvious requirements, both learned from a failed smoke:
+#  1. launch/ is a git SUBMODULE (github.com/microsoft/RepoLaunch) that
+#     evaluation.evaluation imports at module load — a plain clone leaves it
+#     EMPTY (ModuleNotFoundError: launch.core), so init submodules recursively.
+#  2. SWE-bench-Live's package is NAMED `swebench` (v1.0.0, a fork), so a
+#     `pip install -e .` into /work/.venv would CLOBBER the real swebench>=4.1
+#     the Verified/Pro grade path depends on. Install it into an ISOLATED venv
+#     /work/.venv-live instead; grade_live.py shells that venv's python.
+RUN git clone https://github.com/microsoft/SWE-bench-Live.git /work/swebench-live \
+ && cd /work/swebench-live \
+ && git checkout 70ec57e852e3f2d195790fe71f553e272c691833 \
+ && git submodule update --init --recursive \
+ && python -m venv /work/.venv-live \
+ && /work/.venv-live/bin/pip install --no-cache-dir --upgrade pip \
+ && /work/.venv-live/bin/pip install --no-cache-dir -e .
+COPY distributed/tools/grade_live.py       /work/distributed/tools/grade_live.py
+# Terminal-Bench (Harbor) harness adapter (worker._run_harness -> harness_module=
+# harness_terminal). The Harbor framework + the terminal-bench-2-1 (2.1) task set are added
+# in a separate layer below so a harbor bump doesn't reinstall the swebench tree.
+COPY distributed/tools/harness_terminal.py /work/distributed/tools/harness_terminal.py
+# Coordinator end-of-run Tigris archive uploader — coordinator-entrypoint.sh §6.9
+# (generate overview.json + submission) and §8 (S3 upload) both run only when
+# ARCHIVE_PY=/work/distributed/tools/tigris_archive.py exists. LOAD-BEARING: the
+# entrypoint guards both on `[ -f "$ARCHIVE_PY" ]`, so a missing COPY silently
+# skips the entire archive (no overview.json in the bundle, empty Tigris bucket).
+COPY distributed/tools/tigris_archive.py   /work/distributed/tools/tigris_archive.py
+# The submission builder tigris_archive.py §6.9 loads via importlib from its own
+# dir (_TOOLS_DIR/make_submission.py). Also LOAD-BEARING: without this COPY the
+# generate step catches FileNotFoundError and ships the bundle with NO submission/.
+COPY distributed/tools/make_submission.py  /work/distributed/tools/make_submission.py
+# make_submission.py importlib-loads collect-failed.py from its own dir; without
+# this COPY submission generation raises FileNotFoundError (caught → empty
+# submission/ + a non-zero exit that trips the archive_failed beacon). Last of the
+# runtime-loaded-tool COPYs — a full audit confirmed the other 21 are covered.
+COPY distributed/tools/collect-failed.py   /work/distributed/tools/collect-failed.py
+
+# ── Terminal-Bench toolbox: Harbor CLI + the terminal-bench-2-1 (2.1) task set ──
+# Harbor runs each task's own environment/Dockerfile at RUN time (needs the worker's
+# in-VM dockerd; a task's base image e.g. `FROM ubuntu:24.04` pulls from Docker Hub —
+# there is NO per-instance prebuilt image and nothing to mirror, unlike pro/verified).
+# The 2.1 task set is a Harbor REGISTRY dataset (terminal-bench/terminal-bench-2-1, 89
+# tasks) — NOT a public github repo — so we vendor it at build via `harbor dataset
+# download` (shallow sparse clones; nests tasks under <out>/terminal-bench-2-1/) and
+# keep the harness's local `--path <task_dir>` per-task model. Only task.toml dirs move
+# in. TB_TASKS_DIR can override at runtime.
+RUN /work/.venv/bin/pip install --no-cache-dir harbor
+RUN /work/.venv/bin/harbor dataset download terminal-bench/terminal-bench-2-1 -o /tmp/tb21 \
+ && mkdir -p /work/terminal-bench/tasks \
+ && for d in /tmp/tb21/terminal-bench-2-1/*/; do [ -f "$d/task.toml" ] && mv "$d" /work/terminal-bench/tasks/ || true; done \
+ && rm -rf /tmp/tb21 \
+ && echo "terminal-bench 2.1 tasks vendored: $(ls /work/terminal-bench/tasks | wc -l)"
+# SWE-bench Verified difficulty tiers — worker-loop reads these (DIFFICULTY_DIR)
+# to set a per-instance resolve ceiling (easy/medium 3h, hard 5h, veryhard 8h).
+COPY swebench-verified-difficulty/*.ids.txt /work/swebench-verified-difficulty/
 
 RUN chmod +x \
       /work/lib/boot.sh \

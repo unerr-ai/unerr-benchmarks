@@ -7,12 +7,20 @@ A single-file, stdlib-only work queue: a ThreadingHTTPServer fronting a SQLite
 completion; a background reaper requeues leases whose heartbeat went stale so a
 crashed worker's instance is retried by a survivor.
 
+Failure-rerun (sibling of the stale-lease reaper, but keyed on MAX_ATTEMPTS
+exhaustion via /fail rather than heartbeat staleness): once the fresh `pending`
+queue is drained, Queue.claim gives a `failed` instance up to MAX_FAILURE_RERUN
+more tries; a rerun's eventual /complete overwrites the earlier failure in
+place. MAX_FAILURE_RERUN=0 disables it (current/original behaviour: exhausted
+attempts dead-letter straight to `dead`).
+
 Stdlib only (http.server + sqlite3 + json + threading) so the coordinator image
 stays minimal and dependency-free. PLAN.md mentions aiohttp aspirationally;
 ThreadingHTTPServer + a single write lock is simpler and needs no install.
 
 Config via env: PORT (8080), DB_PATH (/data/queue.db), LEASE_TTL (2700s),
-MAX_ATTEMPTS (2), HEARTBEAT_TIMEOUT (120s), REAPER_INTERVAL (30s).
+MAX_ATTEMPTS (2), HEARTBEAT_TIMEOUT (120s), REAPER_INTERVAL (30s),
+MAX_FAILURE_RERUN (1).
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ class Config:
     max_attempts: int
     heartbeat_timeout: int
     reaper_interval: int
+    max_failure_rerun: int
     armed: bool
 
     @classmethod
@@ -55,6 +64,11 @@ class Config:
             max_attempts=int(os.environ.get("MAX_ATTEMPTS", "2")),
             heartbeat_timeout=int(os.environ.get("HEARTBEAT_TIMEOUT", "120")),
             reaper_interval=int(os.environ.get("REAPER_INTERVAL", "30")),
+            # Failure-rerun (parameterable, sibling of the stale-lease reaper):
+            # once the fresh queue is drained, retry a 'failed' (attempts-
+            # exhausted) instance up to this many more times. 0 = disabled,
+            # matching the original dead-letter-on-exhaustion behaviour.
+            max_failure_rerun=int(os.environ.get("MAX_FAILURE_RERUN", "1")),
             # Prepare/run gate: default 1 → coordinator is armed from boot, so the
             # all-in-one path is unchanged. `prepare` boots workers with COORD_ARMED=0
             # so they warm and hold until an external POST /arm releases the fleet.
@@ -133,7 +147,7 @@ class Queue:
 
     # -- reads (lock held by caller) --------------------------------------- #
     def _counts(self) -> dict[str, int]:
-        counts = {"pending": 0, "leased": 0, "done": 0, "dead": 0}
+        counts = {"pending": 0, "leased": 0, "done": 0, "dead": 0, "failed": 0}
         for status, n in self._conn.execute(
             "SELECT status, COUNT(*) FROM tasks GROUP BY status"
         ).fetchall():
@@ -159,30 +173,58 @@ class Queue:
     def claim(self, worker_id: str) -> dict[str, Any]:
         """Atomically lease one claimable row (pending or lease-expired).
 
-        Returns `{instance_id}` on success. When nothing is claimable it
-        distinguishes `{done:true}` (queue truly drained — no pending and no
-        leased rows) from `{wait:true}` (leased rows still in flight, so the
-        worker should poll again shortly).
+        Returns `{instance_id}` on success. When the fresh queue has nothing
+        claimable, and MAX_FAILURE_RERUN>0, it makes ONE attempt to pull a
+        `failed` (attempts-exhausted) instance back for another try — the
+        failure-rerun mechanism, a sibling of the stale-lease reap below but
+        keyed on `fail_reruns` instead of heartbeat staleness, and deliberately
+        gated on `pending==0` so fresh work always drains first (end-of-run
+        only). Failing that too, it distinguishes `{done:true}` (queue truly
+        drained — no pending, no leased, no failed row with rerun budget left)
+        from `{wait:true}` (leased rows still in flight, or armed-but-idle, so
+        the worker should poll again shortly).
         """
         now = int(time.time())
         lease_until = now + self._cfg.lease_ttl
+        lease_sql = (
+            "UPDATE tasks SET status='leased', worker_id=?, "
+            "  attempt_count=attempt_count+1, lease_until=?, last_heartbeat=? "
+            "WHERE instance_id = ("
+            "  SELECT instance_id FROM tasks "
+            "  WHERE status='pending' OR (status='leased' AND lease_until < ?) "
+            "  ORDER BY attempt_count, instance_id LIMIT 1) "
+            "RETURNING instance_id"
+        )
         with self._lock:
             self._workers_seen.add(worker_id)
             if not self._armed:
                 # Warm but not released yet: keep the worker in its poll loop
                 # (wait, not done) so it stays alive until the run is armed.
                 return {"wait": True}
-            row = self._conn.execute(
-                "UPDATE tasks SET status='leased', worker_id=?, "
-                "  attempt_count=attempt_count+1, lease_until=?, last_heartbeat=? "
-                "WHERE instance_id = ("
-                "  SELECT instance_id FROM tasks "
-                "  WHERE status='pending' OR (status='leased' AND lease_until < ?) "
-                "  ORDER BY attempt_count, instance_id LIMIT 1) "
-                "RETURNING instance_id",
-                (worker_id, lease_until, now, now),
-            ).fetchone()
+            row = self._conn.execute(lease_sql, (worker_id, lease_until, now, now)).fetchone()
             self._conn.commit()
+            if row is None:
+                counts = self._counts()
+                if counts["pending"] == 0 and self._cfg.max_failure_rerun > 0:
+                    frow = self._conn.execute(
+                        "UPDATE tasks SET status='pending', fail_reruns=fail_reruns+1 "
+                        "WHERE instance_id = ("
+                        "  SELECT instance_id FROM tasks "
+                        "  WHERE status='failed' AND fail_reruns < ? "
+                        "  ORDER BY instance_id LIMIT 1) "
+                        "RETURNING instance_id",
+                        (self._cfg.max_failure_rerun,),
+                    ).fetchone()
+                    self._conn.commit()
+                    if frow is not None:
+                        log("failure_rerun", worker_id=worker_id, instance_id=frow[0])
+                        # Fresh 'pending' row exists now (and only this one, since
+                        # counts["pending"] was 0 a moment ago under the same
+                        # lock) — the primary lease query picks it up next.
+                        row = self._conn.execute(
+                            lease_sql, (worker_id, lease_until, now, now)
+                        ).fetchone()
+                        self._conn.commit()
             if row is not None:
                 instance_id = row[0]
                 log("claim", worker_id=worker_id, instance_id=instance_id)
@@ -222,18 +264,29 @@ class Queue:
         err_txt: Optional[str] = None,
         db_b64: Optional[str] = None,
         engine_log: Optional[str] = None,
+        trajectory_json: Optional[str] = None,
+        sessions_cast: Optional[str] = None,
+        harbor_run_log: Optional[str] = None,
     ) -> dict[str, bool]:
         """Idempotent completion upsert: mark `done` and store the results.
 
         Accepted even if the lease already expired — at-least-once delivery plus
-        an idempotent overwrite makes a double-run effectively-once.
+        an idempotent overwrite makes a double-run effectively-once. The UPDATE
+        is unconditional on prior status, so a failure-rerun's success overwrites
+        an earlier `failed` row's patch/report_json/meta_json/resolved/artifacts
+        in place — the bundle reflects the rerun's outcome, not the original fail.
 
         events_jsonl/err_txt/db_b64 (S7b) and engine_log (S7c: the full,
         tail-capped econ engine log — orchestration markers) are the instance's
         raw transcript — optional, since the worker bounds/omits them (see
         worker-loop.py _read_artifacts) — stored verbatim so
         coordinator-entrypoint.sh can write them back out under
-        results/<label>/artifacts/<iid>/ at drain.
+        results/<label>/artifacts/<iid>/ at drain. trajectory_json/sessions_cast
+        are the harness_run (Terminal) equivalents (Harbor agent trajectory +
+        asciinema session); harbor_run_log is Harbor's own captured stdout+stderr
+        (the only place a SETUP-phase RuntimeError, raised before the agent ever
+        runs, is captured) — benchmarks the worker never sends any of these leave
+        the columns NULL.
         """
         now = int(time.time())
         resolved_int = _as_int_bool(resolved)
@@ -241,7 +294,9 @@ class Queue:
             cur = self._conn.execute(
                 "UPDATE tasks SET status='done', patch=?, report_json=?, "
                 "  meta_json=?, resolved=?, events_jsonl=?, err_txt=?, db_b64=?, "
-                "  engine_log=?, completed_by=?, completed_at=? "
+                "  engine_log=?, trajectory_json=?, sessions_cast=?, "
+                "  harbor_run_log=?, "
+                "  completed_by=?, completed_at=? "
                 "WHERE instance_id=?",
                 (
                     patch,
@@ -252,6 +307,9 @@ class Queue:
                     err_txt,
                     db_b64,
                     engine_log,
+                    trajectory_json,
+                    sessions_cast,
+                    harbor_run_log,
                     worker_id,
                     now,
                     instance_id,
@@ -269,13 +327,16 @@ class Queue:
         return {"ok": True}
 
     def fail(self, instance_id: str, worker_id: str, error: Any) -> dict[str, str]:
-        """Requeue a failed instance, or dead-letter it once attempts are spent.
+        """Requeue a failed instance, or park/dead-letter it once attempts are spent.
 
         attempt_count was already incremented at claim, so it is only read here:
-        `>= MAX_ATTEMPTS` → `dead`, otherwise back to `pending`. The error is also
-        persisted into `failure_reason` (capped) so a dead instance's cause is
-        durably queryable — not just in server.log, which requires SSH+grep and
-        doesn't survive the coordinator machine.
+        `>= MAX_ATTEMPTS` → `failed` (if MAX_FAILURE_RERUN>0 — claim() may still
+        rerun it at end-of-run, spending one unit of `fail_reruns` each time) or
+        `dead` (MAX_FAILURE_RERUN=0, the original behaviour), otherwise back to
+        `pending`. The error is also persisted into `failure_reason` (capped) so
+        a dead/failed instance's cause is durably queryable — not just in
+        server.log, which requires SSH+grep and doesn't survive the coordinator
+        machine.
         """
         with self._lock:
             row = self._conn.execute(
@@ -284,7 +345,10 @@ class Queue:
             if row is None:
                 status = "pending"
             else:
-                status = "dead" if row[0] >= self._cfg.max_attempts else "pending"
+                if row[0] >= self._cfg.max_attempts:
+                    status = "failed" if self._cfg.max_failure_rerun > 0 else "dead"
+                else:
+                    status = "pending"
                 reason = str(error)[:8000] if error is not None else None
                 self._conn.execute(
                     "UPDATE tasks SET status=?, worker_id=NULL, lease_until=NULL, "
@@ -336,17 +400,38 @@ class Queue:
             "instances": instances,
         }
 
+    def _pending_reruns(self) -> int:
+        """Count of `failed` rows still under the MAX_FAILURE_RERUN budget.
+
+        Read-only helper shared by `drain()` and `claim()`'s done-check — a
+        `failed` row with `fail_reruns < MAX_FAILURE_RERUN` is NOT terminal yet
+        (claim() will still requeue it), so callers must not treat it as done.
+        0 whenever failure-rerun is disabled (MAX_FAILURE_RERUN<=0), matching
+        the original behaviour where `failed` never exists as a status.
+        """
+        if self._cfg.max_failure_rerun <= 0:
+            return 0
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status='failed' AND fail_reruns < ?",
+            (self._cfg.max_failure_rerun,),
+        ).fetchone()[0]
+
     def drain(self) -> dict[str, bool]:
-        """`{drained:true}` once ARMED and no pending and no leased rows remain.
+        """`{drained:true}` once ARMED, no pending/leased rows, and no `failed`
+        row still has failure-rerun budget left.
 
         The `armed` guard means an un-released (prepare-phase) queue — seeded but
         not yet armed, or momentarily empty — never reads as drained, so the
-        coordinator won't aggregate/bundle before the run is released."""
+        coordinator won't aggregate/bundle before the run is released. The
+        failure-rerun guard means the entrypoint's drain-wait won't bundle out
+        from under a `failed` instance that claim() would still retry."""
         with self._lock:
             armed = self._armed
             counts = self._counts()
+            pending_reruns = self._pending_reruns()
         return {
             "drained": armed and counts["pending"] == 0 and counts["leased"] == 0
+            and pending_reruns == 0
         }
 
     def arm(self) -> dict[str, Any]:
@@ -458,6 +543,9 @@ class Handler(BaseHTTPRequestHandler):
             body.get("err_txt"),
             body.get("db_b64"),
             body.get("engine_log"),
+            body.get("trajectory_json"),
+            body.get("sessions_cast"),
+            body.get("harbor_run_log"),
         )
 
     def _post_fail(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -519,6 +607,21 @@ def open_db(cfg: Config) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     with open(SCHEMA_FILE, encoding="utf-8") as fh:
         conn.executescript(fh.read())
+    # Guarded migration: CREATE TABLE IF NOT EXISTS above only shapes a brand-new
+    # DB. A coordinator restarting on an EXISTING db.sqlite (pre-failure-rerun)
+    # is missing `fail_reruns` — ALTER TABLE has no IF NOT EXISTS for columns, so
+    # check pragma table_info first (idempotent, safe to run every boot).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "fail_reruns" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN fail_reruns INTEGER NOT NULL DEFAULT 0")
+    # Same guarded migration for the harness_run (Terminal) trace columns — a
+    # coordinator restarting on a pre-Terminal db.sqlite is missing these.
+    if "trajectory_json" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN trajectory_json TEXT")
+    if "sessions_cast" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN sessions_cast TEXT")
+    if "harbor_run_log" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN harbor_run_log TEXT")
     conn.commit()
     return conn
 
@@ -570,6 +673,7 @@ def main() -> None:
         max_attempts=cfg.max_attempts,
         heartbeat_timeout=cfg.heartbeat_timeout,
         reaper_interval=cfg.reaper_interval,
+        max_failure_rerun=cfg.max_failure_rerun,
     )
     try:
         server.serve_forever()
