@@ -17,9 +17,13 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
   `ORG` to the non-functional placeholder `your-fly-org`; an unset `FLY_ORG` fails at app-create with
   `organization your-fly-org not found`. App `swebench-agent-dist` (fixed; every run is scoped by
   `fleet=<LABEL>` machine metadata, not a separate app per run).
-- **Web search OFF** (baseline-comparable): the launcher exports `EXA_API_KEY` unset unless
-  `WEBSEARCH=1` — same rule as the single-machine econ runbook. SWE-bench fixes are public on
-  GitHub → an enabled web search is answer-lookup.
+- **Web search: `ARM=econ` = Exa ON by default** (the econ agent ships Exa web search default-on
+  across all tiers/personas), so **every econ benchmark run is a web-on result class**. The launcher
+  sources `EXA_API_KEY` from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`,
+  and injects it into workers. Set **`WEBSEARCH=0` to force a clean, baseline-comparable (no-web)**
+  econ run (SWE-bench fixes are public on GitHub → web search = answer-lookup, so never compare a
+  web-on run 1:1 against a no-web baseline or submit it). `ARM=claude` stays STRICT opt-in
+  (`WEBSEARCH=1` → Tavily).
 - **econ conductor = minimax-m3** for the econ arm (matches the single-machine baseline config).
 - **`LABEL` MUST be unique per run.** It names the fleet metadata (`fleet=<LABEL>`), the coordinator's
   `RUN_ID`, the coordinator volume (`dist_coord_<LABEL>`), and the local out-dir
@@ -322,6 +326,13 @@ confusingly named `swebench` v1.0.0 and a shared-venv `pip install -e .` would *
 `ModuleNotFoundError: launch.core` at grade time). `grade_live.py` shells `/work/.venv-live/bin/python`.
 `SUITE=live_verified-mini` is the 5-id smoke set. The arm axis is orthogonal — both `econ` and
 `claude` run it.
+
+**Disk:** `live_verified` auto-defaults `ROOTFS_GB=50` (fly's max) when the operator hasn't set it —
+its per-instance footprint (the large `starryzhang/*` eval images plus `grade_live` cloning/extracting
+into the worker's OUTER rootfs) overflows fly's 8 GB default and ENOSPCs every task (proven live:
+run `seq-live-0718` lost 4/5 tasks to `OSError: [Errno 28] No space left on device` at 8 GB). Verified/
+Pro/Terminal fit in 8 GB and are unaffected — same disk class as the Claude `ROOTFS_GB=50` fleet fix
+(§0). Set `ROOTFS_GB` explicitly to override.
 
 **Pro** — vendored ids + mirrored images, longer timeout:
 ```bash

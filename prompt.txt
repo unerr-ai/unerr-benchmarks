@@ -1,0 +1,160 @@
+================================================================================
+FULL DISTRIBUTED BENCHMARK RUN — prepare → PROCEED gate → run → rerun → Tigris
+================================================================================
+Paste this whole file to Claude Code (run it from the repo root). It runs ONE
+arm × benchmark combination as a FULL benchmark (all tasks), with a mandatory
+human go-ahead gate between preparation and execution.
+
+--------------------------------------------------------------------------------
+INPUTS  (ask me for any not given, then echo them back before doing anything)
+--------------------------------------------------------------------------------
+  ARM        = econ | claude                         (required)
+  BENCHMARK  = verified | pro | terminal | live_verified | lite   (required)
+  WORKERS    = <integer>   number of worker machines (required — I take this as input)
+  IMAGE      = <registry ref>  (optional) reuse a prebuilt image to skip the bake;
+               OMIT to bake fresh from live source (uses the latest coordinator +
+               agent code — recommended for a real full run)
+  GRADE_RERUN       = 1   (default) rerun budget for GRADED failures (resolved=0)
+  MAX_FAILURE_RERUN = 1   (default) coordinator rerun budget for EXECUTION failures
+
+--------------------------------------------------------------------------------
+HARD RULES  (do not violate)
+--------------------------------------------------------------------------------
+0. USE WHAT ALREADY EXISTS. This repo has authored, verified runbooks and scripts for
+   every step below — FOLLOW THEM, do not reinvent. Read the relevant README first,
+   reuse the existing tool, and only extend a tool (never write a throwaway parser) if
+   a genuine gap exists. Authoritative sources (read before acting):
+     - e2e/distributed/README.md — the orchestration hub: BENCHMARK axis, prepare/run/
+       arm split, run-distributed.sh, bench.sh matrix, status.sh, debug-workers.sh,
+       §8 matrix, §8.2 live_verified, §9 Tigris archive.
+     - e2e/distributed/tools/benchmarks.py — the per-benchmark contract
+       (dataset / images / grade module / timeout / traces / flow).
+     - e2e/reference/claude/fly-remote/README.md — the claude-arm runbook (ROOTFS_GB=50,
+       CPU_KIND, model map, §11 result scripts: pull_results / cost_report / make_submission).
+     - CLAUDE.md "Benchmark runbooks" section — the index of all of the above.
+   Existing scripts to reuse (do NOT hand-roll equivalents): run-distributed.sh
+   (prepare|run|arm), bench.sh (matrix), status.sh, debug-workers.sh, download-all.sh,
+   tools/tigris-archive.sh, tools/tigris_archive.py, tools/fleet-common.sh, gpu-flip.sh.
+   RULE (from CLAUDE.md): when you change the run flow / model map / result scripts,
+   update the matching README in the SAME change.
+1. FULL run: SUITE=full (every task in the benchmark). Do NOT smoke-limit.
+2. GATE: after prepare completes, STOP and ask me to proceed. Do NOT arm / run /
+   raise any GPU until I reply "proceed" (or "go"). Preparation only up to the gate.
+3. Persist every run (main + rerun) to Tigris (ARCHIVE_TIGRIS=1, bucket
+   swebench-dist-archive). The coordinator "tigris archive: done" log is OPTIMISTIC —
+   ALWAYS verify object count > 0 with `aws s3api list-objects-v2` and backfill from
+   the local bundle if it wrote 0.
+4. Detach every launcher: `nohup env ... ./run-distributed.sh <mode> > LOG 2>&1 & disown`
+   so a harness reap of the launching shell can't kill the run.
+5. NEVER edit run-distributed.sh (or any script) while a launcher is running it
+   (`pgrep -fl run-distributed.sh` first) — it corrupts the live byte-offset read.
+6. FLY_ORG=vamsee-k-933 (team org). Never print secrets (only lengths).
+7. live_verified only: EXCLUDE the gold-ungradeable pylint family
+   (pylint-dev__pylint-9771 / 9772 / 9785 — their own gold patch fails); ROOTFS_GB
+   auto-defaults to 50 (large starryzhang images + grade_live overflow the 8GB rootfs).
+8. Cost is ALWAYS real LiteLLM spend, never Anthropic-list pricing.
+
+--------------------------------------------------------------------------------
+STEP 1 — PREPARE  (build the fleet, hold it idle; NO work runs yet)
+--------------------------------------------------------------------------------
+  cd e2e/distributed
+  LABEL=<ARM>-<BENCHMARK>-full-$(date +%m%d-%H%M%S)      # unique per run
+  nohup env \
+    FLY_ORG=vamsee-k-933 \
+    ARM=<ARM> BENCHMARK=<BENCHMARK> \
+    LABEL=$LABEL MACHINES=<WORKERS> \
+    SUITE=full \
+    MAX_FAILURE_RERUN=<MAX_FAILURE_RERUN> \
+    ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive \
+    [ROOTFS_GB=50 only if BENCHMARK=live_verified — else omit; it auto-defaults] \
+    [IMAGE=<ref> only if reusing a prebuilt image — else omit to bake fresh] \
+    ./run-distributed.sh prepare > out/$LABEL.prepare.log 2>&1 & disown
+
+  `prepare` builds/pulls the image, creates the coordinator (COORD_ARMED=0 → /claim
+  holds at {wait}) and <WORKERS> warm-idle workers, and SEEDS all tasks. It does NOT
+  run, poll, or tear down — it holds.
+
+  Wait for prepare to finish, then confirm readiness from /status:
+    - coordinator created; workers_seen == WORKERS; armed == false;
+    - counts.pending == <total task count for the benchmark>; 0 dead/failed.
+  (Poll the prepare log / coordinator /status; reuse the status.py-style extractor.)
+
+--------------------------------------------------------------------------------
+STEP 2 — PROCEED GATE  (mandatory human go-ahead)
+--------------------------------------------------------------------------------
+  Report exactly:
+    "Fleet <LABEL> PREPARED — <WORKERS> workers warm+idle, <N> tasks queued,
+     armed=false, Tigris archive on, image=<baked fresh | reused <ref>>.
+     Reply 'proceed' to arm the coordinator and start the full run."
+  Then STOP. Do not arm/run until I reply proceed/go. If I say wait/hold, leave the
+  fleet prepared (it idles cheaply) and do nothing further.
+
+--------------------------------------------------------------------------------
+STEP 3 — RUN  (on my go-ahead: arm, process ALL tasks to completion, archive)
+--------------------------------------------------------------------------------
+  cd e2e/distributed
+  nohup env FLY_ORG=vamsee-k-933 LABEL=$LABEL \
+    ./run-distributed.sh run > out/$LABEL.run.log 2>&1 & disown
+
+  `run` attaches to the prepared fleet, POSTs /arm (workers begin claiming), raises a
+  dedicated GPU only if DEDICATED_CONDUCTOR=1, then polls until the queue drains,
+  grades, bundles, archives to Tigris, and tears the fleet down.
+    - Monitor to completion (status.py; watch dead / failed / "No space left").
+    - EXECUTION failures (no/empty patch, crash, timeout → status=failed) auto-rerun
+      up to MAX_FAILURE_RERUN and a post-drain pass — the coordinator handles these;
+      a success overwrites the failure in place.
+
+--------------------------------------------------------------------------------
+STEP 4 — GRADE-FAILURE RERUN  (GRADE_RERUN=1; explicit pass — NOT a coordinator knob)
+--------------------------------------------------------------------------------
+  IMPORTANT: the built-in retry covers ONLY execution failures. GRADED failures
+  (a real patch that scored resolved=0 → status='done') are TERMINAL in the
+  coordinator, so honor GRADE_RERUN with an explicit rerun pass:
+
+  1. From the drained coordinator (or the pulled bundle's queue.db / merged report),
+     collect instance_ids with status='done' AND resolved=0 = genuine grade failures.
+     For live_verified, DROP the known-ungradeable pylint ids (9771/9772/9785); if any
+     other id looks suspicious, gold-grade it (scratchpad goldgrade driver) before
+     counting it a real failure.
+  2. If there are any and GRADE_RERUN budget remains (default 1): write the failed ids
+     to a TASKS_FILE and launch ONE rerun fleet for just those ids with the SAME env:
+       LABEL=$LABEL-graderr-$(date +%H%M%S)
+       nohup env FLY_ORG=vamsee-k-933 ARM=<ARM> BENCHMARK=<BENCHMARK> \
+         LABEL=$LABEL-graderr-... MACHINES=<min(WORKERS, #failed)> \
+         TASKS_FILE=<failed.ids> MAX_FAILURE_RERUN=1 \
+         ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive \
+         [ROOTFS_GB=50 if live] [IMAGE=<same ref> if reused] \
+         ./run-distributed.sh > out/$LABEL-graderr.log 2>&1 & disown   # all-in-one
+     A resolved=1 on rerun supersedes the earlier resolved=0 for that id.
+  3. Archive the rerun and VERIFY object count > 0 in Tigris.
+
+--------------------------------------------------------------------------------
+STEP 5 — FINAL REPORT + HYGIENE
+--------------------------------------------------------------------------------
+  - Combined scoreboard: resolved/total and % (main run, with grade-rerun applied),
+    per-instance verdicts for failures, real LiteLLM cost total + by-tier
+    (conductor/oracle/reasoner/executor), turns.
+  - Tigris: list the archived labels (main + any graded-rerun) and confirm each has
+    objects. Retrieve later with:
+      ./tools/tigris-archive.sh list | overview <label> | get <label>
+    Non-verified benchmarks get a run_id SUFFIX: the label to look up is
+    "<LABEL>-<benchmark>" (verified has NO suffix).
+  - Confirm no leftover fly machines on the arm's app (cost hygiene).
+  - Save a short result memory if anything non-obvious surfaced.
+
+--------------------------------------------------------------------------------
+MONITORING / DEBUG (read-only; take <LABEL> [APP], or --matrix, or no-arg=newest)
+--------------------------------------------------------------------------------
+  ./status.sh <LABEL>            # per-fleet /status one-liner; --watch, --cost, --instances
+  ./debug-workers.sh <LABEL>     # per-worker: what it holds + flyctl logs tail; --follow
+  App per arm: econ → swebench-agent-dist ; claude → (its dist app). Coordinator
+  queue.db has per-instance failure_reason / err_txt if a task fails.
+
+--------------------------------------------------------------------------------
+OPTIONAL — make grade-rerun a first-class coordinator knob
+--------------------------------------------------------------------------------
+  Step 4 is an orchestrated pass because the coordinator has no MAX_GRADE_RERUN. If
+  you want resolved=0 to auto-requeue inside the SAME fleet (no second fleet), ask me
+  to add a MAX_GRADE_RERUN knob to coordinator/server.py (re-queue resolved=0 up to N,
+  mirroring the execution-failure path) — it needs a fresh bake to take effect.
+================================================================================

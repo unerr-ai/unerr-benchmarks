@@ -101,6 +101,17 @@ if [ -n "$ROOTFS_GB" ] && [ "$ROOTFS_GB" -gt 50 ] 2>/dev/null; then
   echo "==> ROOTFS_GB=$ROOTFS_GB exceeds fly's 50 GB max — clamping to 50" >&2
   ROOTFS_GB=50
 fi
+# Benchmark-aware rootfs default: live_verified's per-instance footprint (the large
+# public starryzhang eval images + the grade_live harness cloning/extracting into
+# the OUTER rootfs) overflows fly's 8GB default rootfs and ENOSPCs every task, while
+# Verified/Pro/Terminal fit. Default live_verified to fly's 50GB max unless the
+# operator pinned ROOTFS_GB explicitly. (Proven: seq-live-0718 lost 4/5 to
+# "OSError [Errno 28] No space left on device" at 8GB; same disk class as the Claude
+# ROOTFS_GB=50 fleet fix.)
+if [ -z "$ROOTFS_GB" ] && [ "$BENCHMARK" = "live_verified" ]; then
+  ROOTFS_GB=50
+  echo "==> live_verified: defaulting ROOTFS_GB=50 (large eval images + grade_live overflow the 8GB default rootfs)" >&2
+fi
 
 # coordinator sizing (tiny — it only runs SQLite + aiohttp)
 COORD_SIZE="${COORD_SIZE:-shared-cpu-1x}"
@@ -447,26 +458,34 @@ if [ "$ARM" = "claude" ]; then
   echo "==> LITELLM_MASTER_KEY: set (len ${#LITELLM_MASTER_KEY})"
 fi
 
-# EXA web-search key — web search OFF by default for a clean, baseline-comparable
-# run (SWE-bench fixes are public → web search = answer-lookup). STRICTLY opt-in:
-# only WEBSEARCH=1 enables it. An ambient EXA_API_KEY in the shell env is IGNORED
-# (matches the single-machine runbook's `env -u EXA_API_KEY WEBSEARCH=0` invariant).
-if [ "${WEBSEARCH:-0}" = "1" ]; then
-  if [ -z "${EXA_API_KEY:-}" ] && [ -f "$ECON_DIR/.env.local" ]; then
-    EXA_API_KEY="$(grep -E '^EXA_API_KEY=' "$ECON_DIR/.env.local" | head -1 | sed 's/^EXA_API_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
+# EXA web-search key — the econ agent now ships Exa web search DEFAULT-ON across all
+# tiers/personas (econ-coding-agent: "default-on Exa web search across all tiers +
+# personas"), so the ECON arm enables Exa BY DEFAULT for EVERY benchmark; the claude
+# arm stays opt-in (Tavily below). Set WEBSEARCH=0 to force a clean, baseline-
+# comparable (no-web) econ run — web-on is a distinct result class. Key is sourced
+# from the econ repo's .env.local (canonical, where EXA_API_KEY is maintained), then
+# the arm pipeline dir, then any exported EXA_API_KEY.
+EXA_DEFAULT=0; [ "$ARM" = "econ" ] && EXA_DEFAULT=1
+if [ "${WEBSEARCH:-$EXA_DEFAULT}" = "1" ]; then
+  if [ -z "${EXA_API_KEY:-}" ]; then
+    for _envf in "$ECON_REPO/.env.local" "$ECON_DIR/.env.local"; do
+      [ -f "$_envf" ] || continue
+      EXA_API_KEY="$(grep -E '^EXA_API_KEY=' "$_envf" | head -1 | sed 's/^EXA_API_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
+      [ -n "$EXA_API_KEY" ] && break
+    done
   fi
   export EXA_API_KEY="${EXA_API_KEY:-}"
 else
-  export EXA_API_KEY=""   # ignore any ambient key unless WEBSEARCH=1
+  export EXA_API_KEY=""   # WEBSEARCH=0 → force web search off (baseline-comparable)
 fi
 [ -n "$EXA_API_KEY" ] \
-  && echo "==> EXA_API_KEY: set (len ${#EXA_API_KEY}) — web search ENABLED (NOT baseline-comparable)" \
-  || echo "==> EXA_API_KEY: unset — web search disabled (clean, baseline-comparable run)"
+  && echo "==> EXA_API_KEY: set (len ${#EXA_API_KEY}) — Exa web search ON (econ default${WEBSEARCH:+ · WEBSEARCH=$WEBSEARCH}; web-on result class)" \
+  || echo "==> EXA_API_KEY: unset — Exa web search OFF (baseline-comparable)"
 
 # TAVILY web-search key — the claude arm's search path (Tavily hosted MCP, wired
-# by run-instance.sh into the instance's .mcp.json). Same STRICT opt-in contract
-# as EXA above: only WEBSEARCH=1 enables it; an ambient TAVILY_API_KEY is IGNORED
-# otherwise. Web-on runs are a separate result class — label them accordingly.
+# by run-instance.sh into the instance's .mcp.json). STRICT opt-in (only WEBSEARCH=1
+# enables it; an ambient TAVILY_API_KEY is IGNORED otherwise) — UNLIKE the econ arm's
+# default-on Exa above. Web-on runs are a separate result class — label them accordingly.
 if [ "${WEBSEARCH:-0}" = "1" ]; then
   if [ -z "${TAVILY_API_KEY:-}" ] && [ -f "$ECON_DIR/.env.local" ]; then
     TAVILY_API_KEY="$(grep -E '^TAVILY_API_KEY=' "$ECON_DIR/.env.local" | head -1 | sed 's/^TAVILY_API_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
