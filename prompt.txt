@@ -28,7 +28,7 @@ HARD RULES  (do not violate)
        arm split, run-distributed.sh, bench.sh matrix, status.sh, debug-workers.sh,
        §8 matrix, §8.2 live_verified, §9 Tigris archive.
      - e2e/distributed/tools/benchmarks.py — the per-benchmark contract
-       (dataset / images / grade module / timeout / traces / flow).
+       (dataset / images / grade module / grade-cap / traces / flow).
      - e2e/reference/claude/fly-remote/README.md — the claude-arm runbook (ROOTFS_GB=50,
        CPU_KIND, model map, §11 result scripts: pull_results / cost_report / make_submission).
      - CLAUDE.md "Benchmark runbooks" section — the index of all of the above.
@@ -51,7 +51,13 @@ HARD RULES  (do not violate)
 6. FLY_ORG=vamsee-k-933 (team org). Never print secrets (only lengths).
 7. live_verified only: EXCLUDE the gold-ungradeable pylint family
    (pylint-dev__pylint-9771 / 9772 / 9785 — their own gold patch fails); ROOTFS_GB
-   auto-defaults to 50 (large starryzhang images + grade_live overflow the 8GB rootfs).
+   auto-defaults to 50 (large starryzhang images + grade_live overflow the 8GB rootfs);
+   the harness enforces NOTHING task-level (no per-instance wall-clock ceiling, no
+   difficulty tiers, no stall/progress watchdog) — the coding agent owns its own
+   watchdog/thrash detection. Fleet-level backstops still stand: coordinator
+   HEARTBEAT_TIMEOUT (dead-worker detection), MAXWAIT + NO_PROGRESS_GIVEUP (wedge
+   detection), and a grade-side subprocess cap (~24h, never-binding) — none of these
+   are task ceilings.
 8. Cost is ALWAYS real LiteLLM spend, never Anthropic-list pricing.
 
 --------------------------------------------------------------------------------
@@ -73,6 +79,13 @@ STEP 1 — PREPARE  (build the fleet, hold it idle; NO work runs yet)
   `prepare` builds/pulls the image, creates the coordinator (COORD_ARMED=0 → /claim
   holds at {wait}) and <WORKERS> warm-idle workers, and SEEDS all tasks. It does NOT
   run, poll, or tear down — it holds.
+
+  The run's app (`swebench-dist-<ARM>-<slug>`, slug = benchmark's `_`→`-` and `verified`→`verif`
+  — fly blocks app names containing "verified") is auto-created
+  here if it doesn't exist yet, and its Tigris AWS_* secrets are auto-staged from
+  `.env.tigris` (run `./provision-tigris.sh` once beforehand if it doesn't exist).
+  Each ARM×BENCHMARK combo owns its own app, so this is a fully standalone trigger —
+  a different combo can be prepared/run at any other time, fully in parallel.
 
   Wait for prepare to finish, then confirm readiness from /status:
     - coordinator created; workers_seen == WORKERS; armed == false;
@@ -139,7 +152,7 @@ STEP 5 — FINAL REPORT + HYGIENE
       ./tools/tigris-archive.sh list | overview <label> | get <label>
     Non-verified benchmarks get a run_id SUFFIX: the label to look up is
     "<LABEL>-<benchmark>" (verified has NO suffix).
-  - Confirm no leftover fly machines on the arm's app (cost hygiene).
+  - Confirm no leftover fly machines on the run's app (swebench-dist-<ARM>-<slug>) (cost hygiene).
   - Save a short result memory if anything non-obvious surfaced.
 
 --------------------------------------------------------------------------------
@@ -147,8 +160,8 @@ MONITORING / DEBUG (read-only; take <LABEL> [APP], or --matrix, or no-arg=newest
 --------------------------------------------------------------------------------
   ./status.sh <LABEL>            # per-fleet /status one-liner; --watch, --cost, --instances
   ./debug-workers.sh <LABEL>     # per-worker: what it holds + flyctl logs tail; --follow
-  App per arm: econ → swebench-agent-dist ; claude → (its dist app). Coordinator
-  queue.db has per-instance failure_reason / err_txt if a task fails.
+  App per (arm × benchmark): swebench-dist-<arm>-<slug> (slug = benchmark's '_'->'-' and 'verified'->'verif').
+  Coordinator queue.db has per-instance failure_reason / err_txt if a task fails.
 
 --------------------------------------------------------------------------------
 OPTIONAL — make grade-rerun a first-class coordinator knob
@@ -158,3 +171,13 @@ OPTIONAL — make grade-rerun a first-class coordinator knob
   to add a MAX_GRADE_RERUN knob to coordinator/server.py (re-queue resolved=0 up to N,
   mirroring the execution-failure path) — it needs a fresh bake to take effect.
 ================================================================================
+
+
+--------------------------------------------------------------------------------
+INPUTS  (ask me for any not given, then echo them back before doing anything)
+--------------------------------------------------------------------------------
+  ARM        = econ
+  BENCHMARK  = verified
+  WORKERS    = 10
+  GRADE_RERUN       = 1   (default) rerun budget for GRADED failures (resolved=0)
+  MAX_FAILURE_RERUN = 1   (default) coordinator rerun budget for EXECUTION failures

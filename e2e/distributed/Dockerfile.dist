@@ -147,10 +147,6 @@ RUN /work/.venv/bin/harbor dataset download terminal-bench/terminal-bench-2-1 -o
  && for d in /tmp/tb21/terminal-bench-2-1/*/; do [ -f "$d/task.toml" ] && mv "$d" /work/terminal-bench/tasks/ || true; done \
  && rm -rf /tmp/tb21 \
  && echo "terminal-bench 2.1 tasks vendored: $(ls /work/terminal-bench/tasks | wc -l)"
-# SWE-bench Verified difficulty tiers — worker-loop reads these (DIFFICULTY_DIR)
-# to set a per-instance resolve ceiling (easy/medium 3h, hard 5h, veryhard 8h).
-COPY swebench-verified-difficulty/*.ids.txt /work/swebench-verified-difficulty/
-
 RUN chmod +x \
       /work/lib/boot.sh \
       /work/local-docker/context/run-instance.sh \

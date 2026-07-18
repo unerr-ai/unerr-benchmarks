@@ -163,16 +163,14 @@ def solve_instance(instance: dict, mode: str, auth_env: dict[str, str], repo_dir
     art_host_dir = out_dir / "artifacts" / mode / iid
     art_host_dir.mkdir(parents=True, exist_ok=True)
 
-    # Internal claude budget MUST be < this docker timeout so run-instance.sh's
-    # own `timeout` fires first and still captures the partial diff/telemetry
-    # (a host-side kill of `docker run` would lose all of it). Reserve ~1200s for
-    # the ON-arm graph warm-up + image/exfil overhead.
-    claude_timeout = max(300, timeout - 1200)
+    # No per-task wall-clock cap: the agent runs to completion inside
+    # run-instance.sh (it owns its own watchdog now, mirroring the econ arm).
+    # `timeout` is accepted for CLI compatibility but no longer bounds this
+    # docker run (see --timeout help).
     docker_cmd = ["docker", "run", "--rm", "-i",
                   "-v", f"{art_host_dir.resolve()}:/work-out",
                   "-e", "ART_DIR=/work-out",
                   "-e", f"UNERR_MODE={mode}",
-                  "-e", f"CLAUDE_TIMEOUT={claude_timeout}",
                   "-e", f"CLAUDE_MODEL={claude_model}",
                   "-e", f"REPO_DIR={repo_dir}"]
     # DEBUG-ONLY: forward the gated MCP-heartbeat flags into the instance container
@@ -187,7 +185,7 @@ def solve_instance(instance: dict, mode: str, auth_env: dict[str, str], repo_dir
                    "cat > /tmp/problem.txt && /opt/toolbox/run-instance.sh /tmp/problem.txt"]
 
     t0 = time.time()
-    proc = run(docker_cmd, input=problem, text=True, capture_output=True, timeout=timeout)
+    proc = run(docker_cmd, input=problem, text=True, capture_output=True)
     patch = proc.stdout
 
     # full per-instance log (the 2000-char tail drops the unerrd/install lines)
@@ -297,10 +295,10 @@ def main() -> int:
                          "ANTHROPIC_DEFAULT_SONNET_MODEL.")
     ap.add_argument("--repo-dir", default="/testbed", help="repo root inside the instance image")
     ap.add_argument("--timeout", type=int, default=3600,
-                    help="per-instance TOTAL docker seconds (ceiling). The in-container "
-                         "claude budget is this minus ~1200s reserved for the ON-arm graph "
-                         "warm-up + overhead, so run-instance.sh times out first and still "
-                         "captures any partial diff.")
+                    help="seconds for the zero-cost --preflight docker call only "
+                         "(ignored — task wall-clock limits removed — for the actual "
+                         "per-instance solve: the agent now runs to completion, no cap, "
+                         "kept for CLI compatibility with the distributed worker).")
     ap.add_argument("--parallel", type=int, default=1,
                     help="accepted for CLI compatibility with the distributed worker "
                          "(which always passes --parallel 1); instances still run "
@@ -507,12 +505,9 @@ def main() -> int:
                         print(f"  WARNING: mint_instance_key failed for {iid}; "
                               f"falling back to the master key", file=sys.stderr)
 
-                try:
-                    patch, meta = solve_instance(
-                        inst, mode, inst_auth, args.repo_dir, args.timeout, out,
-                        claude_model, pro_username, pro_fn, args.image_namespace)
-                except subprocess.TimeoutExpired:
-                    patch, meta = "", {"instance_id": iid, "mode": mode, "rc": "timeout"}
+                patch, meta = solve_instance(
+                    inst, mode, inst_auth, args.repo_dir, args.timeout, out,
+                    claude_model, pro_username, pro_fn, args.image_namespace)
 
                 if open_models and vk:
                     meta["cost"] = fetch_cost(base_url, litellm_key, vk, alias=alias)

@@ -185,8 +185,7 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 | `DEDICATED_CONDUCTOR=1` | no | raises the $80/hr GPU; NOT needed for serverless minimax |
 | `ROOTFS_GB` | no | ephemeral rootfs size (max 50); only if a disk-starve recurs on top of `performance` |
 | `SWEBENCH_REGISTRY_MIRROR` | recommended | `http://swebench-registry.flycast:5000` — workers' dockerd mirrors docker.io through the shared cache (`lib/boot.sh:74-83`); registry app must be deployed (see `e2e/distributed/registry/README.md`) |
-| `PER_INSTANCE_TIMEOUT` | no | default **10800** (3 h) per-task resolve ceiling; claude budget = timeout − 1200 s (`run-benchmark.py:111`). Hard tasks that hang are handled by the stall watchdog, not a longer ceiling. |
-| `STALL_KILL_S` | no | default **2700** — the worker kills a resolve whose logs show ZERO progress (captured log not growing AND the `HB events_bytes=` heartbeat value not advancing) for this many seconds; the attempt then re-leases once (`MAX_ATTEMPTS=2`) = automatic stop-&-restart of stuck instances |
+| `PER_INSTANCE_TIMEOUT` | no | the benchmark descriptor's grade-side cap only (default **86400** s, `benchmarks.py`) — bounds the swebench grade subprocess, not the resolve. There is no per-task resolve ceiling and no stall/progress watchdog; the coding agent owns its own watchdog/thrash detection. |
 | `WEBSEARCH=1` | no — **changes the result class** | **`ARM=claude` only** (STRICT opt-in): enables `TAVILY_API_KEY` (read from `e2e/econ/.env.local`, injected into workers) → `run-instance.sh` merges **Tavily's hosted MCP server** (`mcp.tavily.com`, HTTP transport, no npm dep) into the instance's `.mcp.json`, and the ON-arm prompt points the model at `tavily_search`/`tavily_extract` (underscores!). Unset → ambient keys IGNORED, zero search tools. **`ARM=econ` is DIFFERENT: Exa web search is DEFAULT-ON (see below) — set `WEBSEARCH=0` to force it off.** A web-on run can look up the actual upstream fix — label it (e.g. `-web` suffix) and never compare it 1:1 against no-web baselines or submit it. |
 | `WEBSEARCH=0` | no | **econ arm only** — force Exa web search OFF for a clean, baseline-comparable (no-web) econ run. No effect on claude (already opt-in). |
 | `EXA_API_KEY` | auto (econ arm) | econ-arm Exa search key — **default-on** for econ, sourced from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`; injected into workers unless `WEBSEARCH=0`. |
@@ -242,13 +241,12 @@ drained queue stops the machine; it does not restart).
 | Grade (per instance) | ~1–3 min |
 | **Total Mini-10 wall-clock** | **~45–120 min** (2 workers × ~5 instances serial) |
 
-`prepare` alone ≈ 16 min (bake + warm). Per-instance timeout = 10800 s (3 h); MAXWAIT =
-48 h; bundle HOLD = 1 h. A stuck resolve doesn't burn the full ceiling: the worker-loop
-stall watchdog (`_watch_resolve`) polls every 30 s and kills the resolve subprocess after
-`STALL_KILL_S` (default 2700 s) of zero progress — progress being either the captured
-log growing or the in-container `HB events_bytes=` heartbeat value advancing — so the
-coordinator re-leases the instance instead of the worker hanging on a wedged
-claude/MCP call for hours.
+`prepare` alone ≈ 16 min (bake + warm). The harness enforces no per-task resolve
+ceiling and no stall/progress watchdog — the coding agent owns its own watchdog/thrash
+detection, and a resolve may legitimately run for hours. Liveness is still protected at
+the fleet level: the coordinator reaps a lease only after `HEARTBEAT_TIMEOUT` (dead
+worker/VM, not a slow task), and `MAXWAIT` + `NO_PROGRESS_GIVEUP` are the host/coordinator
+wedge backstops (§2 of the distributed README); bundle HOLD = 1 h.
 
 ---
 
@@ -340,9 +338,11 @@ escalate (§12), so the harness now mechanically gates the same behaviors.
    Anthropic-priced `total_cost_usd` (renamed `telemetry.usd_anthropic_priced`). Claude Code
    prices open-weight tokens at sonnet/opus rates and is 7–12× too high — **see §11b′ for the
    mechanism, the gateway spot-check, and the numeric proof.**
-7. **A stuck instance (MCP hang, silent stall) no longer burns its full ceiling** — the
-   stall watchdog kills at `STALL_KILL_S` of zero log growth and the attempt re-leases
-   once. If an instance dead-letters with `stalled:` in its error, it stalled twice.
+7. **The harness no longer auto-kills a wedged resolve** — there is no stall/progress
+   watchdog and no per-task timeout; a hung `claude`/MCP call runs until the agent itself
+   recovers, or until the coordinator's `HEARTBEAT_TIMEOUT` reaps the lease (worker/VM
+   silence, not agent silence). If an instance never completes, check the agent's own
+   logs first — the harness has no visibility into task-level progress anymore.
 8. **Web search: the native `WebSearch` tool NEVER works on the open-models arm** — it is
    an Anthropic *server-side* tool (`web_search_20250305`); through the gateway fireworks
    rejects it with `400: does not support parameters: ['web_search_options']` (verified

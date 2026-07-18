@@ -11,7 +11,6 @@
 # Env in:
 #   LITELLM_API_KEY      required — econ routes its model tiers via the
 #                         self-hosted LiteLLM gateway
-#   ECON_TIMEOUT         per-instance seconds (default 1800)
 #   REPO_DIR             repo root in the image (SWE-bench default: /testbed)
 # Args:
 #   $1                   path to a file holding the problem_statement
@@ -23,7 +22,6 @@ TOOLBOX=/opt/toolbox
 OUT=/work-out          # host artifact dir mounted by run-benchmark.py
 
 REPO_DIR="${REPO_DIR:-/testbed}"
-ECON_TIMEOUT="${ECON_TIMEOUT:-1800}"
 PROBLEM_FILE="${1:?usage: run-instance.sh <problem_statement_file>}"
 
 log() { printf '[run-instance] %s\n' "$*" >&2; }
@@ -71,14 +69,14 @@ fi
 
 PROBLEM="$(cat "$PROBLEM_FILE")"
 
-log "econ run starting (repo=$REPO_DIR, timeout=${ECON_TIMEOUT}s)"
+log "econ run starting (repo=$REPO_DIR)"
 # Container is the sandbox → --dangerously-skip-permissions for full autonomy.
 # --format json: machine-readable event stream (token/turn/tier telemetry).
 # --print-logs: without it the Effect logger only writes opencode.log inside
 # the container (packages/core/src/observability/logging.ts loggers()) — the
 # orchestration markers (turn_converge_nudge, stuck_escalate, ...) never reach
 # stderr/err.txt otherwise. NO --model: routing is opencode.json-driven.
-timeout "$ECON_TIMEOUT" "$TOOLBOX/opencode" run \
+"$TOOLBOX/opencode" run \
   --format json \
   --print-logs \
   --dir "$REPO_DIR" \

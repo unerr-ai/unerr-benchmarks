@@ -201,7 +201,6 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
     # on SWE-bench the fixes are public, so web search is an answer-lookup risk).
     docker_env = [
         "-e", f"LITELLM_API_KEY={api_key}",
-        "-e", f"ECON_TIMEOUT={timeout}",
         "-e", f"REPO_DIR={repo_dir}",
     ]
     exa_key = os.environ.get("EXA_API_KEY")
@@ -233,7 +232,7 @@ def solve_instance(instance: dict, api_key: str, repo_dir: str, timeout: int,
          tag,
          "bash", "-c",
          "cat > /tmp/problem.txt && /opt/toolbox/run-instance.sh /tmp/problem.txt"],
-        input=problem, text=True, capture_output=True, timeout=timeout + 120,
+        input=problem, text=True, capture_output=True,
     )
     patch = proc.stdout
     (art_host_dir / "patch.diff").write_text(patch)
@@ -303,7 +302,8 @@ def main() -> int:
                     help="comma-separated instance_ids to run (overrides --instances; "
                          "for targeted re-runs of specific instances)")
     ap.add_argument("--repo-dir", default="/testbed", help="repo root inside the instance image")
-    ap.add_argument("--timeout", type=int, default=1800, help="per-instance seconds")
+    ap.add_argument("--timeout", type=int, default=1800,
+                    help="(ignored — task wall-clock limits removed; the agent owns its own watchdog)")
     ap.add_argument("--parallel", type=int, default=1,
                     help="resolve up to N instances concurrently (each is an independent "
                          "docker build+run; the model work is remote so this is I/O-bound)")
@@ -424,8 +424,6 @@ def main() -> int:
             patch, meta = solve_instance(
                 inst, api_key, args.repo_dir, args.timeout, args.label, out,
                 pro_username, pro_fn, args.image_namespace)
-        except subprocess.TimeoutExpired:
-            patch, meta = "", {"instance_id": iid, "label": args.label, "rc": "timeout"}
         except Exception as e:  # a build/run crash on ONE instance must not sink the pool
             patch, meta = "", {"instance_id": iid, "label": args.label,
                                "rc": f"error:{type(e).__name__}", "error": str(e)[:800]}

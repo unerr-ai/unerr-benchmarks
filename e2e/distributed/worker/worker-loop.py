@@ -7,18 +7,29 @@ swebench harness, and POST the {patch, report.json, meta} back. Repeat until the
 queue drains, then exit 0 so the `--restart no` machine stops (billing ends).
 
 Never reimplements resolve or grade — it drives the existing per-arm tools:
-  RESOLVE:  python3 <runner> --ids <iid> --out <scratch> --label <run_id>
-                            --timeout <PER_INSTANCE_TIMEOUT> --parallel 1
+  RESOLVE:  python3 <runner> --ids <iid> --out <scratch> --label <run_id> --parallel 1
   GRADE:    python3 -m swebench.harness.run_evaluation --dataset_name <DATASET>
                             --split <SPLIT> --predictions_path <preds.json>
                             --run_id <run_id> --instance_ids <iid>
                             --max_workers <GRADE_WORKERS> --cache_level env
                             --clean True --timeout <PER_INSTANCE_TIMEOUT>
 
+The harness enforces NO task-level limit on the RESOLVE step: no stall/
+progress watchdog and no per-instance wall-clock deadline — the resolve
+subprocess is simply waited on until it exits. The coding agent now owns its
+own hang detection; a dead worker/VM is caught by the coordinator's heartbeat
+reaper (below), never by this process. `self.timeout` survives ONLY as a
+grade-side/outer-wrapper cap (swebench `run_evaluation --timeout`,
+grade_pro/grade_live's `worker.timeout + 600`, harness_terminal's flat
+fallback) — it is never passed to the resolve runner.
+
 Lease model (PLAN.md decision 5): a background heartbeat thread POSTs /heartbeat
 every 30s; if the coordinator answers {stale:true} the lease was reaped (another
 worker owns the instance now) → set the ABANDON flag and DO NOT report, so the new
 owner's result is never clobbered (at-least-once + idempotent = effectively-once).
+The abandon flag does NOT kill an in-flight resolve subprocess — that process is
+simply awaited to completion; abandon only gates the /complete-vs-/fail decision
+once resolve returns (see _process).
 
 Stdlib only (urllib for HTTP, subprocess, json, threading, os, time, plus
 tempfile/glob/shutil/socket). Config comes entirely from the environment — see
@@ -30,9 +41,7 @@ import base64
 import glob
 import json
 import os
-import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -84,120 +93,6 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def _load_difficulty(dirpath: str) -> "dict[str, str]":
-    """Map each instance_id -> SWE-bench difficulty tier by reading the shipped
-    swebench-verified-difficulty/<tier>.ids.txt lists (easy/medium/hard/
-    veryhard). Returns {} when the dir is absent, so callers fall back to the
-    flat PER_INSTANCE_TIMEOUT and behaviour is unchanged off the distributed
-    image (Lite/mini/local runs)."""
-    tiers: "dict[str, str]" = {}
-    for tier in ("easy", "medium", "hard", "veryhard"):
-        try:
-            with open(os.path.join(dirpath, f"{tier}.ids.txt"), encoding="utf-8") as fh:
-                for line in fh:
-                    iid = line.strip()
-                    if iid:
-                        tiers[iid] = tier
-        except OSError:
-            continue
-    return tiers
-
-
-# Stall watchdog (S8): the resolve subprocess's stdout+stderr are captured to a
-# file (never streamed directly, since Popen replaces subprocess.run here) and
-# polled for progress. run-instance.sh's hb_loop appends an `HB events_bytes=<n>`
-# line to this SAME file every 240s regardless of whether claude is actually
-# doing anything, so heartbeat-LINE growth is EXCLUDED from the progress
-# signal — progress = EITHER a non-heartbeat log line changing (build/index/
-# claude tool output/grade output) OR the heartbeat's events_bytes VALUE
-# itself increasing (claude emitting new turns). Otherwise a hung claude
-# (events_bytes frozen, no non-heartbeat output) would still tick the file
-# size every 4 minutes and the stall clock would never fire. No progress for
-# stall_kill_s -> the resolve is killed so the attempt fails and the
-# coordinator re-leases it (a fresh restart).
-STALL_KILL_S = int(os.environ.get("STALL_KILL_S", "2700"))
-_HB_RE = re.compile(rb"HB events_bytes=")
-_EVENTS_BYTES_RE = re.compile(rb"events_bytes=(\d+)")
-
-
-def _progress_signal(logpath: str, tail_bytes: int = 65_536) -> tuple[int | None, bytes]:
-    """Read the last `tail_bytes` of `logpath` ONCE (never the whole file) and
-    derive BOTH progress signals from that single read: the last
-    `events_bytes=<n>` heartbeat value (None if no heartbeat has landed yet)
-    and the last line that is NOT a heartbeat line (b"" if the tail is empty
-    or entirely heartbeat lines). Heartbeat lines tick on a fixed timer
-    regardless of real progress, so they're excluded from the second signal —
-    only events_bytes' own value and non-heartbeat output count."""
-    try:
-        with open(logpath, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - tail_bytes))
-            chunk = f.read()
-    except OSError:
-        return None, b""
-    matches = _EVENTS_BYTES_RE.findall(chunk)
-    last_events_bytes = int(matches[-1]) if matches else None
-    last_non_hb_line = b""
-    for line in chunk.splitlines():
-        if not _HB_RE.search(line):
-            last_non_hb_line = line
-    return last_events_bytes, last_non_hb_line
-
-
-def _kill_process_group(proc: "subprocess.Popen") -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            proc.kill()
-        except OSError:
-            pass
-
-
-def _watch_resolve(proc: "subprocess.Popen", logpath: str, deadline: float,
-                    timeout_s: float, *, stall_kill_s: int = STALL_KILL_S,
-                    poll_s: float = 30.0, extra_paths: "tuple[str, ...]" = (),
-                    sleep_fn=time.sleep, now_fn=time.time) -> str | None:
-    """Poll `proc` (writing to `logpath`) every `poll_s` until it exits, the
-    epoch `deadline` passes, or no progress — via `_progress_signal`: the
-    log's last `events_bytes=` heartbeat value increasing OR its last
-    non-heartbeat line changing (heartbeat-LINE growth alone does not count,
-    or a truly hung claude would never trip the clock) — is seen for
-    `stall_kill_s` seconds.
-
-    A deadline kills the process group and raises subprocess.TimeoutExpired
-    (mirroring subprocess.run(timeout=...), which this replaces). A stall
-    kills the process group and RETURNS an error string instead of raising,
-    so the caller can fold it into the existing error-reporting path rather
-    than a distinct exception type. Returns None when the process exited on
-    its own (the normal case)."""
-    last_sig: object = None
-    last_progress = now_fn()
-    while True:
-        rc = proc.poll()
-        if rc is not None:
-            return None
-        now = now_fn()
-        if now >= deadline:
-            _kill_process_group(proc)
-            raise subprocess.TimeoutExpired(cmd=getattr(proc, "args", "resolve"),
-                                             timeout=timeout_s)
-        # Progress = the captured driver-log signal (heartbeat value / non-HB
-        # line) OR any live artifact file growing (econ's host-mounted
-        # events.jsonl/err.txt). extra_paths absent -> just the driver signal.
-        sig = (_progress_signal(logpath),
-               tuple(os.path.getsize(p) if os.path.exists(p) else 0
-                     for p in extra_paths))
-        if sig != last_sig:
-            last_sig = sig
-            last_progress = now
-        elif now - last_progress >= stall_kill_s:
-            _kill_process_group(proc)
-            return f"stalled: no log growth for {stall_kill_s}s (killed for restart)"
-        sleep_fn(poll_s)
-
-
 class CoordinatorError(Exception):
     """The coordinator could not be reached / answered an error status."""
 
@@ -226,23 +121,14 @@ class Worker:
             "DATASET", self.bench.get("grade_dataset") or self.bench.get("dataset"))
         self.split = os.environ.get("SPLIT", self.bench.get("split", "test"))
         _tmo = self.bench.get("timeout", {})
+        # Grade-side/outer-wrapper cap ONLY — never a resolve limit. Feeds
+        # swebench `run_evaluation --timeout`, grade_pro/grade_live's
+        # `worker.timeout + 600`, and harness_terminal's flat fallback. The
+        # resolve path itself enforces no task-level limit (see module
+        # docstring) — the coding agent owns its own hang detection.
         self.timeout = _int_env(_tmo.get("default_env", "PER_INSTANCE_TIMEOUT"),
                                 _tmo.get("default", 2700))
         self.grade_workers = _int_env("GRADE_WORKERS", 6)
-        # Difficulty-aware per-instance ceiling: SWE-bench Verified tasks span
-        # "<15 min" to ">4 hours" of expected effort, so one flat timeout either
-        # starves hard tasks or over-waits on easy ones. For Verified the tiers come
-        # from the shipped difficulty id-lists (DIFFICULTY_DIR); benchmarks whose
-        # descriptor doesn't use that source keep the flat self.timeout until their
-        # adapter loads per-instance tiers. Unknown ids always keep self.timeout.
-        self.difficulty = (
-            _load_difficulty(os.environ.get(
-                "DIFFICULTY_DIR", "/work/swebench-verified-difficulty"))
-            if _tmo.get("difficulty") == "verified_difficulty_dir" else {})
-        self.tier_timeouts = {
-            tier: _int_env(_tmo.get("tier_env", {}).get(tier, ""), secs)
-            for tier, secs in _tmo.get("tiers", {}).items()
-        }
 
     # ── logging ──────────────────────────────────────────────────────────────
     def log(self, msg: str) -> None:
@@ -436,22 +322,11 @@ class Worker:
         mod = __import__(mod_name)
         return mod.run(self, iid, scratch, abandon)
 
-    # ── difficulty-aware per-instance ceiling ────────────────────────────────
-    def _instance_timeout(self, iid: str) -> int:
-        """Per-instance resolve ceiling in seconds by SWE-bench difficulty tier
-        (easy/medium 3h, hard 5h, veryhard 8h — all env-overridable). Falls back
-        to the flat PER_INSTANCE_TIMEOUT for ids with no tier data."""
-        tier = self.difficulty.get(iid)
-        if not tier:
-            return self.timeout
-        return self.tier_timeouts.get(tier, self.timeout)
-
     # ── resolve step (shell out to the arm's runner) ─────────────────────────
     def _resolve(self, iid: str, scratch: str) -> int:
         runner = self._runner_path()
-        inst_timeout = self._instance_timeout(iid)
         cmd = [VENV_PY, runner, "--ids", iid, "--out", scratch,
-               "--label", self.run_id, "--timeout", str(inst_timeout), "--parallel", "1"]
+               "--label", self.run_id, "--parallel", "1"]
         # Both resolve_then_grade runners (econ, claude) are dataset-parameterized
         # (their --dataset defaults to Verified). Hand them the ACTIVE benchmark's
         # dataset/split + — for Pro — the vendored id-source, the sweap image
@@ -479,40 +354,25 @@ class Worker:
         # clear DOCKER_DEFAULT_PLATFORM so run-benchmark's os.environ.setdefault stays
         # a no-op (the fly VM is already x86_64; forcing linux/amd64 is unnecessary).
         env["DOCKER_DEFAULT_PLATFORM"] = ""
-        self.log(f"{iid}: resolve (ceiling={inst_timeout}s "
-                 f"tier={self.difficulty.get(iid, 'default')}) -> {' '.join(cmd)}")
-        # Captured (not streamed) so the stall watchdog can poll it for growth —
-        # start_new_session=True makes proc.pid a process-group leader so a
-        # stall/deadline kill takes the whole tree, not just the driver.
+        self.log(f"{iid}: resolve -> {' '.join(cmd)}")
+        # Captured (not streamed) so the output can be tailed after the fact
+        # (_tail_log_to_stdout) — start_new_session=True keeps proc.pid a
+        # process-group leader for parity with the rest of the tree, though
+        # nothing here kills it anymore.
         logpath = os.path.join(scratch, "resolve-output.log")
-        # The econ arm writes its event stream straight onto the host-mounted
-        # artifact dir (run-instance.sh -> $OUT/events.jsonl), so it grows LIVE
-        # here even though run-benchmark buffers the container's stdout/stderr.
-        # Watching it gives the stall clock a real in-agent progress signal the
-        # captured driver log alone lacks during the (buffered) agent phase;
-        # absent (claude arm, pre-agent phases) it stays 0 and the driver-log
-        # signal stands — so this only ADDS liveness, never removes it.
-        art_dir = os.path.join(scratch, self.run_id, "artifacts", iid)
-        live_paths = (os.path.join(art_dir, "events.jsonl"),
-                      os.path.join(art_dir, "err.txt"))
-        timeout_s = inst_timeout + 300
-        deadline = time.time() + timeout_s
         with open(logpath, "wb") as logf:
             proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT,
                                      start_new_session=True)
-            try:
-                stall_error = _watch_resolve(proc, logpath, deadline, timeout_s,
-                                             extra_paths=live_paths)
-            finally:
-                rc = proc.wait()
-                self._tail_log_to_stdout(iid, logpath)
-        if stall_error:
-            self.log(f"{iid}: resolve {stall_error}")
-            raise RuntimeError(stall_error)
+            # No task-level limit: the resolve subprocess is simply waited on
+            # until it exits. The coding agent owns its own hang detection; a
+            # dead worker/VM is caught by the coordinator's heartbeat reaper,
+            # not by this process (see module docstring / abandon flow).
+            rc = proc.wait()
+            self._tail_log_to_stdout(iid, logpath)
         self.log(f"{iid}: resolve rc={rc}")
         return rc
 
-    # ── stall-watchdog debuggability: output no longer streams directly ──────
+    # ── resolve-output debuggability: output no longer streams directly ─────
     def _tail_log_to_stdout(self, iid: str, logpath: str, n: int = 40) -> None:
         """Echo the last `n` lines of the captured resolve log to worker
         stdout, prefixed with the instance id — preserves the pre-watchdog

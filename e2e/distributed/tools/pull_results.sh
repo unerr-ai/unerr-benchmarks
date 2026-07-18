@@ -12,15 +12,18 @@
 # run-distributed.sh's job (DESTROY_ONLY=1 LABEL=<LABEL> ./run-distributed.sh).
 #
 # Usage:
-#   tools/pull_results.sh <LABEL> [APP]
+#   tools/pull_results.sh <LABEL> <APP>       # APP=swebench-dist-<arm>-<benchmark>
 #
 # APP defaults to swebench-agent-dist (the econ/default fleet app, matching
 # run-distributed.sh's DEFAULT_APP). Pass swebench-agent-dist-claude (arg 2)
 # for the claude arm, or any other non-default app.
 set -euo pipefail
 
-LABEL="${1:?usage: pull_results.sh <LABEL> [APP]}"
-APP="${2:-${APP:-swebench-agent-dist}}"
+LABEL="${1:?usage: pull_results.sh <LABEL> <APP>}"
+APP="${2:-${APP:-}}"
+# APP is required now that apps are per-(arm×benchmark) (swebench-dist-<arm>-<benchmark>,
+# see run-distributed.sh DEFAULT_APP) — there is no single default fleet app to assume.
+[ -n "$APP" ] || { echo "usage: pull_results.sh <LABEL> <APP>  (APP=swebench-dist-<arm>-<benchmark>)"; exit 2; }
 HERE="$(cd "$(dirname "$0")/.." && pwd)"     # e2e/distributed
 OUTDIR="$HERE/out/dist-$LABEL"
 PY_HOST="${PYTHON:-python3}"

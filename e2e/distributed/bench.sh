@@ -114,7 +114,12 @@ launch() {  # $1 = arm:benchmark
           PLAN_ONLY=1 "$HERE/run-distributed.sh" $RD_MODE 2>&1 || true)"
   app="$(printf '%s\n' "$plan"   | sed -n 's/^[[:space:]]*APP=\(.*\)$/\1/p' | head -1)"
   label="$(printf '%s\n' "$plan" | sed -n 's/^[[:space:]]*LABEL=\([^ ]*\).*$/\1/p' | head -1)"
-  [ -n "$app" ]   || app="swebench-agent-dist"
+  # Fallback (plan parse failed) mirrors run-distributed.sh's DEFAULT_APP: one
+  # app per (arm x benchmark), '_' -> '-' in the benchmark key, then
+  # 'verified' -> 'verif' (fly's abuse filter blocks names containing "verified").
+  if [ -z "$app" ]; then
+    app="${bench//_/-}"; app="swebench-dist-${arm}-${app//verified/verif}"
+  fi
   [ -n "$label" ] || label="$raw_label"
   printf '%s\t%s\t%s\t%s\n' "$arm" "$bench" "$label" "$app" >>"$MANIFEST"
   echo "==> [$combo] ARM=$arm BENCHMARK=$bench -> LABEL=$label APP=$app -> run-distributed.sh ${RD_MODE:-<all/one-shot>}  (log: $log)"

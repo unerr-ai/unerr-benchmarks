@@ -9,7 +9,9 @@
 # Fleet (pick one; default = the run you most recently launched):
 #   (no args)            newest out/bench-*/manifest.tsv  (every fleet's workers)
 #   --matrix <id>        that matrix's fleets
-#   <LABEL> [APP]        one fleet (APP inferred from the label if omitted)
+#   <LABEL> [APP]        one fleet (APP inferred: arm from a -claude fold in the
+#                        label, benchmark from $BENCHMARK else the label's
+#                        -pro/-terminal/-live_verified/-lite suffix, else verified)
 #
 # Options:
 #   --lines N        log lines to tail per worker (default 60)
@@ -22,6 +24,7 @@
 #   ./debug-workers.sh smk-e-econ --lines 120     # one fleet, deeper tail
 #   ./debug-workers.sh smk-e-econ --follow        # live-stream both workers
 #   ./debug-workers.sh smk-e-econ --instance django__django-11999
+#   BENCHMARK=pro ./debug-workers.sh <LABEL>      # non-verified fleet whose label lacks the suffix
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/fleet-common.sh
@@ -45,12 +48,30 @@ done
 
 fc_fly_token || exit 1
 
+# ── benchmark key for an APP-less <LABEL>: $BENCHMARK env wins (for a non-verified
+# fleet whose label carries no suffix); else the label's own -<benchmark> suffix,
+# also matching a grade-rerun tail (<base>-<benchmark>-graderr-<time>); else verified. ──
+_bench_from_label() {  # <label>
+  local lbl="$1"
+  if [ -n "${BENCHMARK:-}" ]; then echo "$BENCHMARK"; return; fi
+  case "$lbl" in
+    *-pro|*-pro-graderr-*)                     echo pro ;;
+    *-terminal|*-terminal-graderr-*)           echo terminal ;;
+    *-live_verified|*-live_verified-graderr-*) echo live_verified ;;
+    *-lite|*-lite-graderr-*)                   echo lite ;;
+    *)                                         echo verified ;;
+  esac
+}
+
 # Resolve the fleet set -> labels[]/apps[]/combos[].
 labels=(); apps=(); combos=()
 [ -n "$MATRIX" ] && [ -z "$MANIFEST" ] && MANIFEST="$HERE/out/bench-$MATRIX/manifest.tsv"
 if [ "${#POS[@]}" -ge 1 ]; then
   lbl="${POS[0]}"; app="${POS[1]:-}"
-  if [ -z "$app" ]; then case "$lbl" in *claude*) app="$(fc_default_app claude)" ;; *) app="$(fc_default_app econ)" ;; esac; fi
+  if [ -z "$app" ]; then
+    bench="$(_bench_from_label "$lbl")"
+    case "$lbl" in *claude*) app="$(fc_default_app claude "$bench")" ;; *) app="$(fc_default_app econ "$bench")" ;; esac
+  fi
   labels+=("$lbl"); apps+=("$app"); combos+=("$lbl")
 else
   [ -n "$MANIFEST" ] || MANIFEST="$(fc_newest_manifest)"

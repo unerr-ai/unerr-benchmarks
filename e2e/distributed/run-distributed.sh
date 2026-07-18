@@ -54,14 +54,23 @@ case "$BENCHMARK" in
   verified|lite|pro|terminal|live_verified) ;;
   *) echo "BENCHMARK must be one of: verified|lite|pro|terminal|live_verified (got '$BENCHMARK')"; exit 1 ;;
 esac
-# App default is arm-aware (ARM must be known first, above): econ keeps the
-# original fixed app name byte-for-byte; claude gets its own app so the two
-# arms' fleets never collide. One app per ARM serves EVERY benchmark — the
-# worker dispatches by the BENCHMARK env (below); benchmarks get their own
-# FLEET (via the LABEL fold, next), not their own app.
-DEFAULT_APP="swebench-agent-dist"
-[ "$ARM" = "claude" ] && DEFAULT_APP="swebench-agent-dist-claude"
-APP="${APP:-$DEFAULT_APP}"                  # FIXED app; each run scoped by fleet=<LABEL> metadata
+# App is per-(ARM × BENCHMARK): every combo gets its OWN fly app so image builds,
+# fleets, monitoring and teardown are fully isolated and multiple benchmarks can
+# build+run in parallel without contending on one app's remote builder (two
+# concurrent `flyctl deploy --build-only` to the SAME app stall its Depot builder).
+# Fly app names allow only [a-z0-9-], so the benchmark key's '_' -> '-'
+# (live_verified -> live-verified). The image itself is benchmark-AGNOSTIC (one
+# Dockerfile.dist serves every benchmark; the worker dispatches on the BENCHMARK
+# env), so a run can still REUSE one baked image across sibling apps via IMAGE=.
+# KEEP this derivation byte-identical to tools/fleet-common.sh::fc_default_app.
+# APP= override always wins.
+BENCH_APP_SLUG="${BENCHMARK//_/-}"          # fly app names: [a-z0-9-] only
+# fly's abuse filter REJECTS app names containing "verified" ("a common phishing
+# target" — observed live on create), so the slug shortens it: verified -> verif,
+# live-verified -> live-verif. KEEP in sync with fc_default_app + bench.sh fallback.
+BENCH_APP_SLUG="${BENCH_APP_SLUG//verified/verif}"
+DEFAULT_APP="swebench-dist-${ARM}-${BENCH_APP_SLUG}"
+APP="${APP:-$DEFAULT_APP}"                  # per-(arm×benchmark) app; runs further scoped by fleet=<LABEL> metadata
 RAW_LABEL="${LABEL:-}"                      # the LABEL as the caller typed it — echoed back in follow-up commands (prepare/run/arm), so a second invocation folds identically
 LABEL="$RAW_LABEL"                          # REQUIRED, unique per run — doubles as RUN_ID + fleet metadata
 # Fold BENCHMARK into LABEL so an (arm × benchmark × runid) triple always gets
@@ -167,44 +176,27 @@ if [ -z "${DATASET:-}" ]; then
 fi
 
 HOLD="${HOLD:-3600}"                        # coordinator holds open this long after bundle for the pull
-MAXWAIT="${MAXWAIT:-172800}"                # absolute coordinator drain backstop (48h) — propagated to the coordinator; NOT a normal limiter (a 500-run legitimately takes many hours, so the coordinator waits PROGRESS-aware, giving up early only when wedged — see NO_PROGRESS_GIVEUP)
+MAXWAIT="${MAXWAIT:-864000}"                 # absolute coordinator drain backstop (10 days) — propagated to the coordinator; NOT a normal limiter (the harness imposes no per-task wall-clock or stall kill — the agent owns its own watchdog — so a legitimate full 500-task run may run for days; the coordinator waits PROGRESS-aware, giving up early only when wedged — see NO_PROGRESS_GIVEUP)
 NO_PROGRESS_GIVEUP="${NO_PROGRESS_GIVEUP:-7200}"  # coordinator gives up EARLY only if the fleet is WEDGED: nothing leased AND no completion for this long (workers gone, tasks stranded). Passed to the coordinator.
 MAX_FAILURE_RERUN="${MAX_FAILURE_RERUN:-1}"  # coordinator's failure-rerun-on-drain budget per instance; read by coordinator-entrypoint.sh
-# PER_INSTANCE_TIMEOUT and its per-benchmark siblings are FALLBACKS ONLY — left
-# UNSET unless the caller explicitly set them, so the worker's per-benchmark
-# descriptor default wins (verified 2700s + difficulty tiers, pro 10800s,
-# terminal 3600s; see tools/benchmarks.py). Forcing a value here would clobber
-# that default for every benchmark (Verified's difficulty tiers already
-# override per-instance regardless, so this only matters for untiered ids).
-PER_INSTANCE_TIMEOUT="${PER_INSTANCE_TIMEOUT:-}"
-TIMEOUT_ENV=()
-[ -n "$PER_INSTANCE_TIMEOUT" ]              && TIMEOUT_ENV+=(-e PER_INSTANCE_TIMEOUT="$PER_INSTANCE_TIMEOUT")
-[ -n "${PRO_PER_INSTANCE_TIMEOUT:-}" ]      && TIMEOUT_ENV+=(-e PRO_PER_INSTANCE_TIMEOUT="$PRO_PER_INSTANCE_TIMEOUT")
-[ -n "${TERMINAL_PER_INSTANCE_TIMEOUT:-}" ] && TIMEOUT_ENV+=(-e TERMINAL_PER_INSTANCE_TIMEOUT="$TERMINAL_PER_INSTANCE_TIMEOUT")
-[ -n "${TIER_TIMEOUT_EASY:-}" ]             && TIMEOUT_ENV+=(-e TIER_TIMEOUT_EASY="$TIER_TIMEOUT_EASY")
-[ -n "${TIER_TIMEOUT_MEDIUM:-}" ]           && TIMEOUT_ENV+=(-e TIER_TIMEOUT_MEDIUM="$TIER_TIMEOUT_MEDIUM")
-[ -n "${TIER_TIMEOUT_HARD:-}" ]             && TIMEOUT_ENV+=(-e TIER_TIMEOUT_HARD="$TIER_TIMEOUT_HARD")
-[ -n "${TIER_TIMEOUT_VERYHARD:-}" ]         && TIMEOUT_ENV+=(-e TIER_TIMEOUT_VERYHARD="$TIER_TIMEOUT_VERYHARD")
-[ -n "${PRO_TIER_TIMEOUT_EASY:-}" ]         && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_EASY="$PRO_TIER_TIMEOUT_EASY")
-[ -n "${PRO_TIER_TIMEOUT_MEDIUM:-}" ]       && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_MEDIUM="$PRO_TIER_TIMEOUT_MEDIUM")
-[ -n "${PRO_TIER_TIMEOUT_HARD:-}" ]         && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_HARD="$PRO_TIER_TIMEOUT_HARD")
-[ -n "${PRO_TIER_TIMEOUT_VERYHARD:-}" ]     && TIMEOUT_ENV+=(-e PRO_TIER_TIMEOUT_VERYHARD="$PRO_TIER_TIMEOUT_VERYHARD")
 GRADE_WORKERS="${GRADE_WORKERS:-6}"         # swebench harness --max_workers on the worker
-# Stall window (zero log-growth before a resolve is killed for restart): 15min for
-# econ — its host-mounted events.jsonl gives the watchdog a real LIVE progress
-# signal — vs 45min for claude, whose in-container signal is buffered/weaker. Both
-# overridable via STALL_KILL_S.
-STALL_KILL_S="${STALL_KILL_S:-$([ "$ARM" = econ ] && echo 900 || echo 2700)}"
 HEARTBEAT_TIMEOUT="${HEARTBEAT_TIMEOUT:-300}"          # coordinator reaps a lease after this much heartbeat silence (10 beats @30s)
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
 
 # Tigris end-of-run archive (OPT-IN, default off): opt-in end-of-run archive of
-# results/traces to Tigris; needs the fleet app storage-attached (flyctl storage
-# create -a <app>) so AWS_* inject as app secrets — never forwarded here, only
-# the ARCHIVE flag + bucket NAME (the bucket name is not a secret).
+# results/traces to Tigris. ONE shared bucket serves every per-(arm×benchmark)
+# app — the AWS_* creds for it are auto-staged onto each combo's app at prepare
+# (see the "ensuring app" block) from .env.tigris; never forwarded here, only
+# the ARCHIVE flag + bucket NAME (the bucket name is not a secret). When the
+# operator doesn't pass TIGRIS_BUCKET, default it from the same .env.tigris so
+# all runs land in the ONE provisioned bucket (no accidental per-run buckets).
 ARCHIVE_TIGRIS="${ARCHIVE_TIGRIS:-0}"
 TIGRIS_BUCKET="${TIGRIS_BUCKET:-}"
+if [ "$ARCHIVE_TIGRIS" = "1" ] && [ -z "$TIGRIS_BUCKET" ] && [ -f "$HERE/.env.tigris" ]; then
+  TIGRIS_BUCKET="$(sed -n 's/^TIGRIS_BUCKET=//p' "$HERE/.env.tigris" | head -1)"
+  [ -n "$TIGRIS_BUCKET" ] && echo "==> TIGRIS_BUCKET defaulted from .env.tigris: $TIGRIS_BUCKET"
+fi
 TIGRIS_PREFIX="${TIGRIS_PREFIX:-runs}"
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # captured once, run-scoped — passed to the coordinator for archive key naming
 
@@ -220,13 +212,6 @@ if [ "${PLAN_ONLY:-0}" = "1" ] || [ "${1:-}" = "--print-plan" ]; then
   echo "    LABEL=${LABEL:-<unset>} (raw=${RAW_LABEL:-<unset>})"
   echo "    DATASET=$DATASET SPLIT=$SPLIT"
   echo "    worker env additions: BENCHMARK=$BENCHMARK"
-  if [ "${#TIMEOUT_ENV[@]}" -gt 0 ]; then
-    for ((_ti = 1; _ti < ${#TIMEOUT_ENV[@]}; _ti += 2)); do
-      echo "      ${TIMEOUT_ENV[_ti]}"
-    done
-  else
-    echo "      PER_INSTANCE_TIMEOUT: not forced — worker uses the per-benchmark descriptor default"
-  fi
   echo "    coordinator env additions: ARM=$ARM BENCHMARK=$BENCHMARK MAX_FAILURE_RERUN=$MAX_FAILURE_RERUN"
   exit 0
 fi
@@ -498,6 +483,34 @@ fi
   && echo "==> TAVILY_API_KEY: set (len ${#TAVILY_API_KEY}) — claude-arm web search ENABLED (NOT baseline-comparable)" \
   || echo "==> TAVILY_API_KEY: unset — claude-arm web search disabled"
 
+# ── serialize the LOCAL vendor+bake across CONCURRENT launchers ───────────────
+# Per-(arm×benchmark) apps make the REMOTE bake contention-free, but every
+# launcher still writes the SAME local vendor/ dir and uploads the SAME e2e/
+# build context — two triggers fired at the same moment would tear each other's
+# context mid-upload. This mkdir-lock covers vendor start → image ref resolved;
+# a second simultaneous trigger waits here (with a log line), then bakes on its
+# own app's builder. Triggers minutes apart never see it. A crashed holder's
+# lock is stolen as soon as its pid is gone (no trap needed — the failure exit
+# paths leave a dead pid behind, which the next trigger detects).
+BUILD_LOCK="$HERE/out/.build-lock"
+acquire_build_lock() {
+  local waited=0 holder
+  while ! mkdir "$BUILD_LOCK" 2>/dev/null; do
+    holder="$(cat "$BUILD_LOCK/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      echo "==> build lock: holder pid $holder gone — stealing stale lock"
+      rm -rf "$BUILD_LOCK"; continue
+    fi
+    if [ $((waited % 60)) -eq 0 ]; then
+      echo "==> build lock held by pid ${holder:-<starting>} (another trigger is vendoring/baking the shared local context) — waiting (${waited}s)"
+    fi
+    sleep 10; waited=$((waited + 10))
+  done
+  echo "$$" >"$BUILD_LOCK/pid"
+}
+release_build_lock() { rm -rf "$BUILD_LOCK"; }
+acquire_build_lock
+
 # ── vendor the LOCAL econ build into the TOOLBOX build context (from run.sh) ───
 # The fleet image bakes the arm toolbox, so the vendored glibc binary must be in
 # econ/local-docker/context/vendor/ before the remote build (as run.sh does).
@@ -571,6 +584,37 @@ if ! flyctl apps create "$APP" --org "$ORG" 2>/tmp/fly-dist-appcreate.err; then
     || { cat /tmp/fly-dist-appcreate.err; exit 1; }
 fi
 
+# ── stage Tigris AWS_* app secrets (per-(arm×benchmark) apps are created on
+# demand, so a fresh app lacks them; the coordinator's end-of-run archive reads
+# AWS_* ONLY as fly APP SECRETS — they are never forwarded as -e machine env).
+# Values come from .env.tigris (written once by provision-tigris.sh). Idempotent
+# (skips when the app already carries AWS_ACCESS_KEY_ID); --stage applies on the
+# next machine launch (these apps have no Fly Launch release to trigger). Values
+# are never echoed — lengths only. Non-fatal: a warn here means the archive step
+# would write 0 objects (backfill later from the local bundle).
+if [ "$ARCHIVE_TIGRIS" = "1" ]; then
+  TIGRIS_ENVFILE="$HERE/.env.tigris"
+  if flyctl secrets list -a "$APP" 2>/dev/null | awk '{print $1}' | grep -qx 'AWS_ACCESS_KEY_ID'; then
+    echo "==> tigris AWS_* already on app $APP — leaving as-is"
+  elif [ -f "$TIGRIS_ENVFILE" ]; then
+    TG_AK="$(sed -n 's/^AWS_ACCESS_KEY_ID=//p' "$TIGRIS_ENVFILE" | head -1)"
+    TG_SK="$(sed -n 's/^AWS_SECRET_ACCESS_KEY=//p' "$TIGRIS_ENVFILE" | head -1)"
+    TG_EP="$(sed -n 's/^AWS_ENDPOINT_URL_S3=//p' "$TIGRIS_ENVFILE" | head -1)"
+    if [ -n "$TG_AK" ] && [ -n "$TG_SK" ]; then
+      echo "==> staging tigris AWS_* onto app $APP (key lens ${#TG_AK}/${#TG_SK}; values not echoed)"
+      flyctl secrets set --stage -a "$APP" \
+        AWS_ACCESS_KEY_ID="$TG_AK" AWS_SECRET_ACCESS_KEY="$TG_SK" \
+        ${TG_EP:+AWS_ENDPOINT_URL_S3="$TG_EP"} >/dev/null 2>&1 \
+        || echo "    WARN: secrets set failed — archive may write 0 objects (stage manually per provision-tigris.sh)"
+    else
+      echo "==> WARN: $TIGRIS_ENVFILE lacks AWS keys — fresh app '$APP' cannot archive (run provision-tigris.sh)"
+    fi
+    unset TG_AK TG_SK TG_EP
+  else
+    echo "==> WARN: ARCHIVE_TIGRIS=1 but no $TIGRIS_ENVFILE — fresh app '$APP' lacks AWS_*; run provision-tigris.sh first"
+  fi
+fi
+
 echo "==> ensuring coordinator volume $COORD_VOL (${COORD_VOL_GB}GB, $REGION)"
 # fly ALLOWS duplicate volume names, so only create when none exists. Match NAME.
 if flyctl volumes list -a "$APP" 2>/dev/null | awk '{print $3}' | grep -qx "$COORD_VOL"; then
@@ -603,7 +647,12 @@ else
   [ -n "$IMG" ] || { echo "could not determine built image ref"; exit 1; }
   IMG_BUILT_THIS_RUN=1
   echo "==> image: $IMG"
+  # Persist the freshly-baked ref per arm so a SIBLING benchmark trigger can skip
+  # its own bake entirely (the image is benchmark-agnostic; registry access is
+  # org-scoped): IMAGE=$(cat out/.last-image-<arm>) SKIP_ECON_BUILD=1 ...
+  echo "$IMG" > "$HERE/out/.last-image-$ARM" 2>/dev/null || true
 fi
+release_build_lock   # local vendor/ + context no longer read — parallel triggers may bake now
 
 # ── econ provenance for the campaign lock / run-info stamp (below) ────────────
 # unknown-prebuilt when IMG was reused (IMAGE=/campaign pin) rather than built
@@ -802,11 +851,10 @@ for i in $(seq 1 "$MACHINES"); do
       -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e BENCHMARK="$BENCHMARK" -e RUN_ID="$LABEL" \
       -e DATASET="$DATASET" -e SPLIT="$SPLIT" \
       -e GRADE_WORKERS="$GRADE_WORKERS" \
-      -e STALL_KILL_S="$STALL_KILL_S" \
       -e MAX_ARTIFACT_TEXT_BYTES="${MAX_ARTIFACT_TEXT_BYTES:-5000000}" -e MAX_ARTIFACT_DB_BYTES="${MAX_ARTIFACT_DB_BYTES:-8000000}" \
       -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY" \
       -e TAVILY_API_KEY="$TAVILY_API_KEY" \
-      "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${MIRROR_ENV[@]+"${MIRROR_ENV[@]}"}" "${TIMEOUT_ENV[@]+"${TIMEOUT_ENV[@]}"}"; then
+      "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" "${MIRROR_ENV[@]+"${MIRROR_ENV[@]}"}"; then
     WID="$(grep -oE 'Machine ID: [0-9a-f]+' "$OUTDIR/worker-$i-run.log" | head -1 | awk '{print $3}')"
     WORKERS_OK=$((WORKERS_OK + 1))
     echo "    worker $i/$MACHINES: ${WID:-?}"

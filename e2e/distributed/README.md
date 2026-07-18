@@ -15,8 +15,12 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
 - **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`.
 - **Set `FLY_ORG=<your-team-org>` (required)** — never a personal org. `run-distributed.sh` defaults
   `ORG` to the non-functional placeholder `your-fly-org`; an unset `FLY_ORG` fails at app-create with
-  `organization your-fly-org not found`. App `swebench-agent-dist` (fixed; every run is scoped by
-  `fleet=<LABEL>` machine metadata, not a separate app per run).
+  `organization your-fly-org not found`. **App is per `ARM × BENCHMARK`**: `swebench-dist-<arm>-<slug>`,
+  slug = benchmark key with `_`→`-` and `verified`→`verif` (fly's abuse filter blocks app names
+  containing "verified" — a common phishing target), e.g. `live_verified` →
+  `swebench-dist-econ-live-verif` — each combo gets its own app, auto-created at prepare; runs
+  within one app are further scoped by `fleet=<LABEL>` machine metadata, not a separate app per run.
+  `APP=` overrides the derived name.
 - **Web search: `ARM=econ` = Exa ON by default** (the econ agent ships Exa web search default-on
   across all tiers/personas), so **every econ benchmark run is a web-on result class**. The launcher
   sources `EXA_API_KEY` from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`,
@@ -53,22 +57,37 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   `SUITE`/`TASKS`/`TASKS_FILE` is given), or `TASKS="id1,id2,..."`, or `TASKS_FILE=path`.
 - `ROOTFS_GB=50` enlarges each worker's ephemeral rootfs (**fly caps this at 50 GB**; higher values
   are clamped to 50 by the launcher) — see the calibration note below for when you need this.
-- **Long tasks** (multi-hour resolves): `PER_INSTANCE_TIMEOUT` (default `14400` = 4 h) is the per-task
-  resolve ceiling the worker enforces — a resolve running past it is killed and the task requeued;
-  raise it for tasks that need longer. Liveness needs no tuning: the worker heartbeats every 30 s and
-  the coordinator only requeues a lease after `HEARTBEAT_TIMEOUT` (default `300` s) of silence, so a
-  multi-hour resolve stays leased for its whole duration. `MAXWAIT` (default `172800` = 48 h) is only
-  the *host's* poll ceiling — if it's hit the fleet keeps running and self-stops on drain; you just
-  pull + destroy manually (§4, §5).
+- **Long tasks** (multi-hour resolves): the harness enforces nothing task-level anymore — no
+  per-instance wall-clock ceiling (difficulty tiers deleted), no stall/progress watchdog, no
+  timeout wrapper around the resolve call; the coding agent owns its own watchdog/thrash
+  detection. Liveness needs no tuning: the worker heartbeats every 30 s and the coordinator
+  only requeues a lease after `HEARTBEAT_TIMEOUT` (default `300` s) of silence, so a
+  multi-hour resolve stays leased for its whole duration. The remaining backstops are all
+  fleet-level, not task-level: `MAXWAIT` (default `864000` = 10 days, the *host's* poll
+  ceiling — if it's hit the fleet keeps running and self-stops on drain, you just pull +
+  destroy manually, §4/§5) and `NO_PROGRESS_GIVEUP` (the coordinator's wedge detector — gives
+  up early only when nothing is leased and nothing completes). A grade-side subprocess cap
+  (~24h, from `benchmarks.py`'s `timeout` descriptor field) still bounds the grader itself —
+  eval infra, not the agent — and never binds in practice.
 - **Completion signal is stream-independent.** The host detects "done" two ways: the `bundle_ready`
   beacon in the streamed `flyctl logs`, AND a durable `/data/BUNDLE_READY` sentinel the coordinator
   writes *after* the Tigris archive (race-safe — same moment as the beacon), polled over the reliable
   `ssh curl /status` channel. So a silently-dropped log stream on a long run (observed live: coordinator
   finished + archived, launcher stuck polling `done=None` past MAXWAIT) can no longer strand a finished
   run — the sentinel breaks the poll and the normal pull + teardown proceeds.
-- **Parallel fleets + slow placement.** Multiple fleets run concurrently on the one app — each is scoped
-  by `fleet=<LABEL>` metadata, so a run only ever seeds/polls/tears down its own LABEL (this is what
-  `bench.sh` relies on to fan out combos). Under placement contention (iad tight, or another fleet
+- **Parallel independent triggers (per-combo apps).** Each `ARM × BENCHMARK` combo builds and runs on
+  its OWN fly app (`swebench-dist-<arm>-<slug>`, §0) — this replaced one app per `ARM` serving
+  every benchmark. Two concurrent `flyctl deploy --build-only` calls against the SAME app contend on
+  that app's Depot builder (observed live: a second benchmark's bake stalled the first's at
+  context-upload). With per-combo apps, any two combos are fully independent triggers — fire
+  `econ:verified` now and `econ:pro` an hour later, or both at once — builds, fleets, monitoring and
+  teardown never interact. The image stays benchmark-agnostic (one `Dockerfile.dist`, the worker
+  dispatches on `BENCHMARK`), so `IMAGE=` can still reuse one baked ref across sibling apps of the same
+  arm; by default each app just bakes its own image on its own builder (no contention).
+- **Parallel fleets + slow placement.** Multiple fleets *of the same combo* (same `ARM`+`BENCHMARK`,
+  different `LABEL`) run concurrently on that combo's app — each is scoped by `fleet=<LABEL>` metadata,
+  so a run only ever seeds/polls/tears down its own LABEL (this is what `bench.sh` relies on to fan out
+  labels). Under placement contention (iad tight, or another fleet
   churning bakes in parallel) fly can CREATE a machine but not confirm `started` inside flyctl's
   start-wait window, so `flyctl machine run` exits non-zero even though the machine comes up seconds
   later. `run_machine` no longer treats that as fatal: it scrapes the created machine's id and polls it
@@ -171,8 +190,8 @@ Both are thin wrappers over the underlying mechanism — find the coordinator by
 `/status` on 6PN (the same call the launcher makes internally,
 [`run-distributed.sh`](./run-distributed.sh) `poll_status`) — which you can still run by hand:
 ```bash
-flyctl machines list -a swebench-agent-dist    # pick the machine with role=coordinator, fleet=<LABEL>
-flyctl ssh console -a swebench-agent-dist --machine <COORD_ID> -C "curl -s localhost:8080/status"
+flyctl machines list -a swebench-dist-econ-verif    # app = swebench-dist-<arm>-<slug> (§0); pick role=coordinator, fleet=<LABEL>
+flyctl ssh console -a swebench-dist-econ-verif --machine <COORD_ID> -C "curl -s localhost:8080/status"
 ```
 `/status` returns `armed`, `workers_seen`, `counts` (`pending`/`leased`/`done`/`dead`/`failed`),
 `resolved`/`total`, and a per-instance array (each row's `worker_id` is what `--instances` /
@@ -188,8 +207,10 @@ plumbing is single-sourced in [`tools/fleet-common.sh`](./tools/fleet-common.sh)
 ```bash
 tools/pull_results.sh LABEL [APP]     # sftp-get /data/bundle.tgz -> out/dist-<LABEL>/bundle/
 ```
-One-shot pull + extract that does **not** tear the fleet down. `APP` defaults to `swebench-agent-dist`
-(the econ/default app; pass `swebench-agent-dist-claude` for the claude arm). Overwrite-safe (the local
+One-shot pull + extract that does **not** tear the fleet down. `pull_results.sh`'s built-in `APP` default
+(`swebench-agent-dist`) predates the per-combo app scheme (§0) — always pass the combo's app explicitly
+as the second arg: `swebench-dist-<arm>-<slug>` (e.g. `swebench-dist-econ-verif`,
+`swebench-dist-claude-pro`). Overwrite-safe (the local
 `bundle.tgz` is `rm -f`'d before the sftp get). `run-distributed.sh` already does this automatically
 once it sees the `bundle_ready` beacon in the coordinator's logs — this is the manual/safety-net path
 when you want the bundle before teardown (e.g. a `KEEP=1` debug run) or the host process died first.
@@ -204,8 +225,8 @@ Destroys every machine tagged `fleet=<LABEL>` (workers AND the coordinator) plus
 volume `dist_coord_<LABEL>`. `run-distributed.sh` already tears its own fleet down at the end of a
 normal run (workers self-stop on drain, `restart:no`, so teardown just frees the stopped machines +
 coordinator + volume) — this `destroy` path is the safety net for an aborted run, a killed host
-process, or a stuck/never-draining fleet. Pass the same `ARM`/`APP`/`FLY_ORG` you launched with if
-they weren't the defaults, so the metadata lookup targets the right app.
+process, or a stuck/never-draining fleet. Pass the same `ARM`/`BENCHMARK`/`APP`/`FLY_ORG` you launched
+with if they weren't the defaults, so the derived `APP` and the metadata lookup target the right combo.
 
 ## 6. Known calibration note — ephemeral-rootfs IOPS
 Workers have no volume; DinD's data-root sits on the worker's ephemeral rootfs, which is capped at
@@ -256,29 +277,39 @@ benchmark's dataset / images / grade / timeout / traces / flow is
 
 ### 8.1 The benchmark axis (`BENCHMARK=`)
 Set `BENCHMARK` on any `run-distributed.sh` invocation (default `verified`). It is orthogonal to
-`ARM`. It selects the app suffix, the ids, the grader, the timeout, and the trace set:
+`ARM`. It selects the app suffix, the ids, the grader, the grade-side cap, and the trace set:
 
-| `BENCHMARK` | flow | ids from | per-instance image | grade | default timeout | traces (extra) |
+| `BENCHMARK` | flow | ids from | per-instance image | grade | grade-side cap | traces (extra) |
 |---|---|---|---|---|---|---|
-| `verified` (default) | resolve→grade | HF `princeton-nlp/SWE-bench_Verified` | `swebench/sweb.eval.x86_64.<key>` (public harness build/pull) or private mirror | swebench harness | 2700 s + difficulty tiers | events/err/**engine** |
-| `lite` | resolve→grade | HF `princeton-nlp/SWE-bench_Lite` | same as Verified | swebench harness | 2700 s | events/err/engine |
-| `pro` | resolve→grade | vendored `swebench-pro/sweap_eval_full_v2.jsonl` (no HF pull) | `51jaswanth15/sweap-images:<tag>` (mirror) | `tools/grade_pro.py` (Scale eval, `--use_local_docker`) | 10800 s (3 h) | events/err/engine |
-| `terminal` | **harness run** (fused, no patch) | vendored `terminal-bench/tasks/` dirs | built per-task from each task's Dockerfile (DinD; no registry) | `tools/harness_terminal.py` (Harbor `harbor run`, pytest end-state) | 3600 s + per-task `task.yaml` limit | events/err/**trajectory/sessions** |
-| `live_verified` | resolve→grade | HF `SWE-bench-Live/SWE-bench-Live` split `verified` (500 frozen ids) | `starryzhang/sweb.eval.x86_64.<key>` (public, own namespace) | SWE-bench-Live's OWN harness via `tools/grade_live.py` (trusts its `report.json`) | 2700 s + difficulty tiers (Verified defaults) | events/err/engine |
+| `verified` (default) | resolve→grade | HF `princeton-nlp/SWE-bench_Verified` | `swebench/sweb.eval.x86_64.<key>` (public harness build/pull) or private mirror | swebench harness | 86400 s (grade subprocess only; resolve is unbounded) | events/err/**engine** |
+| `lite` | resolve→grade | HF `princeton-nlp/SWE-bench_Lite` | same as Verified | swebench harness | 86400 s (grade subprocess only; resolve is unbounded) | events/err/engine |
+| `pro` | resolve→grade | vendored `swebench-pro/sweap_eval_full_v2.jsonl` (no HF pull) | `51jaswanth15/sweap-images:<tag>` (mirror) | `tools/grade_pro.py` (Scale eval, `--use_local_docker`) | 86400 s (grade subprocess only; resolve is unbounded) | events/err/engine |
+| `terminal` | **harness run** (fused, no patch) | vendored `terminal-bench/tasks/` dirs | built per-task from each task's Dockerfile (DinD; no registry) | `tools/harness_terminal.py` (Harbor `harbor run`, pytest end-state) | 86400 s outer-wrapper fallback only — Harbor's own per-task `task.toml` limit is the real ceiling | events/err/**trajectory/sessions** |
+| `live_verified` | resolve→grade | HF `SWE-bench-Live/SWE-bench-Live` split `verified` (500 frozen ids) | `starryzhang/sweb.eval.x86_64.<key>` (public, own namespace) | SWE-bench-Live's OWN harness via `tools/grade_live.py` (trusts its `report.json`) | 86400 s (grade subprocess only, Verified defaults) | events/err/engine |
 
-- **App scoping + LABEL fold.** `ARM=econ` uses app `swebench-agent-dist`; `ARM=claude` uses
-  `swebench-agent-dist-claude`. For non-`verified` benchmarks the launcher folds `-<benchmark>` onto
-  your `LABEL` (e.g. `LABEL=run1 BENCHMARK=pro` → fleet `run1-pro`), so different benchmarks of the
-  same arm never collide on the same app. `verified` keeps the raw LABEL (back-compat).
+- **App scoping + LABEL fold.** Each `ARM × BENCHMARK` combo gets its own fly app,
+  `swebench-dist-<arm>-<slug>` (slug = benchmark key with `_`→`-` and `verified`→`verif` — fly's
+  abuse filter blocks app names containing "verified" — e.g. `BENCHMARK=live_verified` →
+  `swebench-dist-econ-live-verif`) — so different benchmarks of the same arm never share an app (or
+  its remote builder) in the first place. `APP=` overrides the derived name; `fleet=<LABEL>` metadata
+  still further scopes runs WITHIN an app. For non-`verified` benchmarks the launcher ALSO folds
+  `-<benchmark>` onto your `LABEL` (e.g. `LABEL=run1 BENCHMARK=pro` → fleet `run1-pro`), so a label
+  collision within one app's fleet metadata can't happen either. `verified` keeps the raw LABEL
+  (back-compat).
 - **Two flows.** `resolve_then_grade` (verified/lite/pro/live_verified) runs the arm → `preds.json` → grade, and
   yields a leaderboard-submittable patch. `harness_run` (terminal) runs the agent *inside* the task
   container and grades with pytest — **there is no git patch**, so there is no submission for it.
-- **Timeouts (tune per §-intent: too high hides a wedge, too low kills a legit long resolve).** Each
-  benchmark's descriptor sets the default + difficulty tiers. Override with the benchmark's env var
-  (unset = descriptor default wins): `PER_INSTANCE_TIMEOUT` (verified/lite/live_verified — live_verified
-  inherits Verified's timeout knobs verbatim), `PRO_PER_INSTANCE_TIMEOUT`
-  (pro), `TERMINAL_PER_INSTANCE_TIMEOUT` (terminal), plus per-tier `TIER_TIMEOUT_{EASY,MEDIUM,HARD,VERYHARD}`
-  (and the `PRO_`-prefixed siblings).
+- **The harness enforces no task-level limits.** There is no per-instance wall-clock ceiling, no
+  difficulty-tier timeout, no stall/progress watchdog, and no timeout wrapper around the resolve
+  call — the coding agent owns its own watchdog/thrash detection. Each descriptor's `timeout`
+  field (default `86400` s, still env-overridable: `PER_INSTANCE_TIMEOUT` for
+  verified/lite/live_verified, `PRO_PER_INSTANCE_TIMEOUT` for pro, `TERMINAL_PER_INSTANCE_TIMEOUT`
+  for terminal) is a **grade-side subprocess cap only** — it bounds the grader (swebench
+  `run_evaluation --timeout`, `grade_pro`/`grade_live`, or terminal's outer-wrapper fallback), never
+  the agent's resolve. It never binds in practice. What DOES still protect the fleet: coordinator
+  `HEARTBEAT_TIMEOUT` (dead-worker-VM detection, not slow tasks), fleet backstops `MAXWAIT` (10-day
+  host poll ceiling) + `NO_PROGRESS_GIVEUP` (wedge detection), and — for terminal only — Harbor's own
+  per-task `task.toml` limit, enforced internally as that benchmark's real scoring rule.
 - **Failure-rerun (`MAX_FAILURE_RERUN`, default 1).** When the fresh queue drains, the coordinator
   gives each `failed` instance up to this many extra tries; a rerun's success overwrites the earlier
   failure in place (the bundle shows the rerun outcome). Set `0` to disable (exhausted attempts
@@ -454,11 +485,15 @@ s3://<bucket>/<prefix>/<benchmark>/<arm>/<YYYY-MM-DD>/<label>/
 **One-time provisioning** (billable Tigris bucket; prints S3 keys once → run it yourself):
 ```bash
 FLY_ORG=<your-team-org> ./provision-tigris.sh          # creates bucket swebench-dist-archive,
-                                                        # attaches it to BOTH fleet apps (econ+claude),
                                                         # saves the keypair to .env.tigris (gitignored)
 ```
-This sets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` as **fleet-app secrets** (auto-injected into every
-coordinator) and writes the same keypair to `e2e/distributed/.env.tigris` for the host lookup tool.
+This creates the Tigris bucket + keypair and writes it to `e2e/distributed/.env.tigris` (gitignored,
+0600) for the host lookup tool. **Per-combo auto-staging:** since apps are now per `ARM × BENCHMARK`
+combo and created on demand (§0, §8.1), you don't need to attach secrets to every app yourself —
+`run-distributed.sh` reads `.env.tigris` and stages `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` as
+**fleet-app secrets** onto that combo's app the first time it runs with `ARCHIVE_TIGRIS=1` (idempotent —
+skipped once the app already carries them; non-fatal on failure, meaning that run's archive would write
+0 objects until backfilled). Run `provision-tigris.sh` once, ahead of any combo's first archived run.
 
 **Enable on a run** (needs a fresh bake — the coordinator image gained the uploader + `boto3`):
 ```bash

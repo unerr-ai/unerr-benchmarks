@@ -16,7 +16,10 @@ when you point the SAME agent at a DIFFERENT task set:
     * image ref       (where the per-instance container image comes from)
     * flow            (resolve-then-grade  vs  a fused harness run)
     * grade           (how to score one prediction, and read "resolved")
-    * timeout policy   (difficulty tiers -> per-instance ceiling)
+    * timeout policy   (a deliberately never-binding ~24h cap applied ONLY to grade-side
+                        subprocesses and harness_terminal's outer-wrapper fallback — the
+                        resolve path itself enforces NO wall-clock; the agent owns its
+                        own watchdog)
     * traces          (which artifact files to sync off the ephemeral VM)
 
 suite.py imports `resolve_ids()` to turn a suite selector into the id list the
@@ -130,8 +133,12 @@ _TERMINAL_MINI_FALLBACK = []  # populated from the vendored tb task list
 # grade_dataset  dataset arg the grader wants (may differ from resolve dataset)
 # mini_suite     the suite key that yields the 5-id smoke set for this benchmark
 # image          human note on where per-instance images come from (docs/preflight)
-# timeout        {"default_env": <env var>, "default": <s>, "tiers": {...},
-#                 "tier_env": {tier: env var}, "difficulty": <how iid->tier>}
+# timeout        {"default_env": <env var>, "default": <s>} — a deliberately
+#                 never-binding ~24h cap. It applies ONLY to grade-side subprocesses
+#                 (grade_pro/grade_live use worker.timeout + 600; swebench
+#                 run_evaluation --timeout) and harness_terminal's outer-wrapper
+#                 fallback. The resolve path itself enforces NO wall-clock — the
+#                 agent owns its own watchdog.
 # traces         ordered list of (artifact filename, /complete field) to sync
 #
 # Consumers treat a MISSING optional key as "use the Verified default", so adding a
@@ -154,13 +161,10 @@ _VERIFIED = {
     ),
     "timeout": {
         "default_env": "PER_INSTANCE_TIMEOUT",
-        "default": 2700,
-        "difficulty": "verified_difficulty_dir",  # DIFFICULTY_DIR *.ids.txt
-        "tiers": {"easy": 10800, "medium": 10800, "hard": 18000, "veryhard": 28800},
-        "tier_env": {
-            "easy": "TIER_TIMEOUT_EASY", "medium": "TIER_TIMEOUT_MEDIUM",
-            "hard": "TIER_TIMEOUT_HARD", "veryhard": "TIER_TIMEOUT_VERYHARD",
-        },
+        # 24h — a never-binding cap on the grade-side subprocess only (swebench
+        # run_evaluation --timeout). The resolve path enforces NO wall-clock — the
+        # agent owns its own watchdog.
+        "default": 86400,
     },
     # The AGENT (arm) writes these; they are the same across resolve_then_grade
     # benchmarks because they are the agent's transcript, not the task's.
@@ -210,13 +214,10 @@ _PRO = {
     ),
     "timeout": {
         "default_env": "PRO_PER_INSTANCE_TIMEOUT",
-        "default": 10800,  # 3h — Pro tasks are enterprise-scale, harder than Verified
-        "difficulty": "field:difficulty",  # Pro rows carry a difficulty label
-        "tiers": {"easy": 10800, "medium": 10800, "hard": 18000, "veryhard": 28800},
-        "tier_env": {
-            "easy": "PRO_TIER_TIMEOUT_EASY", "medium": "PRO_TIER_TIMEOUT_MEDIUM",
-            "hard": "PRO_TIER_TIMEOUT_HARD", "veryhard": "PRO_TIER_TIMEOUT_VERYHARD",
-        },
+        # 24h — a never-binding cap on the grade-side subprocess only (grade_pro
+        # uses worker.timeout + 600). The resolve path enforces NO wall-clock — the
+        # agent owns its own watchdog.
+        "default": 86400,
     },
     "traces": (
         ("events.jsonl", "events_jsonl"),
@@ -253,10 +254,11 @@ _TERMINAL = {
     ),
     "timeout": {
         "default_env": "TERMINAL_PER_INSTANCE_TIMEOUT",
-        "default": 3600,  # 1h default; each task.yaml max_agent_timeout_sec + grace wins
-        "difficulty": "field:task_yaml_timeout",  # per-task limit from task.yaml
-        "tiers": {},  # no fixed tiers — the per-task limit drives it
-        "tier_env": {},
+        # 24h — a never-binding cap on harness_terminal's outer-wrapper fallback
+        # only. Harbor enforces each task's OWN task.toml timeout internally as the
+        # real benchmark scoring rule; this value never binds ahead of it. The
+        # resolve path itself enforces no wall-clock beyond that.
+        "default": 86400,
     },
     # Harbor writes its own transcript per trial (tmux/asciinema + trajectory) on
     # top of the agent's events.jsonl; the terminal adapter lists the exact files.

@@ -172,7 +172,7 @@ server-side (kept for audit, excluded from queries).
   coordinator queue.db meta — econ telemetry/tier_cost_db, claude litellm_spend_logs, always real LiteLLM
   spend) and `debug-workers.sh` (per worker:
   what it holds + a `»»`-flagged `flyctl logs` tail; `--follow` streams, `--grep`/`--lines`/`--instance`).
-  See distributed README §3. Per-benchmark contract lives in `tools/benchmarks.py` (dataset/images/grade/timeout/traces/flow).
+  See distributed README §3. Per-benchmark contract lives in `tools/benchmarks.py` (dataset/images/grade/grade-cap/traces/flow).
 - **Claude arm on SWE-bench (unerr ON + open-weight ensemble, distributed on fly):**
   [`e2e/reference/claude/fly-remote/README.md`](e2e/reference/claude/fly-remote/README.md)
   — the authoritative runbook: exact `run-distributed.sh` command (incl. the mandatory
@@ -211,8 +211,12 @@ server-side (kept for audit, excluded from queries).
   builds `overview.json` = grade% + real-LiteLLM cost-by-tier the same way as `status.sh --cost`). Enable
   per-run: `ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive` on `run-distributed.sh`/`bench.sh` (default
   off, non-fatal on failure, `terminal`→`--no-submission`). One-time provisioning (billable, prints S3 keys
-  once → run it yourself): `FLY_ORG=<team-org> ./provision-tigris.sh` (creates the bucket, attaches AWS_*
-  secrets to BOTH fleet apps, writes gitignored `.env.tigris`). Look runs up with no live fleet:
+  once → run it yourself): `FLY_ORG=<team-org> ./provision-tigris.sh` (creates the bucket, writes gitignored
+  `.env.tigris`). Apps are now per `ARM × BENCHMARK` (`swebench-dist-<arm>-<slug>`, slug = benchmark
+  key with `_`→`-` and `verified`→`verif` — fly's abuse filter blocks app names containing "verified"
+  — created on demand —
+  see the distributed README §0/§8.1), so `run-distributed.sh` auto-stages the AWS_* secrets from
+  `.env.tigris` onto each combo's app itself at prepare time (idempotent, non-fatal). Look runs up with no live fleet:
   `./tools/tigris-archive.sh list|overview <label>|get <label> [--only traces|grading|submission|bundle]`
   (creds from env or `.env.tigris`; never prints secrets). Wiring lives in `coordinator-entrypoint.sh`
   §6.9+§8, `Dockerfile.dist` (`boto3`), `run-distributed.sh` (env passthrough — never AWS_*).

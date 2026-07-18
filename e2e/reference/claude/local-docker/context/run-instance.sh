@@ -12,7 +12,8 @@
 #   REPO_DIR                 repo root in the image (SWE-bench default: /testbed)
 #   ART_DIR                  optional mounted dir for artifact exfiltration
 #
-# Runaway guard is the host docker-run --timeout (Claude CLI has no --max-turns).
+# No per-task wall-clock cap (Claude CLI has no --max-turns) — the agent runs
+# to completion; it owns its own watchdog now (mirrors the econ arm).
 # Args:
 #   $1               path to a file holding the problem_statement
 #
@@ -358,18 +359,10 @@ log "claude -p starting (mode=$MODE, repo=$REPO_DIR, model=$CLAUDE_MODEL)"
 # The container is the sandbox, so bypass permission checks for full autonomy.
 # --output-format stream-json (requires --verbose) gives a machine-readable event
 # stream for token/turn/tool telemetry, mirroring codex --json. There is no turn
-# cap (Claude CLI has no --max-turns) — the host docker-run --timeout bounds it.
+# cap (Claude CLI has no --max-turns) and no per-task wall-clock cap — the agent
+# runs to completion; it owns its own watchdog now (mirrors the econ arm).
 # SYSPROMPT_ARGS injects the autonomy directive: BOTH arms get the base (anti-stall);
 # ON also gets the unerr operator policy appended (built above).
-#
-# INTERNAL timeout: bound claude so a stalled tool/MCP call can never burn the
-# whole container budget AND silently lose work. When `timeout` fires it SIGTERMs
-# (then SIGKILLs) claude, but THIS script keeps running → telemetry + artifact
-# exfil + git diff still execute, so even a timed-out turn yields whatever edits
-# landed. Previously the host hard-killed `docker run` on its own timeout, which
-# killed run-instance.sh mid-flight (empty patch) and orphaned the container.
-# CLAUDE_TIMEOUT must be < the host docker-run timeout so THIS fires first.
-CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-1500}"
 
 # ── DEBUG-ONLY MCP heartbeat (DEBUG_MCP_PROBE=1) ─────────────────────────────
 # While claude -p runs, probe the unerr MCP path every PROBE_INTERVAL seconds via
@@ -414,7 +407,7 @@ hb_loop & HB_PID=$!
 WEB_ARGS=()
 [ "$OPEN_MODELS" = "1" ] && WEB_ARGS=( --disallowedTools "WebSearch" )
 
-timeout -k 20 "${CLAUDE_TIMEOUT}s" claude -p "$PROMPT" \
+claude -p "$PROMPT" \
   --model "$CLAUDE_MODEL" \
   "${SYSPROMPT_ARGS[@]}" \
   --output-format stream-json --verbose \
@@ -430,7 +423,6 @@ if [ -n "$PROBE_PID" ]; then
   first_fail=$(awk -F'\t' 'NR>1 && $6!="PASS"{print "@"$3"s "$6" ("$7")"; exit}' /tmp/mcp-probe.tsv 2>/dev/null)
   [ -n "$first_fail" ] && log "MCP heartbeat FIRST FAILURE: $first_fail" || log "MCP heartbeat: unerr healthy across the ENTIRE run (pre+during+post all PASS)"
 fi
-[ "$CLAUDE_RC" = 124 ] && log "claude -p TIMED OUT after ${CLAUDE_TIMEOUT}s — capturing partial diff"
 log "claude -p exit=$CLAUDE_RC"
 [ "$CLAUDE_RC" -ne 0 ] && sed 's/^/[claude.err] /' /tmp/claude.err >&2
 

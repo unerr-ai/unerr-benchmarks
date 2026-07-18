@@ -9,7 +9,7 @@
 #
 # Provides:
 #   fc_fly_token            -> exports FLY_API_TOKEN (env first, else ~/.fly/config.yml). Never prints it.
-#   fc_default_app <arm>    -> the app for an arm (econ->swebench-agent-dist, claude->...-claude)
+#   fc_default_app <arm> [benchmark] -> the app for a combo (swebench-dist-<arm>-<slug>; slug = benchmark with '_'->'-' and 'verified'->'verif' — fly blocks names containing "verified")
 #   fc_machines <app> <label> [role]   -> machine ids, one per line (role optional: coordinator|worker)
 #   fc_coord <app> <label>             -> the coordinator machine id (first match), or empty
 #   fc_status <app> <coord_mid>        -> raw /status JSON (curl'd inside the coordinator via ssh)
@@ -30,12 +30,19 @@ fc_fly_token() {
   [ -n "${FLY_API_TOKEN:-}" ] || { echo "[fleet-common] no fly token (run: flyctl auth login)" >&2; return 1; }
 }
 
-# ── arm -> app (mirrors run-distributed.sh DEFAULT_APP / the -claude fold) ──
-fc_default_app() {
-  case "${1:-}" in
-    claude) echo "swebench-agent-dist-claude" ;;
-    *)      echo "swebench-agent-dist" ;;
-  esac
+# ── (arm, benchmark) -> app (mirrors run-distributed.sh DEFAULT_APP — keep the
+# two derivations byte-identical). Per-(arm×benchmark) apps: each combo builds
+# and runs on its OWN fly app so independent triggers never contend on one
+# app's remote builder. Fly app names allow [a-z0-9-] only, so the benchmark
+# key's '_' -> '-' (live_verified -> live-verified). benchmark defaults to
+# verified when omitted (back-compat with older single-arg callers). ──
+fc_default_app() {  # <arm> [benchmark]
+  local arm="${1:-econ}" bench="${2:-verified}"
+  bench="${bench//_/-}"
+  # fly's abuse filter BLOCKS app names containing "verified" (phishing target),
+  # so the app slug shortens it: verified -> verif, live-verified -> live-verif.
+  bench="${bench//verified/verif}"
+  echo "swebench-dist-${arm}-${bench}"
 }
 
 # ── machine ids for a fleet, optionally role-scoped (same query as run-distributed.sh fleet_ids) ──

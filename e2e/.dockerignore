@@ -25,6 +25,7 @@
 **/reports/
 **/logs/
 **/grading/
+**/failed-runs/
 **/*.tgz
 
 # other arms are not part of the econ fleet image
