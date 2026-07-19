@@ -377,11 +377,15 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     Worker._run_harness (worker-loop.py) in the harness_run contract:
     (resolved, report_text, patch, meta_text). `patch` is always '' — Harbor
     grades in-container (tests/test.sh -> pytest -> reward.txt, cited in the
-    module docstring), there is no git diff to hand the coordinator. Also
-    mints a per-instance LiteLLM virtual key up front and, when minting
-    succeeded, reads its real spend back into meta_text's `cost` field after
-    the harbor subprocess exits — the same real-spend attribution the claude
-    arm's run-benchmark.py does for SWE-bench.
+    module docstring), there is no git diff to hand the coordinator. Exports
+    ECON_TASK_DEADLINE_MS (absolute epoch-ms) into the agent's env, sized off
+    the task's own task.toml budget rather than the outer GRACE_S ceiling.
+    Also mints a per-instance LiteLLM virtual key up front and, when minting
+    succeeded, reads its real spend back after the harbor subprocess exits
+    into both meta_text's `cost` field (the claude arm's run-benchmark.py's
+    real-spend attribution for SWE-bench) and `telemetry` (turns/usd/
+    in_tokens/out_tokens/by_tier — the shape econ-telemetry.py/tigris_archive.py
+    already expect, previously left null for every TB row).
     @sem domain=benchmark-harness role=orchestration
     """
     task_dir = _task_dir(worker, iid)
@@ -423,6 +427,20 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     ceiling = worker.timeout
     task_hint = _task_timeout_hint(task_dir)
     timeout_s = max(ceiling, task_hint) + GRACE_S
+
+    # H4.4 (gap-closure-plan.md, round-2 finding) — deadline wire: export
+    # ECON_TASK_DEADLINE_MS so the agent isn't clock-blind. econ reads it as
+    # an ABSOLUTE epoch-ms deadline (packages/opencode/src/session/prompts/
+    # preambles.ts timeBudgetLine(): `Number(process.env.ECON_TASK_DEADLINE_MS)`
+    # compared straight against Date.now(); prompt.ts headlessHoldMs() same
+    # convention) — never a duration. Set from the TASK's OWN declared
+    # budget (task_hint, scraped from task.toml timeout_sec), NOT timeout_s
+    # above — that bakes in GRACE_S (600s harbor/CLI overhead slack the
+    # agent has no business budgeting against). Falls back to the worker's
+    # flat per-instance ceiling only when task.toml has no timeout_sec to
+    # scrape (task_hint == 0).
+    task_budget_s = task_hint or ceiling
+    env["ECON_TASK_DEADLINE_MS"] = str(int(time.time() * 1000) + task_budget_s * 1000)
 
     cmd = [
         HARBOR_BIN, "run",
@@ -533,7 +551,29 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         # cost_usd above stays Harbor's own model-priced agent_result figure
         # (debugging only) — "cost" always means real LiteLLM spend, per
         # repo convention, so this is the field that counts.
-        meta["cost"] = fetch_cost(gateway_root, litellm_key, vk, alias=vk_alias)
+        cost = fetch_cost(gateway_root, litellm_key, vk, alias=vk_alias)
+        meta["cost"] = cost
+        # H4.3 (gap-closure-plan.md) — TB rows shipped meta_json.telemetry
+        # null: unlike meta["cost"], build_overview/_row_from_meta
+        # (tigris_archive.py, debug_instance.py) read turns/in_tokens/
+        # out_tokens ONLY off meta["telemetry"], never off meta["cost"] —
+        # so cost-only above left turn/token attribution blind even though
+        # the vk-scoped spend already carries it. Reuse the SAME harvest
+        # (litellm_cost.summarize_rows, called inside fetch_cost) instead of
+        # re-parsing anything — its shape already matches e2e/econ/
+        # econ-telemetry.py's convention (see that module's docstring), so
+        # this is a straight field copy. Its per-vk LLM-call count
+        # (`requests`) maps 1:1 to econ-telemetry.py's `turns` (each LiteLLM
+        # call is one econ "step_finish").
+        if cost.get("source") == "litellm_spend_logs":
+            meta["telemetry"] = {
+                "turns": cost.get("requests") or 0,
+                "usd": cost.get("usd"),
+                "in_tokens": cost.get("in_tokens"),
+                "cached_in": cost.get("cached_in"),
+                "out_tokens": cost.get("out_tokens"),
+                "by_tier": cost.get("by_tier"),
+            }
     meta_text = json.dumps(meta)
 
     _collect_traces(trial_dir, art_dir, resolved, harbor_log=logpath)
