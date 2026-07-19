@@ -27,14 +27,19 @@ by this module.
        stdin, and tees to /logs/agent/claude-code.txt. Subclassing it and
        injecting our prompt into that ONE kwarg in `__init__` reuses run()
        COMPLETELY UNCHANGED — no auth/model/output-teeing code is duplicated
-       here, and the class stays arm-agnostic (it never reads
-       ANTHROPIC_*/gateway env itself). The ONE run-influencing override is
-       `build_cli_flags()` (below): it swaps Harbor's default
+       here, and the class stays arm-agnostic (it never hard-codes a provider or
+       gateway URL). It makes two run-influencing overrides:
+       (1) `build_cli_flags()` (below) swaps Harbor's default
        `--permission-mode=bypassPermissions` for the nuclear
        `--dangerously-skip-permissions`, because bypassPermissions is silently
        downgraded to interactive prompt-mode when `claude -p` runs as root (as
        terminal-bench containers do) and then denies every Write/Edit/Bash —
-       see that method's own docstring for the full root-cause.
+       see that method's own docstring for the full root-cause; and
+       (2) `ENV_VARS` (below) forwards the per-tier model aliases
+       (ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL) + the main-loop
+       ANTHROPIC_MODEL into the container, because run()'s hardcoded env dict
+       drops them otherwise and the main loop then defaults to the missing
+       claude-opus-4-8 — see that block's own comment for the full root-cause.
      - `ClaudeCode._build_register_mcp_servers_command()` writes
        `self.mcp_servers` (a `list[MCPServerConfig]`, normally populated from
        task config) to a USER-scoped `$CLAUDE_CONFIG_DIR/.claude.json` —
@@ -99,6 +104,7 @@ import re
 from pathlib import Path
 from typing import override
 
+from harbor.agents.installed.base import EnvVar
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.node_install import nvm_node_install_snippet
 from harbor.environments.base import BaseEnvironment
@@ -290,13 +296,59 @@ class ClaudeUnerrAgent(ClaudeCode):
     real-Anthropic `claude-real`; the arm's own auth/model env, set by
     harness_terminal.py, decides which provider it talks to). This class adds
     no provider/gateway-specific logic — it stages the harness, lets
-    ClaudeCode's own run() (unchanged) drive the CLI, and overrides only
-    build_cli_flags() to force `--dangerously-skip-permissions` (the arm-
-    agnostic permission bypass proven by run-instance.sh; see that method).
+    ClaudeCode's own run() (unchanged) drive the CLI, and makes two
+    run-influencing overrides: build_cli_flags() forces
+    `--dangerously-skip-permissions` (the arm-agnostic permission bypass proven
+    by run-instance.sh; see that method), and ENV_VARS forwards the per-tier
+    GPT model aliases (+ the main-loop ANTHROPIC_MODEL) into the container so the
+    gateway ensemble actually routes (see the ENV_VARS block below for the
+    root cause).
     @sem domain=benchmark-harness role=agent-adapter
     """
 
     UNERR_REMOTE_DIR = "/tmp/unerr-harness"
+
+    # PER-TIER MODEL FORWARDING (root-caused 2026-07-19 on the GPT-5.6 gateway
+    # smoke). Harbor's ClaudeCode.run() builds the CONTAINER env from a hardcoded
+    # key list + the alias-flatten + `env.update(self._resolved_env_vars)` — it
+    # does NOT forward arbitrary host/extra_env vars. So the four
+    # ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL aliases that
+    # harness_terminal._arm_agent_config puts in the agent's env NEVER reached
+    # the CLI, and with no concrete --model the main loop fell back to Claude
+    # Code's built-in default model id (claude-opus-4-8) — which the GPT gateway
+    # does not publish -> "API Error: 400 ... Invalid model name passed in
+    # model=claude-opus-4-8" on turn 1, every task 0-resolved. Declaring the
+    # aliases as ENV_VARS routes them through `_resolved_env_vars`, which run()
+    # merges into the container env LAST (after the alias-flatten, ~line 1477 of
+    # claude_code.py), so:
+    #   * ANTHROPIC_MODEL (the main-loop model) is pinned to the SONNET alias
+    #     value (== `conductor`, the one tier harness_terminal always sets) — the
+    #     main loop runs on the conductor model instead of the missing
+    #     claude-opus-4-8; and
+    #   * OPUS/HAIKU/FABLE keep their distinct per-tier models, so in-agent
+    #     escalation and sub-agents each resolve to their intended GPT tier
+    #     instead of collapsing to one.
+    # env_fallback reads the agent's extra_env then os.environ (harness_terminal
+    # merges extra_env into the harbor subprocess env), and a descriptor whose
+    # fallback var is UNSET resolves to None and is dropped — so "absent stays
+    # absent": the real-Anthropic claude-real arm (concrete --model, no
+    # ANTHROPIC_DEFAULT_* set) is unaffected. Empty --model on the unerr path is
+    # still REQUIRED: a concrete --model makes run() fire the flatten, which also
+    # sets CLAUDE_CODE_SUBAGENT_MODEL (NOT re-overridden here) and would pin
+    # every sub-agent to one tier.
+    ENV_VARS = [
+        *ClaudeCode.ENV_VARS,
+        EnvVar("unerr_main_model", env="ANTHROPIC_MODEL", type="str",
+               env_fallback="ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        EnvVar("unerr_sonnet_model", env="ANTHROPIC_DEFAULT_SONNET_MODEL",
+               type="str", env_fallback="ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        EnvVar("unerr_opus_model", env="ANTHROPIC_DEFAULT_OPUS_MODEL",
+               type="str", env_fallback="ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        EnvVar("unerr_haiku_model", env="ANTHROPIC_DEFAULT_HAIKU_MODEL",
+               type="str", env_fallback="ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        EnvVar("unerr_fable_model", env="ANTHROPIC_DEFAULT_FABLE_MODEL",
+               type="str", env_fallback="ANTHROPIC_DEFAULT_FABLE_MODEL"),
+    ]
 
     @staticmethod
     @override

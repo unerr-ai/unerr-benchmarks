@@ -286,11 +286,17 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
         # the flag). Harbor's ClaudeCode.run() FLATTENS all tier aliases to the
         # single --model value whenever ANTHROPIC_BASE_URL is set ("set all
         # model aliases to the same model"), which would collapse the GPT
-        # luna/terra/sol/sol-high ensemble to one tier. With no --model,
-        # ANTHROPIC_MODEL is never set, the flatten is skipped, and the four
-        # aliases above each route to their intended model. The
-        # TERMINAL_STOCK_AGENT=1 bare baseline keeps a concrete --model (it has
-        # no tiering to preserve and needs one defined model).
+        # luna/terra/sol/sol-high ensemble to one tier AND pin every sub-agent
+        # via CLAUDE_CODE_SUBAGENT_MODEL. With no --model, ANTHROPIC_MODEL is
+        # never set pre-flatten so the flatten is skipped. But the aliases set in
+        # this env dict do NOT reach the container on their own — run() builds
+        # the container env from a hardcoded key list, so the actual forwarding
+        # is done by ClaudeUnerrAgent.ENV_VARS (harbor_agents.py), which re-emits
+        # these four aliases + pins the main-loop ANTHROPIC_MODEL to the SONNET
+        # value; without that the CLI defaulted to claude-opus-4-8 (a model the
+        # gateway does not publish) -> 400 on turn 1. The TERMINAL_STOCK_AGENT=1
+        # bare baseline keeps a concrete --model (no tiering to preserve, and it
+        # is not the ClaudeUnerrAgent so it has no ENV_VARS forwarding).
         model = conductor if stock_agent else ""
         return claude_agent, model, env
 
