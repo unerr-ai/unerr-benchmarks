@@ -219,7 +219,12 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
                 four ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL tier
                 aliases forwarded from the host env when set (absent stays
                 absent — no invented defaults) so an in-agent escalation to
-                opus/haiku/fable resolves through the gateway too.
+                opus/haiku/fable resolves through the gateway too. The unerr
+                path passes NO concrete --model (returns "") — Harbor would
+                otherwise flatten every tier alias to that one model behind a
+                custom base URL, collapsing the ensemble; the SONNET alias is
+                pinned to `conductor` as the main-loop model instead. The
+                stock baseline still gets a concrete --model.
       claude-real -> same import-path swap, CLAUDE_CODE_OAUTH_TOKEN only —
                 real Anthropic subscription auth passed through from the
                 worker's own env untouched, same as e2e/reference/claude/
@@ -260,10 +265,12 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
         # Forward the four Claude Code tier aliases when the host set them, so
-        # an in-agent escalation to opus/haiku/fable also resolves through the
-        # gateway (the conductor already works because `conductor` above is
-        # passed as --model directly). Absent stays absent — no invented
-        # defaults, byte-identical behavior when the host doesn't set these.
+        # every tier (main loop + in-agent escalation to opus/haiku/fable)
+        # resolves through the gateway. Absent stays absent — no invented
+        # defaults — EXCEPT the SONNET alias, pinned to `conductor` (host value
+        # or DEFAULT_CONDUCTOR_MODEL) right below: it's the main-loop model and,
+        # since the unerr path no longer passes a concrete --model, it's the
+        # only thing telling Claude Code what to run.
         for tier_var in (
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -273,7 +280,19 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
             tier_val = os.environ.get(tier_var)
             if tier_val:
                 env[tier_var] = tier_val
-        return claude_agent, conductor, env
+        env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = conductor
+        # PER-TIER ENSEMBLE FIX (root-caused 2026-07-19): pass NO concrete
+        # --model on the unerr custom-agent path (empty string -> run() omits
+        # the flag). Harbor's ClaudeCode.run() FLATTENS all tier aliases to the
+        # single --model value whenever ANTHROPIC_BASE_URL is set ("set all
+        # model aliases to the same model"), which would collapse the GPT
+        # luna/terra/sol/sol-high ensemble to one tier. With no --model,
+        # ANTHROPIC_MODEL is never set, the flatten is skipped, and the four
+        # aliases above each route to their intended model. The
+        # TERMINAL_STOCK_AGENT=1 bare baseline keeps a concrete --model (it has
+        # no tiering to preserve and needs one defined model).
+        model = conductor if stock_agent else ""
+        return claude_agent, model, env
 
     if worker.arm == "claude-real":
         oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
@@ -540,11 +559,15 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # (see report).
     default_max_retries = "1" if ":" in agent else "0"
     max_retries = os.environ.get("TERMINAL_MAX_RETRIES", default_max_retries)
+    # --model is OMITTED when `model` is empty (the unerr gateway-claude path —
+    # see _arm_agent_config: keeps Harbor from flattening the per-tier aliases).
+    # Every other path (claude-real, econ, stock baseline) passes it.
+    model_args = ["--model", model] if model else []
     cmd = [
         HARBOR_BIN, "run",
         "--path", task_dir,
         agent_flag, agent,
-        "--model", model,
+        *model_args,
         "--env", "docker",
         "--jobs-dir", jobs_dir,
         "--job-name", iid,
@@ -636,7 +659,10 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         "instance_id": iid,
         "arm": worker.arm,
         "agent": agent,
-        "model": model,
+        # `model` is "" on the unerr gateway-claude path (no --model passed);
+        # fall back to the pinned SONNET alias so meta still names the real
+        # main-loop tier instead of an empty string.
+        "model": model or extra_env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
         "n_input_tokens": stats.get("n_input_tokens"),
         "n_cache_tokens": stats.get("n_cache_tokens"),
         "n_output_tokens": stats.get("n_output_tokens"),

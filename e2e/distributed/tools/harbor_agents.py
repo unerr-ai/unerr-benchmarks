@@ -26,9 +26,15 @@ by this module.
        stream-json ...` from `build_cli_flags()`, pipes the instruction over
        stdin, and tees to /logs/agent/claude-code.txt. Subclassing it and
        injecting our prompt into that ONE kwarg in `__init__` reuses run()
-       COMPLETELY UNCHANGED — no auth/model/permission-bypass/output-teeing
-       code is duplicated here, and the class stays arm-agnostic (it never
-       reads ANTHROPIC_*/gateway env itself).
+       COMPLETELY UNCHANGED — no auth/model/output-teeing code is duplicated
+       here, and the class stays arm-agnostic (it never reads
+       ANTHROPIC_*/gateway env itself). The ONE run-influencing override is
+       `build_cli_flags()` (below): it swaps Harbor's default
+       `--permission-mode=bypassPermissions` for the nuclear
+       `--dangerously-skip-permissions`, because bypassPermissions is silently
+       downgraded to interactive prompt-mode when `claude -p` runs as root (as
+       terminal-bench containers do) and then denies every Write/Edit/Bash —
+       see that method's own docstring for the full root-cause.
      - `ClaudeCode._build_register_mcp_servers_command()` writes
        `self.mcp_servers` (a `list[MCPServerConfig]`, normally populated from
        task config) to a USER-scoped `$CLAUDE_CONFIG_DIR/.claude.json` —
@@ -283,8 +289,10 @@ class ClaudeUnerrAgent(ClaudeCode):
     agent — for BOTH claude terminal arms (gateway-routed `claude` and
     real-Anthropic `claude-real`; the arm's own auth/model env, set by
     harness_terminal.py, decides which provider it talks to). This class adds
-    no provider/gateway-specific logic — it only stages the harness and lets
-    ClaudeCode's own run() (unchanged) drive the CLI.
+    no provider/gateway-specific logic — it stages the harness, lets
+    ClaudeCode's own run() (unchanged) drive the CLI, and overrides only
+    build_cli_flags() to force `--dangerously-skip-permissions` (the arm-
+    agnostic permission bypass proven by run-instance.sh; see that method).
     @sem domain=benchmark-harness role=agent-adapter
     """
 
@@ -296,6 +304,38 @@ class ClaudeUnerrAgent(ClaudeCode):
         # Distinct from AgentName.CLAUDE_CODE ("claude-code") so job/trial
         # labeling never conflates a harnessed run with Harbor's bare agent.
         return "claude-code-unerr"
+
+    @override
+    def build_cli_flags(self) -> str:
+        """Force the PROVEN permission bypass (run-instance.sh's exact flow):
+        drop Harbor's default `--permission-mode=bypassPermissions` and use the
+        nuclear `--dangerously-skip-permissions` instead.
+
+        WHY (root-caused 2026-07-19 on the GPT-5.6 gateway smoke): Claude Code
+        SILENTLY DOWNGRADES `bypassPermissions` mode to the interactive
+        prompt-mode when `claude -p` runs as ROOT (terminal-bench task
+        containers run the agent as root). In non-interactive `-p` mode that
+        prompt can't be answered, so every Write/Edit/Bash then comes back
+        "requested permissions to write to <path>, but you haven't granted it
+        yet" and the CLI exits non-zero -> Harbor's NonZeroAgentExitCodeError,
+        0 tasks resolved. `--dangerously-skip-permissions` is instead HONORED
+        under root because the inherited ClaudeCode.run() already exports
+        IS_SANDBOX=1 ("Allow bypassPermissions mode when running as root inside
+        containers"). run-instance.sh — the proven SWE-bench unerr+Claude flow
+        that DOES land real edits in root containers — uses exactly this flag +
+        IS_SANDBOX and passes NO --permission-mode; we mirror it byte-for-byte
+        so no residual mode flag can re-trigger the downgrade. Applies to BOTH
+        claude arms (run-instance.sh's skip flag is unconditional across
+        open-models and claude-real)."""
+        # Remove --permission-mode at the SOURCE (the base renderer skips a
+        # None-valued flag) rather than string-stripping the rendered flags:
+        # that same string also carries the UNQUOTED --append-system-prompt
+        # value, so a regex over it could bite into the prompt. Then append the
+        # nuclear bypass as a trailing token — it can never touch an earlier
+        # flag's value.
+        self._resolved_flags["permission_mode"] = None
+        flags = super().build_cli_flags()
+        return f"{flags} --dangerously-skip-permissions".strip()
 
     def __init__(self, logs_dir, *args, **kwargs):
         self._hooks_on = os.environ.get("HARNESS_HOOKS") == "1"
