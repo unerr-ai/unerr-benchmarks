@@ -327,9 +327,15 @@ def _find_result_json(jobs_dir: str) -> str | None:
     """The one trial's result.json under jobs_dir (TrialPaths.result_path —
     cited in the module docstring). Globs rather than assuming an exact
     trial_name (unconfirmed live), so a harbor version that renames the
-    trial dir doesn't silently break this."""
+    trial dir doesn't silently break this. Harbor 0.20.0 ALSO writes a
+    job-level result.json one directory up; taking the shallow match made
+    trial_dir the job dir, so every _collect_traces glob (trajectory.json,
+    sessions.cast, err.txt) missed the nested trial dir — prefer the DEEPEST
+    match, newest mtime on ties (retries create sibling trial dirs)."""
     matches = glob.glob(os.path.join(jobs_dir, "**", "result.json"), recursive=True)
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    return max(matches, key=lambda p: (p.count(os.sep), os.path.getmtime(p)))
 
 
 def _copy_first(patterns: list[str], dest: str) -> bool:
