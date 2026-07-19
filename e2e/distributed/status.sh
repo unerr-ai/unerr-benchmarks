@@ -9,18 +9,21 @@
 #   (no args)            the newest out/bench-*/manifest.tsv (last bench.sh matrix)
 #   --matrix <id>        that matrix's fleets (out/bench-<id>/manifest.tsv)
 #   --manifest <path>    an explicit manifest.tsv
-#   <LABEL> [APP]        one fleet by label (APP inferred: arm from a -claude fold
-#                        in the label, benchmark from $BENCHMARK else the label's
-#                        -pro/-terminal/-live_verified/-lite suffix, else verified)
+#   <LABEL> [APP]        one fleet by label (APP inferred: arm from a -claude or
+#                        -claude-real fold in the label, benchmark from $BENCHMARK
+#                        else the label's -pro/-terminal/-live_verified/-lite
+#                        suffix, else verified)
 #
 # Options:
 #   --watch [secs]   re-print every <secs> (default 15) until Ctrl-C — the monitor
 #   --instances      also print the per-instance table (id, status, resolved, worker)
 #   --cost           add cost + per-tier (conductor/oracle/reasoner/executor) token·turn·$
 #                    breakdown, read live from the coordinator queue.db per-instance meta
-#                    (econ: telemetry/tier_cost_db; claude: litellm_spend_logs). Fleet total
-#                    + a MATRIX TOTAL (cost across all runs in view). Only completed
-#                    instances have cost (it accrues on completion).
+#                    (econ: telemetry/tier_cost_db; claude: litellm_spend_logs; claude-real:
+#                    meta.cost.source=="claude-native" — real Anthropic $, broken out on
+#                    its own line below the fleet total, never counted as litellm spend).
+#                    Fleet total + a MATRIX TOTAL (cost across all runs in view). Only
+#                    completed instances have cost (it accrues on completion).
 #   --json           dump each fleet's raw /status JSON instead of the summary line
 #
 # Examples:
@@ -73,11 +76,17 @@ _bench_from_label() {  # <label>
 labels=(); apps=(); combos=()
 [ -n "$MATRIX" ] && [ -z "$MANIFEST" ] && MANIFEST="$HERE/out/bench-$MATRIX/manifest.tsv"
 if [ "${#POS[@]}" -ge 1 ]; then
-  # explicit LABEL [APP] — infer app from the label's -claude fold + benchmark suffix if not given
+  # explicit LABEL [APP] — infer app from the label's -claude/-claude-real fold +
+  # benchmark suffix if not given. claude-real MUST be matched before the bare
+  # *claude* fallback (its label also contains "claude") or it mislabels as claude.
   lbl="${POS[0]}"; app="${POS[1]:-}"
   if [ -z "$app" ]; then
     bench="$(_bench_from_label "$lbl")"
-    case "$lbl" in *claude*) app="$(fc_default_app claude "$bench")" ;; *) app="$(fc_default_app econ "$bench")" ;; esac
+    case "$lbl" in
+      *claude-real*) app="$(fc_default_app claude-real "$bench")" ;;
+      *claude*)      app="$(fc_default_app claude "$bench")" ;;
+      *)             app="$(fc_default_app econ "$bench")" ;;
+    esac
   fi
   labels+=("$lbl"); apps+=("$app"); combos+=("$lbl")
 else
@@ -167,6 +176,12 @@ if want_cost and metapath:
     tot_turns = tot_in = tot_out = priced_insts = 0
     tiers = {}   # tier -> {usd,in,out,calls,insts}
     TIER_ORDER = ["conductor", "oracle", "reasoner", "executor", "fast", "other"]
+    # claude-native (claude-real arm): real-Anthropic $, meta.cost.source=="claude-native".
+    # Folded into fleet_usd/priced_insts like any other row, but tracked separately too
+    # so the line below can label it distinctly — NEVER as litellm spend — and so an
+    # untracked native row (usd None) shows as "n/a" rather than silently reading as $0.
+    native_usd = 0.0
+    native_priced = native_na = 0
     for row in rows:
         meta = row[3] if isinstance(row, list) and len(row) >= 4 else None
         if not isinstance(meta, dict):
@@ -175,6 +190,7 @@ if want_cost and metapath:
         tcd = meta.get("tier_cost_db") or {}
         cst = meta.get("cost") or {}
         cst = cst if isinstance(cst, dict) else {}
+        is_native = cst.get("source") == "claude-native"
         # authoritative usd: prefer claude litellm cost, else econ sqlite, else stream
         u = cst.get("usd")
         if u is None:
@@ -182,9 +198,14 @@ if want_cost and metapath:
         if u is None:
             u = tel.get("usd")
         if u is None:
+            if is_native:
+                native_na += 1
             continue                     # no cost record yet (e.g. still running)
         fleet_usd += float(u or 0)
         priced_insts += 1
+        if is_native:
+            native_usd += float(u or 0)
+            native_priced += 1
         tot_turns += int(tel.get("turns") or 0)
         tot_in += int(tel.get("in_tokens") or cst.get("in_tokens") or 0)
         tot_out += int(tel.get("out_tokens") or cst.get("out_tokens") or 0)
@@ -201,6 +222,10 @@ if want_cost and metapath:
                 a["calls"] += int(t.get("requests") or t.get("messages") or 0)
                 a["insts"] += 1
     print(f"      cost=${fleet_usd:.4f}  turns={tot_turns}  in={_kfmt(tot_in)} out={_kfmt(tot_out)}  (priced {priced_insts} inst)")
+    if native_priced or native_na:
+        native_str = f"${native_usd:.4f}" if native_priced else "n/a (claude-native)"
+        na_note = f"  ({native_na} n/a)" if native_na else ""
+        print(f"        of which claude-native (Anthropic $, NOT litellm spend): {native_str}  ×{native_priced}{na_note}")
     ordered = [t for t in TIER_ORDER if t in tiers] + [t for t in tiers if t not in TIER_ORDER]
     for tier in ordered:
         a = tiers[tier]

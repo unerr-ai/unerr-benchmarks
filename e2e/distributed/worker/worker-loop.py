@@ -355,14 +355,14 @@ class Worker:
         runner = self._runner_path()
         cmd = [VENV_PY, runner, "--ids", iid, "--out", scratch,
                "--label", self.run_id, "--parallel", "1"]
-        # Both resolve_then_grade runners (econ, claude) are dataset-parameterized
-        # (their --dataset defaults to Verified). Hand them the ACTIVE benchmark's
-        # dataset/split + — for Pro — the vendored id-source, the sweap image
-        # namespace, and the /app repo dir off the descriptor, so it stops
-        # resolving Pro ids against Verified (the smoke's "no instances after
-        # filter" → empty-patch bug). For Verified this is a no-op — --dataset
-        # equals the runner's own default.
-        if self.arm in ("econ", "claude"):
+        # Both resolve_then_grade runners (econ, claude/claude-real — the latter two
+        # share one run-benchmark.py) are dataset-parameterized (their --dataset
+        # defaults to Verified). Hand them the ACTIVE benchmark's dataset/split +
+        # — for Pro — the vendored id-source, the sweap image namespace, and the
+        # /app repo dir off the descriptor, so it stops resolving Pro ids against
+        # Verified (the smoke's "no instances after filter" → empty-patch bug).
+        # For Verified this is a no-op — --dataset equals the runner's own default.
+        if self.arm in ("econ", "claude", "claude-real"):
             cmd += ["--dataset", self.dataset, "--split", self.split]
             ids_jsonl = self.bench.get("ids_jsonl")
             if ids_jsonl:
@@ -666,11 +666,14 @@ class Worker:
     # else on disk is a big per-task artifact (the pulled eval image
     # sweb.eval.*/sweap-images/starryzhang + the built unerr-econ-run:*).
     # KEEP_IMAGE_REPOS overrides the default set (comma-separated substrings) for
-    # ad-hoc arms without a code change.
+    # ad-hoc arms without a code change. unerr-claude-real-toolbox covers the
+    # claude-real arm's own tag (worker-entrypoint.sh's TOOLBOX_TAG default is
+    # unerr-${ARM}-toolbox unless a launcher overrides it to reuse claude's tag) —
+    # listed defensively so either resolution survives a between-instance prune.
     _KEEP_IMAGE_REPOS = tuple(
         s.strip() for s in os.environ.get(
             "KEEP_IMAGE_REPOS",
-            "econ-toolbox,unerr-claude-toolbox,alpine",
+            "econ-toolbox,unerr-claude-toolbox,unerr-claude-real-toolbox,alpine",
         ).split(",") if s.strip()
     )
 
@@ -746,9 +749,13 @@ class Worker:
     def _runner_path(self) -> str:
         # Each arm ships its resolver at a fixed /work path in the distributed image
         # (Slice E COPYs the arm's local-docker context there). econ is the v1 arm.
+        # claude-real (real Anthropic models) shares claude's run-benchmark.py file —
+        # that script's own --open-models/CLAUDE_OPEN_MODELS branch is what forks
+        # LiteLLM-routed vs real-Claude auth; claude-real just never sets it.
         runners = {
             "econ": "/work/local-docker/run-benchmark.py",
             "claude": "/work/claude/local-docker/run-benchmark.py",
+            "claude-real": "/work/claude/local-docker/run-benchmark.py",
         }
         return runners.get(self.arm, "/work/local-docker/run-benchmark.py")
 

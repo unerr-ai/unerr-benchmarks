@@ -331,6 +331,17 @@ def main() -> int:
     # (the else branch below) exactly as before.
     open_models = args.open_models or os.environ.get("CLAUDE_OPEN_MODELS") == "1"
 
+    # claude-real: single-arm harness run (like open-models) but with STOCK
+    # real-Anthropic Claude Code — no LiteLLM gateway, no model-alias env, no
+    # cost override beyond auth. ON via host env CLAUDE_REAL=1; mutually
+    # exclusive with open-models (both replace the plain real-Claude A/B path,
+    # never combine).
+    claude_real = os.environ.get("CLAUDE_REAL") == "1"
+    if open_models and claude_real:
+        print("ERROR: CLAUDE_REAL=1 and CLAUDE_OPEN_MODELS=1/--open-models are "
+              "mutually exclusive — pick one arm", file=sys.stderr)
+        return 1
+
     auth_env: dict[str, str] = {}
     if open_models:
         litellm_key = _load_litellm_key()
@@ -367,6 +378,11 @@ def main() -> int:
                   "or ANTHROPIC_API_KEY — or use --preflight for the zero-cost check",
                   file=sys.stderr)
             return 1
+        if claude_real:
+            # Flags run-instance.sh inside the container so it can stage the
+            # unerr harness (shipped agents + finish-gate hooks + ON prompt)
+            # the same way open-models does, without touching auth above.
+            auth_env["CLAUDE_REAL"] = "1"
 
     # Optional web search (BOTH auth paths): forward TAVILY_API_KEY so
     # run-instance.sh wires Tavily's hosted MCP server into the instance's
@@ -380,8 +396,11 @@ def main() -> int:
     base_url = auth_env.get("ANTHROPIC_BASE_URL", "") if open_models else ""
 
     # --claude-model default: 'opus' normally, 'sonnet' under open-models (so it
-    # resolves through ANTHROPIC_DEFAULT_SONNET_MODEL to the conductor tier).
-    claude_model = args.claude_model or ("sonnet" if open_models else "opus")
+    # resolves through ANTHROPIC_DEFAULT_SONNET_MODEL to the conductor tier). A
+    # host CLAUDE_MODEL env var (e.g. for claude-real) takes precedence over
+    # that built-in default but never over an explicit --claude-model.
+    claude_model = (args.claude_model or os.environ.get("CLAUDE_MODEL")
+                    or ("sonnet" if open_models else "opus"))
 
     # Row source: the Pro path reads the vendored JSONL (no HF pull; rows carry the
     # `repo` field the sweap image_uri rule needs). Everything else loads the HF
@@ -452,9 +471,9 @@ def main() -> int:
         print(f"\n=== preflight: {len(rows) - failed}/{len(rows)} instances ALL-PASS ===", file=sys.stderr)
         return 1 if failed else 0
 
-    if open_models:
-        # open-models: only the ON arm is meaningful (the OFF/subscription arm is
-        # real-Claude and irrelevant here) — --mode is ignored in this case.
+    if open_models or claude_real:
+        # open-models / claude-real: both are single-arm harness runs (the ON
+        # unerr policy is the point of the arm) — --mode is ignored here.
         modes = ["on"]
     else:
         modes = ["on", "off"] if args.mode == "both" else [args.mode]
@@ -522,6 +541,33 @@ def main() -> int:
                         f"models={list(cost.get('by_model', {}))}",
                         file=sys.stderr,
                     )
+                elif claude_real:
+                    # No LiteLLM gateway on this arm — cost comes straight from the
+                    # claude CLI's own result event (total_cost_usd/usage), already
+                    # lifted into meta["telemetry"] by run-instance.sh's existing
+                    # stream-json parse (extended there with cost_reported so a
+                    # missing total_cost_usd is never mistaken for a real $0, i.e.
+                    # never left looking like a LiteLLM-priced record).
+                    telemetry = meta.get("telemetry") or {}
+                    if telemetry.get("cost_reported"):
+                        meta["cost"] = {
+                            "usd": telemetry.get("usd"),
+                            "source": "claude-native",
+                            "turns": telemetry.get("turns"),
+                            "in_tokens": telemetry.get("in_tokens"),
+                            "out_tokens": telemetry.get("out_tokens"),
+                            "cached_in": telemetry.get("cached_in"),
+                            "cache_creation": telemetry.get("cache_creation"),
+                        }
+                    else:
+                        meta["cost"] = {"usd": None, "source": "claude-native"}
+                    cost = meta["cost"]
+                    if cost["usd"] is not None:
+                        print(f"  cost: ${cost['usd']:.4f} (claude-native) "
+                              f"turns={cost.get('turns')}", file=sys.stderr)
+                    else:
+                        print("  cost: unavailable (claude-native; CLI result had "
+                              "no total_cost_usd)", file=sys.stderr)
 
                 preds[iid] = {
                     "instance_id": iid,

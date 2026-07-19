@@ -5,11 +5,12 @@ prediction, time-box a task, and collect its traces.
 
 Two ORTHOGONAL axes drive the fleet:
 
-    ARM        which agent resolves the task    econ | claude      -> picks the RUNNER
+    ARM        which agent resolves the task    econ | claude | claude-real -> picks the RUNNER
     BENCHMARK  which task set + how to grade     verified|pro|terminal -> picks THIS descriptor
 
-worker-loop.py already abstracts the ARM (the runner path: econ vs claude
-run-benchmark.py). This module abstracts the BENCHMARK — everything that changes
+worker-loop.py already abstracts the ARM (the runner path: econ vs claude/claude-real
+run-benchmark.py — claude-real is real-Anthropic auth on the SAME runner file).
+This module abstracts the BENCHMARK — everything that changes
 when you point the SAME agent at a DIFFERENT task set:
 
     * id resolution   (which dataset / which ids a suite selector expands to)

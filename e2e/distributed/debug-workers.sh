@@ -9,9 +9,9 @@
 # Fleet (pick one; default = the run you most recently launched):
 #   (no args)            newest out/bench-*/manifest.tsv  (every fleet's workers)
 #   --matrix <id>        that matrix's fleets
-#   <LABEL> [APP]        one fleet (APP inferred: arm from a -claude fold in the
-#                        label, benchmark from $BENCHMARK else the label's
-#                        -pro/-terminal/-live_verified/-lite suffix, else verified)
+#   <LABEL> [APP]        one fleet (APP inferred: arm from a -claude or -claude-real
+#                        fold in the label, benchmark from $BENCHMARK else the
+#                        label's -pro/-terminal/-live_verified/-lite suffix, else verified)
 #
 # Options:
 #   --lines N        log lines to tail per worker (default 60)
@@ -70,7 +70,13 @@ if [ "${#POS[@]}" -ge 1 ]; then
   lbl="${POS[0]}"; app="${POS[1]:-}"
   if [ -z "$app" ]; then
     bench="$(_bench_from_label "$lbl")"
-    case "$lbl" in *claude*) app="$(fc_default_app claude "$bench")" ;; *) app="$(fc_default_app econ "$bench")" ;; esac
+    # claude-real MUST be matched before the bare *claude* fallback (its label
+    # also contains "claude") or it mislabels as claude's own app.
+    case "$lbl" in
+      *claude-real*) app="$(fc_default_app claude-real "$bench")" ;;
+      *claude*)      app="$(fc_default_app claude "$bench")" ;;
+      *)             app="$(fc_default_app econ "$bench")" ;;
+    esac
   fi
   labels+=("$lbl"); apps+=("$app"); combos+=("$lbl")
 else

@@ -15,7 +15,9 @@
 #   COORDINATOR_URL       required — http://<coord_id>.vm.<app>.internal:8080 (6PN)
 #   RUN_ID                required — shared run/label id (== swebench --run_id)
 #   WORKER_ID             optional — worker-loop.py defaults it to $FLY_MACHINE_ID
-#   ARM                   optional — econ|claude|codex (default econ); picks runner + toolbox
+#   ARM                   optional — econ|claude|claude-real|codex (default econ); picks runner + toolbox.
+#                         claude-real (real Anthropic models, CLAUDE_CODE_OAUTH_TOKEN, no LiteLLM)
+#                         shares claude's ARM_DIR/context below — see the ARM_DIR pick just below.
 #   DATASET / SPLIT       optional — HF dataset + split for resolve + grade
 #   PER_INSTANCE_TIMEOUT  optional — per-instance seconds (default 2700)
 #   GRADE_WORKERS         optional — swebench --max_workers (default 6)
@@ -71,7 +73,10 @@ else
 fi
 log "building toolbox $TOOLBOX_TAG (arm=$ARM)"
 ARM_DIR="/work/local-docker"
-[ "$ARM" = "claude" ] && ARM_DIR="/work/claude/local-docker"
+# claude-real (real Anthropic models) reuses the SAME claude context/runner as
+# claude (the open-weight ensemble) — only its auth env differs, wired at the
+# launcher level (CLAUDE_CODE_OAUTH_TOKEN, no LiteLLM), not here.
+case "$ARM" in claude|claude-real) ARM_DIR="/work/claude/local-docker" ;; esac
 build_toolbox "$ARM_DIR/Dockerfile.toolbox" "$ARM_DIR/context" "$TOOLBOX_TAG" "$LOGDIR"
 emit "\"toolbox_built\",\"tag\":\"$TOOLBOX_TAG\""
 

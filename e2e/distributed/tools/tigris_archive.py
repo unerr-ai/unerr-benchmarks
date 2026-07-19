@@ -71,8 +71,11 @@ def _num(v, default=0):
 
 
 def _norm_cost(meta):
-    """One meta record -> (usd, turns, by_tier). Prefer claude litellm cost,
-    else econ tier_cost_db (sqlite), else the telemetry stream."""
+    """One meta record -> (usd, turns, by_tier, source). Prefer claude litellm cost,
+    else econ tier_cost_db (sqlite), else the telemetry stream. `source` surfaces
+    meta["cost"]["source"] verbatim — the claude-real arm stamps "claude-native"
+    there (real-Anthropic $, never LiteLLM spend) so callers can label it distinctly
+    instead of folding it into the claude/econ cost paths unlabeled."""
     tel = meta.get("telemetry") or {}
     tcd = meta.get("tier_cost_db") or {}
     cst = meta.get("cost") if isinstance(meta.get("cost"), dict) else {}
@@ -83,7 +86,8 @@ def _norm_cost(meta):
         usd = tel.get("usd")
     turns = _num(tel.get("turns"), 0)
     by_tier = cst.get("by_tier") or tcd.get("by_tier") or tel.get("by_tier") or {}
-    return (float(usd) if usd is not None else None), turns, (by_tier if isinstance(by_tier, dict) else {})
+    return ((float(usd) if usd is not None else None), turns,
+            (by_tier if isinstance(by_tier, dict) else {}), cst.get("source"))
 
 
 def build_overview(data_dir, label, arm, benchmark, dataset, started_at, finished_at):
@@ -109,6 +113,10 @@ def build_overview(data_dir, label, arm, benchmark, dataset, started_at, finishe
     turns_total = tin = tout = priced = 0
     by_tier = {}
     per_instance = {}
+    # claude-native (claude-real arm's real-Anthropic $, NOT litellm spend) tracked
+    # separately so it's included in fleet_usd but never mislabeled — see _norm_cost.
+    native_usd = 0.0
+    native_priced = native_na = 0
     meta_path = rundir / "meta.jsonl"
     if meta_path.is_file():
         for line in meta_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -122,16 +130,24 @@ def build_overview(data_dir, label, arm, benchmark, dataset, started_at, finishe
             if not isinstance(m, dict):
                 continue
             iid = m.get("instance_id") or "?"
-            usd, turns, bt = _norm_cost(m)
+            usd, turns, bt, cost_source = _norm_cost(m)
+            is_native = cost_source == "claude-native"
             tel = m.get("telemetry") or {}
             per_instance[iid] = {
                 "usd": round(usd, 6) if usd is not None else None,
                 "turns": turns,
                 "wall_s": m.get("wall_s"),
             }
+            if is_native:
+                per_instance[iid]["cost_source"] = "claude-native"
             if usd is not None:
                 fleet_usd += usd
                 priced += 1
+                if is_native:
+                    native_usd += usd
+                    native_priced += 1
+            elif is_native:
+                native_na += 1
             turns_total += turns
             tin += _num(tel.get("in_tokens"), 0)
             tout += _num(tel.get("out_tokens"), 0)
@@ -175,6 +191,15 @@ def build_overview(data_dir, label, arm, benchmark, dataset, started_at, finishe
             "in_tokens": tin,
             "out_tokens": tout,
             "by_tier": by_tier,
+            # Present only when the run has claude-native (claude-real arm)
+            # records — its $ is already folded into "usd" above but broken out
+            # here so it's never misread as litellm spend. usd:null + na>0 means
+            # some/all instances had no tracked Anthropic-side $ (n/a, not $0).
+            **({"claude_native": {
+                    "usd": round(native_usd, 6) if native_priced else None,  # None (n/a) when every native row is untracked
+                    "priced_instances": native_priced,
+                    "na_instances": native_na,
+                }} if (native_priced or native_na) else {}),
         },
         "counts": {"resolved": resolved, "total": total, "dead": len(dead)},
         "dead": [d.get("instance_id") for d in dead if isinstance(d, dict)],

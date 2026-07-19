@@ -18,6 +18,8 @@
 #     start    arm each PREPARED fleet's gate + poll + pull + teardown (the second half after a
 #              prepare + GPU flip). Requires a prior `prepare`. (rd `run`)
 #     destroy  tear down every combo's fleet by its fleet=<LABEL> metadata. (rd `destroy`)
+#   <arm>    any value passes straight through as ARM=<value> (no allowlist here) —
+#            currently econ | claude | claude-real, e.g. --arms econ,claude,claude-real.
 #   (no `status`/`arm` here — a bad mode would risk run-distributed's default all-in-one launching
 #    a real fleet; check a live fleet per README §3, or use ./download-all.sh.)
 #

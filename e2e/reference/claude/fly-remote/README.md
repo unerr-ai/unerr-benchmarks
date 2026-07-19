@@ -1,15 +1,18 @@
-# Running the Claude arm on SWE-bench — unerr ON + open-weight ensemble, distributed on fly
+# Running the Claude arms on SWE-bench — unerr ON (open-weight ensemble or real Anthropic models), distributed on fly
 
-**This is the single source of truth for running the Claude Code agent against SWE-bench
-with unerr's MCP tools ON and the model tiers overridden to an open-weight ensemble via
-the LiteLLM gateway, distributed across a fly fleet.** Written after repeatedly
-re-deriving these commands (and burning a run on a wrong VM default). If the run
+**This is the single source of truth for running Claude Code against SWE-bench with unerr's MCP tools ON,
+distributed across a fly fleet. Two arms are available:** `claude` (Claude Code + unerr with open-weight ensemble
+via LiteLLM gateway — recommended for cost-efficient ablations) and `claude-real` (stock Claude Code + unerr with
+real Anthropic models — production-grade). Both share the same harness, MCP pipeline, and distributed infrastructure.
+This doc covers the open-weight **`claude` arm**; see the distributed [README §0](../../distributed/README.md) for the
+`claude-real` authentication (`CLAUDE_CODE_OAUTH_TOKEN`) and cost model (Anthropic native, not LiteLLM).
+Written after repeatedly re-deriving these commands (and burning a run on a wrong VM default). If the run
 process or config changes, **update this file** — it is referenced from the repo-root
 `CLAUDE.md` for exactly that reason.
 
-The runner code lives in `e2e/distributed/` (shared by the econ arm); this doc is the
-claude-arm operator guide for it. The per-instance pipeline lives in
-`e2e/reference/claude/local-docker/` (baked into the fleet image).
+The runner code lives in `e2e/distributed/` (shared by all arms); this doc is the
+claude-arm (open-weight) operator guide for it. The per-instance pipeline lives in
+`e2e/reference/claude/local-docker/` (baked into the fleet image for both arms).
 
 ---
 
@@ -65,20 +68,22 @@ MACHINES=2 ARM=claude LABEL=<run-name> SUITE=mini FLY_ORG=vamsee-k-933 \
 
 ---
 
-## 2. One-time prerequisites
+## 2. One-time prerequisites (for `ARM=claude` — open-weight ensemble)
 
 | Thing | Where / value |
 |---|---|
 | fly auth | `flyctl auth whoami` → your fly account |
 | fly org | `vamsee-k-933` (team/shared) — pass `FLY_ORG=vamsee-k-933` |
-| fly app | `swebench-agent-dist-claude` (auto-created/reused) |
+| fly app | `swebench-dist-claude-<slug>` (auto-created/reused per benchmark; e.g. `swebench-dist-claude-verif`) |
 | LiteLLM API key (conductor virtual key) | auto-read from `e2e/econ/.env.local` (`LITELLM_API_KEY`, len 56) |
-| LiteLLM MASTER key (mints per-instance keys — claude arm only) | auto-read from `../econ-coding-agent/infra/litellm/.env.local` (`LITELLM_MASTER_KEY`, len 56) |
+| LiteLLM MASTER key (mints per-instance keys — open-weight claude only) | auto-read from `../econ-coding-agent/infra/litellm/.env.local` (`LITELLM_MASTER_KEY`, len 56) |
 | unerr-cli checkout (to re-vendor) | `../unerr-cli` (i.e. `/Users/<you>/IdeaProjects/unerr-cli`) |
 | gateway health | `curl -s https://econ-litellm.fly.dev/health/liveliness` → `"I'm alive!"` |
 
-**Never disturb the econ arm** or its running distributed jobs. The claude overrides
-apply only to the benchmark's Claude instances, never to machine-level `~/.claude`.
+**Never disturb the econ arm** or its running distributed jobs. The open-weight claude overrides
+apply only to the benchmark's Claude instances, never to machine-level `~/.claude`. **For `ARM=claude-real`**
+(real Anthropic models), see the distributed [README §0](../../distributed/README.md) for its own
+prerequisites (`CLAUDE_CODE_OAUTH_TOKEN`) — it does NOT use LiteLLM or the gateway.
 
 ---
 
@@ -169,11 +174,11 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 
 ---
 
-## 6. Environment variables — required vs auto
+## 6. Environment variables — required vs auto (for `ARM=claude` — open-weight ensemble)
 
 | Var | Required? | Notes |
 |---|---|---|
-| `ARM=claude` | **yes** | selects the claude pipeline (default is econ) |
+| `ARM=claude` | **yes** | selects the open-weight ensemble pipeline (default is econ); use `ARM=claude-real` for Anthropic real models (see distributed README §0) |
 | `LABEL=<name>` | **yes** | names the fleet, the coordinator volume, and `out/dist-<label>/`. Use a fresh name per run. |
 | `MACHINES=2` | **yes** (all-in-one/prepare) | worker count |
 | `SUITE=mini` | for Mini-10 | else full Verified |

@@ -9,6 +9,12 @@
 #                            host once via `claude setup-token`; passed via
 #                            `docker run -e`. NO API key, no in-container login.
 #   UNERR_MODE               on | off   (arm B = unerr attached, arm A = bare Claude)
+#   CLAUDE_REAL               1 = claude-real arm: stock real-Anthropic Claude Code,
+#                             but staged with the same unerr harness (shipped
+#                             agents + finish-gate hooks + ON prompt) as
+#                             open-models — set by run-benchmark.py alongside the
+#                             CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY auth above;
+#                             mutually exclusive with CLAUDE_OPEN_MODELS.
 #   REPO_DIR                 repo root in the image (SWE-bench default: /testbed)
 #   ART_DIR                  optional mounted dir for artifact exfiltration
 #
@@ -45,6 +51,19 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 # vars itself — this flag only gates OUR extra behavior below (shipped agent
 # files + extra system-prompt text), so it's a no-op when unset/0.
 OPEN_MODELS="${CLAUDE_OPEN_MODELS:-0}"
+# claude-real: single-arm harness run against STOCK real-Anthropic Claude Code
+# (no gateway, no model-alias env) — set by run-benchmark.py alongside subscription
+# auth when CLAUDE_REAL=1. Mutually exclusive with OPEN_MODELS (enforced on the
+# host side); harmless to check both here.
+CLAUDE_REAL="${CLAUDE_REAL:-0}"
+# HARNESS_ON gates the unerr-harness STAGING shared by both single-arm run modes
+# (shipped agent files, finish-gate hooks, the ON operator system-prompt block).
+# OPEN_MODELS alone still gates gateway-SPECIFIC behavior (e.g. the WebSearch
+# removal below) since real-Claude keeps native WebSearch working.
+HARNESS_ON=0
+if [ "$OPEN_MODELS" = "1" ] || [ "$CLAUDE_REAL" = "1" ]; then
+  HARNESS_ON=1
+fi
 PROBLEM_FILE="${1:?usage: run-instance.sh <problem_statement_file>}"
 
 # Hardening for reproducible headless runs: no mid-run auto-update, no
@@ -156,11 +175,12 @@ if [ "$MODE" = "on" ]; then
     fi
   fi
 
-  # 3.1 OPEN-MODELS: overwrite the just-installed agent files with our shipped,
-  #     customized versions (Task-delegation policy tuned for the open-models
-  #     arm). Shipped next to this script in the toolbox image under agents/.
-  #     No-op on the real-Claude path (OPEN_MODELS unset/0).
-  if [ "$OPEN_MODELS" = "1" ]; then
+  # 3.1 HARNESS: overwrite the just-installed agent files with our shipped,
+  #     customized versions (Task-delegation policy tuned for this harness).
+  #     Shipped next to this script in the toolbox image under agents/.
+  #     Fires for open-models AND claude-real (HARNESS_ON); no-op on the plain
+  #     real-Claude A/B path (both flags unset/0).
+  if [ "$HARNESS_ON" = "1" ]; then
     SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
     AGENTS_SRC="$SELF_DIR/agents"
     if [ -d "$AGENTS_SRC" ]; then
@@ -171,14 +191,14 @@ if [ "$MODE" = "on" ]; then
         cp -f "$f" "$REPO_DIR/.claude/agents/"
         n=$((n + 1))
       done
-      log "open-models: copied $n shipped agent file(s) into $REPO_DIR/.claude/agents/"
+      log "harness: copied $n shipped agent file(s) into $REPO_DIR/.claude/agents/"
     else
-      log "open-models: WARNING — agents source dir missing ($AGENTS_SRC), keeping installed agents"
+      log "harness: WARNING — agents source dir missing ($AGENTS_SRC), keeping installed agents"
     fi
   fi
 
-  # 3.15 OPEN-MODELS: install the mechanical finish-gate + edit-deny hooks
-  #      (PreToolUse deny + PostToolUse recorder + Stop-time gate; see
+  # 3.15 HARNESS (open-models OR claude-real): install the mechanical finish-gate
+  #      + edit-deny hooks (PreToolUse deny + PostToolUse recorder + Stop-time gate; see
   #      cc-harness-hooks.py, shipped in $TOOLBOX the same way as
   #      mcp-healthcheck.mjs). Written to .claude/settings.local.json,
   #      NEVER .claude/settings.json: unerr owns settings.json (it wrote its
@@ -192,7 +212,7 @@ if [ "$MODE" = "on" ]; then
   #      real reason it's safe. All three hooks are FAIL-OPEN by construction
   #      (cc-harness-hooks.py: any internal exception -> exit 0), so a bug
   #      here degrades to a no-op gate/deny, never a broken run.
-  if [ "$OPEN_MODELS" = "1" ]; then
+  if [ "$HARNESS_ON" = "1" ]; then
     # $TOOLBOX is NOT set inside the instance container: Dockerfile.instance COPYs
     # the toolbox to /opt/toolbox but does not carry the toolbox image's ENV, and no
     # `-e TOOLBOX` is passed at `docker run`. Default it to the fixed COPY target.
@@ -232,7 +252,7 @@ if [ "$MODE" = "on" ]; then
   }
 }
 EOF
-    log "open-models: wrote $REPO_DIR/.claude/settings.local.json (mechanical finish-gate + edit-deny hooks)"
+    log "harness: wrote $REPO_DIR/.claude/settings.local.json (mechanical finish-gate + edit-deny hooks)"
   fi
 
   # 3.5 HEALTH GATE: confirm unerrd + the process manager actually registered THIS
@@ -295,8 +315,8 @@ if [ "$MODE" = "on" ]; then
   if [ -n "${TAVILY_API_KEY:-}" ]; then
     AUTONOMY_PROMPT="$AUTONOMY_PROMPT Web search runs through the tavily MCP tools (tavily_search to find pages, tavily_extract to pull a page's content); a single targeted search of the issue's key error message or symptom is often the fastest route to the root cause. MCP servers connect asynchronously — if the tavily tools are not in your tool list yet, call WaitForMcpServers once, then search. The built-in WebSearch tool is unavailable in this environment — never call it."
   fi
-  # OPEN-MODELS ONLY: orchestration + escalation contract (delegate to subagents;
-  # escalate the hard tail). The prior in-prompt WORK PROTOCOL (reproduce-first /
+  # HARNESS ONLY (open-models or claude-real): orchestration + escalation contract
+  # (delegate to subagents; escalate the hard tail). The prior in-prompt WORK PROTOCOL (reproduce-first /
   # typed-assert / leave-tests-red) was REMOVED 2026-07-14: appended on top
   # of Claude Code's OWN agentic harness it "enforced the harness twice" and drove the
   # Mini-10 regressions — repro-false-confidence (11848), a Rule-4 license to ship
@@ -329,9 +349,10 @@ if [ "$MODE" = "on" ]; then
   # are now MECHANICAL for this arm: a Stop hook (cc-harness-hooks.py, wired via
   # settings.local.json in step 3.15) blocks a no-edit/regressed/unverified finish or
   # an unescalated trigger (caps Z1/R1/V2/E1, overall 3, fail-open) — superseding the
-  # "finish-gate machinery" exclusion above for OPEN-MODELS only, since a hook gate
-  # is not prompt prose and can't double-harness (it fires once, at Stop, never mid-turn).
-  if [ "$OPEN_MODELS" = "1" ]; then
+  # "finish-gate machinery" exclusion above for this HARNESS (open-models or
+  # claude-real) only, since a hook gate is not prompt prose and can't
+  # double-harness (it fires once, at Stop, never mid-turn).
+  if [ "$HARNESS_ON" = "1" ]; then
     AUTONOMY_PROMPT="$AUTONOMY_PROMPT
 
 TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to write the plan down (one task per slice) and TaskUpdate each to completed as it lands; treat the tracker as your working memory across a long run, not bookkeeping, and clear it when the fix is done.
@@ -430,8 +451,8 @@ log "claude -p exit=$CLAUDE_RC"
 # The distributed bundle drops per-instance artifacts (n_artifacts:0), so the
 # deny/gate evidence in state.jsonl would die with the container. Summarize it
 # to stderr, which worker-loop keeps as stderr_tail — the ONE per-instance
-# harness signal that reaches the bundle. (Open-models arm only — the hooks
-# that write this state are installed only when OPEN_MODELS=1.)
+# harness signal that reaches the bundle. (HARNESS_ON arms only — the hooks
+# that write this state are installed only when open-models or claude-real.)
 if [ -f /tmp/cc-harness/state.jsonl ]; then
   HS="$("${PYBIN:-python3}" - <<'PYEOF' 2>/dev/null
 import json, collections
@@ -460,7 +481,7 @@ fi
 # per-message tool_use blocks give the tool-call counts (mcp = name "mcp__*").
 node -e '
 const fs=require("fs");
-let inn=0,cap=0,ccreate=0,out=0,turns=0,usd=0,model="";
+let inn=0,cap=0,ccreate=0,out=0,turns=0,usd=0,costSeen=false,model="";
 const tools={};
 try{ for(const line of fs.readFileSync("/tmp/claude-events.jsonl","utf8").split("\n")){
   if(!line.trim())continue; let ev; try{ev=JSON.parse(line)}catch{continue}
@@ -474,7 +495,7 @@ try{ for(const line of fs.readFileSync("/tmp/claude-events.jsonl","utf8").split(
   // final result: authoritative usage + cost + turns
   if(ev.type==="result"){
     turns=ev.num_turns||turns;
-    if(typeof ev.total_cost_usd==="number")usd=ev.total_cost_usd;
+    if(typeof ev.total_cost_usd==="number"){usd=ev.total_cost_usd;costSeen=true;}
     const u=ev.usage||{};
     inn+=u.input_tokens||0; cap+=u.cache_read_input_tokens||0;
     ccreate+=u.cache_creation_input_tokens||0; out+=u.output_tokens||0;
@@ -485,7 +506,10 @@ const tot=Object.values(tools).reduce((a,b)=>a+b,0);
 const mcp=Object.entries(tools).filter(([n])=>n.startsWith("mcp__")).reduce((a,[,c])=>a+c,0);
 // usd is Claudes own total_cost_usd (API-equivalent cost; reported even on a
 // subscription run). report-runs can recompute from raw tokens if desired.
-process.stderr.write("UNERR_TELEMETRY "+JSON.stringify({mode:process.env.UNERR_MODE||"on",model,turns,in_tokens:inn,cached_in:cap,cache_creation:ccreate,out_tokens:out,usd:Number(usd.toFixed(4)),tool_calls:tot,mcp_tool_calls:mcp,tools})+"\n");
+// cost_reported distinguishes "no total_cost_usd in this CLI output" (usd stays
+// the 0 fallback above) from a genuine $0 — the claude-real cost-capture path in
+// run-benchmark.py reads this so it never mistakes an absent cost for a real one.
+process.stderr.write("UNERR_TELEMETRY "+JSON.stringify({mode:process.env.UNERR_MODE||"on",model,turns,in_tokens:inn,cached_in:cap,cache_creation:ccreate,out_tokens:out,usd:Number(usd.toFixed(4)),cost_reported:costSeen,tool_calls:tot,mcp_tool_calls:mcp,tools})+"\n");
 ' || true   # no 2>/dev/null here — it would swallow the UNERR_TELEMETRY line itself
 
 # --- artifact exfiltration (only when the mounted volume is available) -------

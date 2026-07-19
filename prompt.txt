@@ -8,7 +8,10 @@ human go-ahead gate between preparation and execution.
 --------------------------------------------------------------------------------
 INPUTS  (ask me for any not given, then echo them back before doing anything)
 --------------------------------------------------------------------------------
-  ARM        = econ | claude                         (required)
+  ARM        = econ | claude | claude-real           (required)
+               econ = open-weight ensemble via LiteLLM gateway (research baseline);
+               claude = Claude Code + unerr + open-weight ensemble (cost-efficient);
+               claude-real = Claude Code + unerr + real Anthropic models (production)
   BENCHMARK  = verified | pro | terminal | live_verified | lite   (required)
   WORKERS    = <integer>   worker machines — DEFAULT 8 for a full run; use 8 unless I
                explicitly give a different number

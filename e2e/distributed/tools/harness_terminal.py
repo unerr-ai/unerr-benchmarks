@@ -196,6 +196,18 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     local-docker runner wires it:
 
       claude -> --agent claude-code, ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN.
+      claude-real -> --agent claude-code, CLAUDE_CODE_OAUTH_TOKEN only — real
+                Anthropic subscription auth passed through from the worker's
+                own env untouched, same as e2e/reference/claude/local-docker/
+                run-benchmark.py's non-open-models auth path. No
+                ANTHROPIC_BASE_URL, no ANTHROPIC_AUTH_TOKEN/API_KEY, no
+                gateway/LiteLLM anything — this arm must never be able to
+                route back through our gateway. Model is CLAUDE_MODEL (a
+                stock Claude Code alias like "sonnet"/"opus") or "sonnet" if
+                unset; raises (before Harbor ever launches) if
+                CLAUDE_CODE_OAUTH_TOKEN is missing, so a misconfigured
+                claude-real worker fails loudly instead of silently falling
+                into the econ branch below.
       econ   -> --agent opencode, OPENAI_BASE_URL/OPENAI_API_KEY. econ's own
                 toolbox binary is NOT invoked here — it isn't installable
                 into an arbitrary per-task Harbor container built fresh from
@@ -207,7 +219,8 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     result, or None on a mint miss/no master key) — when set it's used as
     the agent's gateway auth token INSTEAD of the shared master key, so
     run()'s later fetch_cost can read this instance's spend back in
-    isolation from every other instance sharing the gateway.
+    isolation from every other instance sharing the gateway. claude-real
+    never touches the gateway so `vk` is irrelevant to it.
     """
     litellm_key = _litellm_key()
     token = vk or litellm_key
@@ -219,6 +232,16 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
         return "claude-code", conductor, env
+
+    if worker.arm == "claude-real":
+        oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if not oauth_token:
+            raise RuntimeError(
+                "claude-real arm requires CLAUDE_CODE_OAUTH_TOKEN in the "
+                "worker env (Claude Code CLI's native subscription auth) — "
+                "refusing to fall through to gateway/econ auth")
+        model = os.environ.get("CLAUDE_MODEL", "sonnet")
+        return "claude-code", model, {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
 
     # econ (default arm) — opencode, OpenAI-compatible route through the same
     # gateway. TERMINAL_OPENCODE_MODEL overrides the model id independently

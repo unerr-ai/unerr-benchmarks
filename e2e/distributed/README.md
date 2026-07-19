@@ -4,7 +4,7 @@ A work-stealing fleet that runs a coding-agent benchmark across N fly.io machine
 parallel instead of one machine serially. Full design in [`PLAN.md`](./PLAN.md) — this
 is the concise operator doc: launch, monitor, pull, teardown.
 
-Two independent axes: **`ARM`** picks the agent (`econ` | `claude`), **`BENCHMARK`** picks the
+Two independent axes: **`ARM`** picks the agent (`econ` | `claude` | `claude-real`), **`BENCHMARK`** picks the
 dataset (`verified` | `lite` | `pro` | `terminal` | `live_verified`, default `verified`). §1–§7 below describe a
 single fleet (the historical SWE-bench Verified + econ path); **[§8](#8-other-benchmarks--the-matrix-launcher)
 is the multi-benchmark + matrix layer** — run any subset of arm×benchmark combos as independent
@@ -12,22 +12,23 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
 `download-all.sh`. Read §8 first if you're running anything other than Verified.
 
 ## 0. Invariants (do not violate)
-- **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`.
+- **Never print API keys/tokens** — only their lengths. Keys: `LITELLM_API_KEY`, `EXA_API_KEY`, `FLY_API_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`.
 - **Set `FLY_ORG=<your-team-org>` (required)** — never a personal org. `run-distributed.sh` defaults
   `ORG` to the non-functional placeholder `your-fly-org`; an unset `FLY_ORG` fails at app-create with
   `organization your-fly-org not found`. **App is per `ARM × BENCHMARK`**: `swebench-dist-<arm>-<slug>`,
   slug = benchmark key with `_`→`-` and `verified`→`verif` (fly's abuse filter blocks app names
   containing "verified" — a common phishing target), e.g. `live_verified` →
-  `swebench-dist-econ-live-verif` — each combo gets its own app, auto-created at prepare; runs
+  `swebench-dist-econ-live-verif`, `swebench-dist-claude-real-verif` — each combo gets its own app, auto-created at prepare; runs
   within one app are further scoped by `fleet=<LABEL>` machine metadata, not a separate app per run.
+- **Authentication for `claude-real` arm.** Set `CLAUDE_CODE_OAUTH_TOKEN` to your Claude Code subscription token (auto-loaded from repo-root `.env.local` by the launcher if present, else read from the environment). This token is never printed. The `claude` arm (open-weight ensemble) uses `ANTHROPIC_BASE_URL` redirect to the LiteLLM gateway; `claude-real` connects directly to Claude Code without any gateway or environment overrides.
   `APP=` overrides the derived name.
 - **Web search: `ARM=econ` = Exa ON by default** (the econ agent ships Exa web search default-on
   across all tiers/personas), so **every econ benchmark run is a web-on result class**. The launcher
   sources `EXA_API_KEY` from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`,
   and injects it into workers. Set **`WEBSEARCH=0` to force a clean, baseline-comparable (no-web)**
   econ run (SWE-bench fixes are public on GitHub → web search = answer-lookup, so never compare a
-  web-on run 1:1 against a no-web baseline or submit it). `ARM=claude` stays STRICT opt-in
-  (`WEBSEARCH=1` → Tavily).
+  web-on run 1:1 against a no-web baseline or submit it). `ARM=claude` and `ARM=claude-real` stay STRICT opt-in
+  (`WEBSEARCH=1` → Tavily for both arms).
 - **econ conductor = minimax-m3** for the econ arm (matches the single-machine baseline config).
 - **`LABEL` MUST be unique per run.** It names the fleet metadata (`fleet=<LABEL>`), the coordinator's
   `RUN_ID`, the coordinator volume (`dist_coord_<LABEL>`), and the local out-dir
@@ -195,10 +196,11 @@ the launcher died, or you `Ctrl-C`'d it — use the two read-only monitor script
 (`resolved/total (NN%)`) and **retries** (`reatt`=re-attempts so far, `up4retry`=failed rows the fleet
 reruns at drain, `dead`=permanently failed). `--cost` adds a **cost + per-tier breakdown** — total `$`,
 `turns`, tokens, and a conductor/oracle/reasoner/executor split (`$`, %-share, in/out tokens, calls,
-instance-count) — read live from each completed instance's `meta_json` in the coordinator's
-`/data/queue.db` (the same numbers the final report uses: econ from `telemetry`/`tier_cost_db`, claude
-from `litellm_spend_logs` — always **real LiteLLM spend**, never Anthropic-priced). A multi-fleet view
-folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs). `debug-workers.sh`
+instance-count). **Cost source differs by arm:** econ and claude report real LiteLLM gateway spend
+(from `litellm_spend_logs`); `claude-real` (Anthropic real models, no gateway) reports **claude-native cost**
+(from Claude Code's own `total_cost_usd`) with source tag `"claude-native"` and is displayed as a separate line
+("claude-native (Anthropic $, NOT litellm spend)") in the multi-fleet view — never LiteLLM, always Anthropic billing.
+A multi-fleet view folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs). `debug-workers.sh`
 additionally pulls each worker machine's `flyctl logs` and flags (`»»`) the boot/work state lines
 (dockerd up, toolbox build, `claimed`, `resolve (ceiling=… tier=…)`, `Instances resolved`, `dead`,
 `ERROR`). Reach for `status.sh` first ("where is every combo, and what's it costing?"), then
@@ -407,25 +409,26 @@ lowercase keys the jsonl doesn't have).
 **Terminal-Bench 2.1** — Harbor registry dataset `terminal-bench/terminal-bench-2-1` (89 tasks; `2.0`/`2.1` are distinct dataset *names*, not `@version` tags), vendored at build via `harbor dataset download`, fused run+grade, no per-instance registry:
 ```bash
 MACHINES=2 ARM=claude LABEL=tb-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
+MACHINES=2 ARM=claude-real LABEL=tb-real-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
 ```
 Ids are the vendored `terminal-bench/tasks/` directory names. Each task's image is built at run time
 from its own Dockerfile inside the worker's DinD — nothing to mirror. `tools/harness_terminal.py`
 shells `harbor run --agent {claude-code|opencode} --model <m> --env docker` and grades on the pytest
 end-state; the result rides `/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`,
-no submission).
+no submission). The `claude-real` arm uses Harbor's claude-code agent with `CLAUDE_CODE_OAUTH_TOKEN` (no gateway env).
 
 ### 8.3 Fire a matrix: `bench.sh`
 Run any subset of `arm:benchmark` combos as **independent, LABEL-scoped fleets**, in parallel
 (default) or `--seq`. Each combo is its own coordinator + workers.
 ```bash
 # explicit combos (3 independent fleets, in parallel):
-./bench.sh run econ:verified claude:pro econ:terminal
+./bench.sh run econ:verified claude:pro claude-real:verified
 
-# cartesian product (2 arms × 3 benchmarks = 6 fleets):
-./bench.sh run --arms econ,claude --benches verified,pro,terminal --matrix july16
+# cartesian product (3 arms × 3 benchmarks = 9 fleets):
+./bench.sh run --arms econ,claude,claude-real --benches verified,pro,terminal --matrix july16
 
 # preview only — resolves every combo's app/label/dataset, makes NO fly calls:
-PLAN_ONLY=1 ./bench.sh run --arms econ,claude --benches verified,pro,terminal
+PLAN_ONLY=1 ./bench.sh run --arms econ,claude,claude-real --benches verified,pro,terminal
 ```
 - **Modes:** `run` = full one-shot per combo (build+seed+create+arm+poll+pull+teardown — this is
   run-distributed.sh's default no-subcommand mode); `prepare` = build + create each fleet WARM
