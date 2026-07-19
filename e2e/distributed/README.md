@@ -413,9 +413,26 @@ MACHINES=2 ARM=claude-real LABEL=tb-real-smoke BENCHMARK=terminal SUITE=smoke ./
 ```
 Ids are the vendored `terminal-bench/tasks/` directory names. Each task's image is built at run time
 from its own Dockerfile inside the worker's DinD — nothing to mirror. `tools/harness_terminal.py`
-shells `harbor run --agent {claude-code|opencode} --model <m> --env docker` and grades on the pytest
-end-state; the result rides `/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`,
-no submission). The `claude-real` arm uses Harbor's claude-code agent with `CLAUDE_CODE_OAUTH_TOKEN` (no gateway env).
+shells `harbor run --model <m> --env docker` and grades on the pytest end-state; the result rides
+`/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`, no submission).
+
+**Agent selection.** The `econ` arm shells the opencode agent as before (no change). The `claude`
+and `claude-real` arms run a **custom Harbor agent** (`harbor run --agent-import-path harbor_agents:ClaudeUnerrAgent`,
+module: `e2e/distributed/tools/harbor_agents.py`, pinned against `harbor==0.20.0`) that subclasses
+Harbor's own `claude_code.ClaudeCode` and stages the **FULL unerr harness** inside each task container:
+Claude Code install (Harbor's own installer), unerr CLI from vendored tgz (nvm node), `unerr install claude-code`,
+unerr MCP server via Harbor's mcp_servers mechanism, shipped `.claude/agents/unerr-*.md` sub-agents
+(delegation/escalation ladder), and the appended ON operator prompt (TRACK/FIX-DISCIPLINE/DELEGATION/ESCALATION
+always; hook-dependent sections only with hooks on). **Before this change**, both claude arms ran
+Harbor's **bare first-party** `claude-code` agent (no unerr/harness) — results from before this change
+are bare-Claude baselines.
+
+**Control knobs** (read by `harness_terminal.py`; `run-distributed.sh` forwards only when set):
+`TERMINAL_STOCK_AGENT=1` reverts both claude arms to the bare first-party agent (the no-harness baseline
+control). `HARNESS_HOOKS=1` opts into the `cc-harness-hooks` finish-gate (default OFF for terminal because
+its deny/gate rules are SWE-bench-shaped, not terminal-shaped). **Cost** on terminal for `claude-real`:
+`meta.cost` is stamped `source="claude-native"` with the agent's own reported USD (no LiteLLM vk mint),
+consistent with the resolve flow; the `claude` (open-weights) arm still uses LiteLLM spend.
 
 ### 8.3 Fire a matrix: `bench.sh`
 Run any subset of `arm:benchmark` combos as **independent, LABEL-scoped fleets**, in parallel

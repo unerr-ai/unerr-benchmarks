@@ -892,6 +892,13 @@ elif [ "$ARM" = "claude-real" ]; then
   # unerr-claude-real-toolbox and rebuilds an identical toolbox per arm.
   EXTRA_ENV+=(-e CLAUDE_REAL=1 -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" -e CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" -e TOOLBOX_TAG=unerr-claude-toolbox)
 fi
+# terminal-flow knobs (both claude arms; harness_terminal.py reads them on the
+# worker): TERMINAL_STOCK_AGENT=1 = bare first-party claude-code agent (the
+# no-harness baseline control), HARNESS_HOOKS=1 = opt back into the SWE-shaped
+# finish-gate hooks. Forwarded only when set — unset = full unerr harness
+# agent, hooks off (the defaults baked into harness_terminal/harbor_agents).
+[ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
+[ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
 # Optional pull-through registry mirror for SWE-bench testbed image pulls — ARM-
 # AGNOSTIC (unlike EXTRA_ENV above), shared across econ, claude, and future arms
 # (see e2e/distributed/lib/boot.sh::boot_dockerd). Passed through only when set in

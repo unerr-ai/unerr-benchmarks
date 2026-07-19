@@ -116,6 +116,14 @@ COPY distributed/tools/grade_live.py       /work/distributed/tools/grade_live.py
 # harness_terminal). The Harbor framework + the terminal-bench-2-1 (2.1) task set are added
 # in a separate layer below so a harbor bump doesn't reinstall the swebench tree.
 COPY distributed/tools/harness_terminal.py /work/distributed/tools/harness_terminal.py
+# Custom Harbor agent (--agent-import-path harbor_agents:ClaudeUnerrAgent) the
+# claude/claude-real terminal arms load instead of Harbor's bare claude-code
+# agent — harness_terminal.py puts THIS COPY's own dir on PYTHONPATH so the
+# harbor subprocess's `importlib.import_module("harbor_agents")` resolves.
+# LOAD-BEARING alongside harness_terminal.py: without this COPY the claude
+# terminal arms fail at agent-import time (ModuleNotFoundError) unless
+# TERMINAL_STOCK_AGENT=1.
+COPY distributed/tools/harbor_agents.py   /work/distributed/tools/harbor_agents.py
 # Coordinator end-of-run Tigris archive uploader — coordinator-entrypoint.sh §6.9
 # (generate overview.json + submission) and §8 (S3 upload) both run only when
 # ARCHIVE_PY=/work/distributed/tools/tigris_archive.py exists. LOAD-BEARING: the

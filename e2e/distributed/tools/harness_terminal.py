@@ -49,9 +49,14 @@ scratch, abandon)`).
       Terminal-Bench's migration README ("Migrating from the Terminal-Bench
       Harness to Harbor") says to subclass BaseInstalledAgent/BaseAgent for a new agent,
       pointing at "how we support Claude Code"
-      (src/harbor/agents/installed/claude_code.py). Rather than write a new
-      agent class, this module reuses Harbor's OWN first-party installed
-      agents, which already read gateway env vars straight off os.environ:
+      (src/harbor/agents/installed/claude_code.py). econ (opencode) and a
+      TERMINAL_STOCK_AGENT=1 control run still reuse Harbor's OWN first-party
+      installed agents unmodified; the claude/claude-real arms instead load a
+      custom `harbor_agents.ClaudeUnerrAgent` (this dir's harbor_agents.py,
+      via `--agent-import-path`) that subclasses `claude_code.ClaudeCode` to
+      stage the full unerr harness (install + shipped sub-agents + ON
+      operator prompt) around it — see that module's own docstring. All of
+      them still read gateway env vars straight off os.environ:
         - `claude_code.py` `run()`: `env["ANTHROPIC_API_KEY"] =
           self._get_env("ANTHROPIC_API_KEY") or ... "ANTHROPIC_AUTH_TOKEN"`;
           `env["ANTHROPIC_BASE_URL"] = os.environ.get("ANTHROPIC_BASE_URL")`;
@@ -60,6 +65,9 @@ scratch, abandon)`).
           per-tier aliases (SONNET/OPUS/HAIKU/SUBAGENT) are set to match —
           the exact 2 env vars + defaulting shape
           e2e/reference/claude/local-docker/run-benchmark.py already uses.
+          `ClaudeUnerrAgent` never touches any of this itself (arm-agnostic
+          by construction) — it only adds --append-system-prompt content and
+          an extra MCP server entry, both read by the SAME unmodified run().
         - `opencode.py` `run()`: for `--model openai/<id>`, forwards
           `OPENAI_API_KEY`/`OPENAI_BASE_URL` straight off os.environ into the
           container env, and `_build_register_config_command()` registers
@@ -69,7 +77,7 @@ scratch, abandon)`).
           research question asked about.
         - `src/harbor/models/agent/name.py`: `AgentName.CLAUDE_CODE =
           "claude-code"`, `AgentName.OPENCODE = "opencode"` — the exact
-          `--agent` values.
+          `--agent` values (bare-baseline / econ paths only).
   (c) per-trial results.json + traces:
       `src/harbor/models/trial/paths.py` `TrialPaths` (docstring + properties):
       `trial_dir/result.json` (`result_path`, holds TrialResult JSON),
@@ -157,6 +165,15 @@ DEFAULT_GATEWAY_URL = "https://econ-litellm.fly.dev"
 # ANTHROPIC_DEFAULT_SONNET_MODEL under open-models.
 DEFAULT_CONDUCTOR_MODEL = "minimax/minimax-m3"
 
+# The claude/claude-real arms drive Harbor's `--agent-import-path` at this
+# module.path:ClassName (harbor_agents.py, this same tools/ dir — on
+# PYTHONPATH, see run()) instead of Harbor's bare first-party claude-code
+# agent, so the FULL unerr harness (install + shipped sub-agents + ON
+# operator prompt) runs on terminal-bench too. TERMINAL_STOCK_AGENT=1 reverts
+# both claude arms to the bare claude-code agent below (the bare-baseline
+# control) — see _arm_agent_config.
+UNERR_AGENT_IMPORT_PATH = "harbor_agents:ClaudeUnerrAgent"
+
 # Wall-clock grace beyond the task's own declared timeout (task.toml's
 # agent+verifier timeout_sec) or the worker's flat ceiling, covering harbor's
 # own CLI/environment-build overhead — mirrors _resolve's `inst_timeout + 300`.
@@ -195,11 +212,14 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     docstring), pointed at OUR gateway the same way each arm's own
     local-docker runner wires it:
 
-      claude -> --agent claude-code, ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN.
-      claude-real -> --agent claude-code, CLAUDE_CODE_OAUTH_TOKEN only — real
-                Anthropic subscription auth passed through from the worker's
-                own env untouched, same as e2e/reference/claude/local-docker/
-                run-benchmark.py's non-open-models auth path. No
+      claude -> --agent-import-path harbor_agents:ClaudeUnerrAgent (unless
+                TERMINAL_STOCK_AGENT=1, which reverts to Harbor's bare
+                first-party --agent claude-code — the control run), same
+                ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN either way.
+      claude-real -> same import-path swap, CLAUDE_CODE_OAUTH_TOKEN only —
+                real Anthropic subscription auth passed through from the
+                worker's own env untouched, same as e2e/reference/claude/
+                local-docker/run-benchmark.py's non-open-models auth path. No
                 ANTHROPIC_BASE_URL, no ANTHROPIC_AUTH_TOKEN/API_KEY, no
                 gateway/LiteLLM anything — this arm must never be able to
                 route back through our gateway. Model is CLAUDE_MODEL (a
@@ -208,30 +228,34 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
                 CLAUDE_CODE_OAUTH_TOKEN is missing, so a misconfigured
                 claude-real worker fails loudly instead of silently falling
                 into the econ branch below.
-      econ   -> --agent opencode, OPENAI_BASE_URL/OPENAI_API_KEY. econ's own
-                toolbox binary is NOT invoked here — it isn't installable
-                into an arbitrary per-task Harbor container built fresh from
-                that task's own Dockerfile, so the econ arm reuses Harbor's
-                opencode agent (opencode is econ's own base) against the
-                same gateway + tier default instead.
+      econ   -> --agent opencode, OPENAI_BASE_URL/OPENAI_API_KEY, UNTOUCHED by
+                the import-path swap above. econ's own toolbox binary is NOT
+                invoked here — it isn't installable into an arbitrary
+                per-task Harbor container built fresh from that task's own
+                Dockerfile, so the econ arm reuses Harbor's opencode agent
+                (opencode is econ's own base) against the same gateway + tier
+                default instead.
 
     `vk` is run()'s per-instance LiteLLM virtual key (mint_instance_key
     result, or None on a mint miss/no master key) — when set it's used as
     the agent's gateway auth token INSTEAD of the shared master key, so
     run()'s later fetch_cost can read this instance's spend back in
     isolation from every other instance sharing the gateway. claude-real
-    never touches the gateway so `vk` is irrelevant to it.
+    never touches the gateway so `vk` is irrelevant to it (run() also never
+    mints one for claude-real — see its real-Anthropic cost-stamp branch).
     """
     litellm_key = _litellm_key()
     token = vk or litellm_key
     gateway = os.environ.get("ANTHROPIC_BASE_URL", DEFAULT_GATEWAY_URL)
     conductor = os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", DEFAULT_CONDUCTOR_MODEL)
+    stock_agent = os.environ.get("TERMINAL_STOCK_AGENT") == "1"
+    claude_agent = "claude-code" if stock_agent else UNERR_AGENT_IMPORT_PATH
 
     if worker.arm == "claude":
         env: dict[str, str] = {"ANTHROPIC_BASE_URL": gateway}
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
-        return "claude-code", conductor, env
+        return claude_agent, conductor, env
 
     if worker.arm == "claude-real":
         oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
@@ -241,7 +265,7 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
                 "worker env (Claude Code CLI's native subscription auth) — "
                 "refusing to fall through to gateway/econ auth")
         model = os.environ.get("CLAUDE_MODEL", "sonnet")
-        return "claude-code", model, {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
+        return claude_agent, model, {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
 
     # econ (default arm) — opencode, OpenAI-compatible route through the same
     # gateway. TERMINAL_OPENCODE_MODEL overrides the model id independently
@@ -380,12 +404,20 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     module docstring), there is no git diff to hand the coordinator. Exports
     ECON_TASK_DEADLINE_MS (absolute epoch-ms) into the agent's env, sized off
     the task's own task.toml budget rather than the outer GRACE_S ceiling.
-    Also mints a per-instance LiteLLM virtual key up front and, when minting
-    succeeded, reads its real spend back after the harbor subprocess exits
-    into both meta_text's `cost` field (the claude arm's run-benchmark.py's
-    real-spend attribution for SWE-bench) and `telemetry` (turns/usd/
-    in_tokens/out_tokens/by_tier — the shape econ-telemetry.py/tigris_archive.py
-    already expect, previously left null for every TB row).
+    The claude/claude-real arms drive Harbor's own `claude-code` agent
+    replaced by the custom `harbor_agents:ClaudeUnerrAgent` (--agent-import-path,
+    PYTHONPATH pointed at this module's dir) unless TERMINAL_STOCK_AGENT=1 —
+    see _arm_agent_config. Mints a per-instance LiteLLM virtual key up front
+    for claude/econ (never claude-real, which doesn't touch the gateway) and,
+    when minting succeeded, reads its real spend back after the harbor
+    subprocess exits into both meta_text's `cost` field (the claude arm's
+    run-benchmark.py's real-spend attribution for SWE-bench) and `telemetry`
+    (turns/usd/in_tokens/out_tokens/by_tier — the shape econ-telemetry.py/
+    tigris_archive.py already expect, previously left null for every TB row).
+    claude-real instead stamps `cost` from Harbor's own job-level
+    stats.cost_usd with source "claude-native" (real-Anthropic $, never
+    LiteLLM spend — the same label/shape run-benchmark.py's claude-real path
+    uses, which tigris_archive.py's _norm_cost already special-cases).
     @sem domain=benchmark-harness role=orchestration
     """
     task_dir = _task_dir(worker, iid)
@@ -403,13 +435,16 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # run-benchmark.py's open-models per-instance vk, ~line 490-501). Mint
     # failure — no master key, or a gateway hiccup — never aborts the run:
     # _arm_agent_config falls back to the master key and meta["cost"] is
-    # simply omitted below.
+    # simply omitted below. Skipped entirely for claude-real: that arm never
+    # touches the gateway (real-Anthropic auth only), so minting a vk for it
+    # would be pointless and its cost is stamped from Harbor's own
+    # agent-reported figure instead (claude-native branch below).
     litellm_key = _litellm_key()
     gateway_root = os.environ.get("ANTHROPIC_BASE_URL", DEFAULT_GATEWAY_URL)
     run_id_env = os.environ.get("RUN_ID", "")
     vk = None
     vk_alias = ""
-    if litellm_key:
+    if litellm_key and worker.arm != "claude-real":
         vk_alias = f"terminal-{run_id_env}-{iid}"
         vk = mint_instance_key(
             gateway_root, litellm_key, alias=vk_alias,
@@ -423,6 +458,18 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     env.update(extra_env)
     # Mirror _resolve: worker VM is already x86_64, don't force cross-arch.
     env["DOCKER_DEFAULT_PLATFORM"] = ""
+    # ClaudeUnerrAgent (harbor_agents.py) is loaded via --agent-import-path
+    # below, which harbor resolves with `importlib.import_module` — it must
+    # be importable off the HARBOR SUBPROCESS's own sys.path, so put this
+    # file's directory (harbor_agents.py lives right beside it, same tools/
+    # dir on both the dist image and a laptop checkout) on PYTHONPATH. Only
+    # when we're actually loading it (colon in `agent`) — never for econ or
+    # a TERMINAL_STOCK_AGENT=1 control run.
+    if ":" in agent:
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        existing_pp = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            f"{tools_dir}{os.pathsep}{existing_pp}" if existing_pp else tools_dir)
 
     ceiling = worker.timeout
     task_hint = _task_timeout_hint(task_dir)
@@ -442,10 +489,20 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     task_budget_s = task_hint or ceiling
     env["ECON_TASK_DEADLINE_MS"] = str(int(time.time() * 1000) + task_budget_s * 1000)
 
+    # `agent` is a plain Harbor agent name ("claude-code"/"opencode") for
+    # econ and a TERMINAL_STOCK_AGENT=1 control run, or "module.path:Class"
+    # (UNERR_AGENT_IMPORT_PATH) for the claude/claude-real harness path — a
+    # colon can't appear in a bare agent name, so it cleanly picks the flag.
+    # --agent-import-path is deprecated-but-functional in harbor 0.20.0 (the
+    # pinned version harbor_agents.py was verified against): it only logs a
+    # warning (cli/utils.py warn_deprecated_flag), never fails; --agent
+    # itself now also accepts the "module.path:Class" form, but the explicit
+    # flag is kept for clarity that this is a custom, not first-party, agent.
+    agent_flag = "--agent-import-path" if ":" in agent else "--agent"
     cmd = [
         HARBOR_BIN, "run",
         "--path", task_dir,
-        "--agent", agent,
+        agent_flag, agent,
         "--model", model,
         "--env", "docker",
         "--jobs-dir", jobs_dir,
@@ -545,7 +602,26 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         "cost_usd": stats.get("cost_usd"),
         "rc": rc,
     }
-    if vk:
+    if worker.arm == "claude-real":
+        # Real-Anthropic $ (never LiteLLM spend — this arm never touches the
+        # gateway, see _arm_agent_config) — no vk was minted, no fetch_cost
+        # call. Stamp whatever Harbor's own job-level stats.cost_usd carries
+        # for this claude-code run (same debug field `cost_usd` above reads;
+        # Harbor's ATIF-derived job stats, not litellm_spend_logs) with
+        # source "claude-native", the SAME shape+label
+        # e2e/reference/claude/local-docker/run-benchmark.py's own
+        # claude-real cost-capture path uses, so tigris_archive.py's
+        # _norm_cost/build_overview (cost_source == "claude-native") reads it
+        # identically to the SWE-bench claude-real rows.
+        meta["cost"] = {"usd": stats.get("cost_usd"), "source": "claude-native"}
+        if any(stats.get(k) is not None for k in
+               ("n_input_tokens", "n_output_tokens", "n_cache_tokens")):
+            meta["telemetry"] = {
+                "in_tokens": stats.get("n_input_tokens"),
+                "cached_in": stats.get("n_cache_tokens"),
+                "out_tokens": stats.get("n_output_tokens"),
+            }
+    elif vk:
         # Real LiteLLM spend for this instance's vk — the field
         # tigris_archive.py's _norm_cost/build_overview reads (meta["cost"]).
         # cost_usd above stays Harbor's own model-priced agent_result figure
