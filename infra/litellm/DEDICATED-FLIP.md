@@ -67,18 +67,35 @@ litellm image entrypoint. On boot, for each tier whose `<TIER>_DEPLOYMENT_PATH` 
 set, `flip_tier()` sed-rewrites that tier's `model:` line in the runtime `config.yaml`:
 
 ```sh
-sed -i -E "s|^([[:space:]]*)model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$|\\1model: ${_path}\\n\\1drop_params: true|" "$CONFIG"
+sed -i -E "s|^([[:space:]]*)model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$|\\1model: ${_path}|" "$CONFIG"
 ```
 
 Anchored end-of-line match → only the serverless base-model line is touched, never the
-`model_name:` slug or another tier. If no secret is set, it's a **no-op** and serverless
+`model_name:` slug or another tier. It is a PURE model-line swap — nothing else is
+injected (see §2 for why that is now safe). If no secret is set, it's a **no-op** and serverless
 `config.yaml` is served verbatim. It then chains to `/app/docker/prod_entrypoint.sh` (NOT
 `docker/entrypoint.sh`, which is migration-only and exits without serving) so prisma /
 spend-logs DB setup still runs.
 
 ---
 
-## 2. The tool-call fix (`drop_params: true`)
+## 2. The tool-call fix (image-level param patch — since 2026-07-19)
+
+**Current mechanism:** `patches/fireworks_supported_params.py` (appended into
+`litellm/llms/fireworks_ai/chat/transformation.py` by the Dockerfile, same pattern as
+the cost patch) rebinds `FireworksAIConfig.get_supported_openai_params` to resolve
+capabilities from the **base-model half** of a `base#deployments/...` string.
+Measured on litellm 1.91.0: the dedicated string resolved 39 supported params
+(missing `tool_choice` + `reasoning_effort`), the serverless string 43 — that gap is
+what every flip bug below grew from. With the patch, dedicated == serverless on BOTH
+`/chat/completions` and `/responses` (both converge on this lookup), params forward
+verbatim (Fireworks accepts them identically on dedicated), and `flip_tier()` injects
+nothing. `allowed_openai_params` stays in `config.yaml` as a harmless extra belt.
+
+Everything below is the HISTORY of how we got here (kept because each layer explains
+a real incident):
+
+### History: the `drop_params: true` era (2026-07-13 → 2026-07-19)
 
 ### Symptom
 
@@ -101,12 +118,14 @@ flipped tiers in `config.yaml` (already on `minimax-m3`; added to `glm-5p2` +
 `/responses`, so it kept `400`ing on every call. That is exactly what produced the
 0-token / 0-resolved terminal run.
 
-### The fix
+### The interim fix — and why it was replaced
 
-`flip_tier()` **also** injects a per-tier `drop_params: true` into the same
-`litellm_params` block (the `\\1drop_params: true` in the sed above). `drop_params: true`
-**does** take effect on `/responses` → LiteLLM silently drops the unsupported params
-instead of `400`ing.
+`flip_tier()` used to **also** inject a per-tier `drop_params: true` into the flipped
+`litellm_params` block. `drop_params: true` does take effect on `/responses` → no more
+`400`s — but it works by **silently stripping** `tool_choice`/`reasoning_effort` there,
+so a flipped tier could free-text where serverless would be forced into a tool call,
+and lost its reasoning-effort pin. That behavioural drift (observed live 2026-07-19) is
+why the injection was removed in favour of the image-level param patch above.
 
 Belt and suspenders, per surface:
 

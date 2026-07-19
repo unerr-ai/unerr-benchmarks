@@ -21,6 +21,16 @@ COPY config.yaml .
 COPY patches/fireworks_cost_calculator.py /tmp/fw_cost_override.py
 RUN python3 -c "import litellm.llms.fireworks_ai.cost_calculator as m; f = open(m.__file__, 'a'); f.write('\n\n' + open('/tmp/fw_cost_override.py').read()); f.close(); print('patched', m.__file__)" \
  && python3 -c "import litellm.llms.fireworks_ai.cost_calculator as m; assert getattr(m.cost_per_token, '__econ_override__', False), 'econ fireworks cost override missing'; print('override active:', m.__file__)"
+# Param-support override (2026-07-19, see patches/fireworks_supported_params.py):
+# dedicated `#deployments/...` model strings lose tool_choice/reasoning_effort in
+# litellm's string-keyed capability lookup → 400s (drop_params:false) or silent
+# stripping on /responses (the old flip-injected drop_params:true). Append a rebind
+# of FireworksAIConfig.get_supported_openai_params that resolves from the base-model
+# half of the string — dedicated == serverless on both surfaces, so the flip needs
+# NO drop_params injection. Assert makes a base-image layout change fail the build.
+COPY patches/fireworks_supported_params.py /tmp/fw_params_override.py
+RUN python3 -c "import litellm.llms.fireworks_ai.chat.transformation as m; f = open(m.__file__, 'a'); f.write('\n\n' + open('/tmp/fw_params_override.py').read()); f.close(); print('patched', m.__file__)" \
+ && python3 -c "from litellm.llms.fireworks_ai.chat.transformation import FireworksAIConfig as C; assert getattr(C.get_supported_openai_params, '__econ_override__', False), 'econ fireworks param override missing'; sp = C().get_supported_openai_params('accounts/fireworks/models/minimax-m3#accounts/x/deployments/y'); assert 'tool_choice' in sp and 'reasoning_effort' in sp, sp; print('param override active:', len(sp), 'params')"
 RUN chmod +x ./docker/entrypoint.sh
 # econ conductor-flip wrapper: a no-op unless CONDUCTOR_DEPLOYMENT_PATH is set, in
 # which case it rewrites the conductor's upstream to a dedicated Fireworks

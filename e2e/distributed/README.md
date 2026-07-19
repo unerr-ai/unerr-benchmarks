@@ -155,6 +155,19 @@ MACHINES=25 ARM=econ LABEL=full-dedicated DEDICATED_CONDUCTOR=1 ./run-distribute
   `WARN: could not confirm conductor routing` means the gateway image lacks the flip wrapper (do the
   one-time deploy above) — otherwise you'd pay for an unused GPU. Manual control:
   `./fireworks-conductor.sh {up|status|print-path|down}`.
+- **Stale-flip preflight (prepare-side hard gate):** before creating any fleet machine,
+  `run-distributed.sh` checks whether the gateway has ANY `<TIER>_DEPLOYMENT_PATH` secret set
+  (leftover from a prior `DEDICATED_CONDUCTOR=1` run or a manual `gpu-flip.sh` flip) and, if so, runs
+  `gpu-flip.sh --verify` (§8.4) against it. A non-PASS verdict — the dedicated deployment behind that
+  flip is gone — **aborts the prepare** with `ERROR: gateway has a STALE dedicated flip — run
+  ./gpu-flip.sh --verify (and --revert if dead) before preparing a fleet`, so a fleet never launches
+  into a gateway that will 404 that tier for every worker. No tier secrets set → skipped silently; a
+  `flyctl secrets list` failure only warns (never blocks a plain serverless run).
+- **Stale-flip warning (teardown-side, non-fatal):** `destroy_fleet` re-checks the same secrets after
+  tearing a fleet down and prints a prominent multi-line `WARNING` (never fails teardown) if any tier
+  flip is still set — the underlying GPU may already be gone, and a stale flip 404s that tier
+  fleet-wide for the *next* run against this shared gateway. Follow-up: `./gpu-flip.sh --verify`, then
+  `./gpu-flip.sh --revert --<tier>` if it's dead.
 
 ## 3. Monitor
 While it runs, `run-distributed.sh` streams the coordinator's `progress:` line
@@ -436,6 +449,7 @@ reasoner=deepseek-v4-pro executor=gpt-oss-120b`.
 ```bash
 ./gpu-flip.sh --conductor <dep-id> [--oracle <id>] [--reasoner <id>] [--executor <id>]
 ./gpu-flip.sh --status                 # which tiers are currently dedicated vs serverless
+./gpu-flip.sh --verify                 # probe all 4 tiers x {chat, responses} for a real tool call
 ./gpu-flip.sh --serverless             # revert ALL tiers
 ./gpu-flip.sh --revert --oracle        # revert just one tier (put --revert BEFORE the tier flag)
 # prefix any command with --dry-run to print the flyctl call without running it
@@ -443,6 +457,16 @@ reasoner=deepseek-v4-pro executor=gpt-oss-120b`.
 > This flips the **shared** gateway for everyone — don't run a second econ campaign against
 > `econ-litellm` while a dedicated flip is live. `DEDICATED_CONDUCTOR=1` (§2) is the automatic,
 > ephemeral, conductor-only alternative when you want the runner to own the GPU's lifecycle.
+
+`--verify` is the health check for a flip: for each of conductor/oracle/reasoner/executor it POSTs a
+"call the echo tool" prompt to both `/v1/chat/completions` and `/v1/responses` on the gateway (using
+`LITELLM_API_KEY`/`LITELLM_MASTER_KEY`, else sourced from `infra/litellm/.env.local`) and classifies the
+reply: a real tool call → `PASS`; `UnsupportedParamsError` → `FAIL(param-seam)`; a `NOT_FOUND`/`Model not
+found`/`NotFoundError` body → `FAIL(STALE-FLIP)` (the dedicated deployment behind that tier's secret is
+gone — printed alongside the exact revert command for that tier); anything else → `FAIL(other: ...)`
+with the first 200 body chars. Prints an aligned `tier | flipped | chat | responses` table; exits 0 iff
+all 8 probes PASS. `run-distributed.sh` calls this automatically as a prepare-side hard gate and a
+teardown-side warning — see §2.
 
 ### 8.5 Recommended GPU-backed matrix flow (prepare → flip → start)
 Warm the fleets before the GPU meter starts, so you only pay for the GPU while workers are actually

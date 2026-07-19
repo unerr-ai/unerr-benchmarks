@@ -280,6 +280,20 @@ for v in vs:
       flyctl volume destroy "$v" -a "$APP" --yes 2>&1 | tail -1 || true
     done
   fi
+  # ── gpu-flip staleness check (best-effort, NEVER fails teardown) ────────────
+  # A dedicated tier flip still set after this fleet is gone likely means the
+  # underlying GPU deployment is gone too (or was never torn down) — every probe
+  # on that tier then 404s fleet-wide for the NEXT run that hits this gateway.
+  local gf_secrets
+  gf_secrets="$(flyctl secrets list -a "$GATEWAY_APP" 2>/dev/null || true)"
+  if printf '%s\n' "$gf_secrets" | grep -qE '(CONDUCTOR|ORACLE|REASONER|EXECUTOR)_DEPLOYMENT_PATH'; then
+    log "  ================================================================"
+    log "  WARNING: gateway $GATEWAY_APP still has dedicated tier flip(s) set after this teardown"
+    log "    the underlying GPU deployment may already be gone (torn down or never flipped back) —"
+    log "    a stale flip 404s that tier FLEET-WIDE for the next run against this gateway"
+    log "    run: ./gpu-flip.sh --verify   (then ./gpu-flip.sh --revert --<tier> if dead)"
+    log "  ================================================================"
+  fi
 }
 
 # ── dedicated-conductor lifecycle (only acts when DEDICATED_CONDUCTOR=1) ──────
@@ -393,6 +407,25 @@ if [ "$MODE" = "run" ] || [ "$MODE" = "arm" ]; then
   echo "==> armed — proceeding to poll/bundle/teardown"
 else
 # ═══════════ prepare / all-in-one: build the image + create the fleet ═════════
+
+# ── gpu-flip staleness gate (before any machine is created) ───────────────────
+# A prior DEDICATED_CONDUCTOR run (or a manual gpu-flip.sh) can leave a tier
+# flipped to a dedicated deployment that's since been deleted — every probe on
+# that tier then 404s fleet-wide the moment a worker claims a task. Refuse to
+# build a fleet against a gateway in that state. Best-effort: an `flyctl
+# secrets list` failure only warns (never break a plain serverless run) — the
+# ONLY hard exit here is an explicit STALE-FLIP verdict from gpu-flip.sh --verify.
+GF_SECRETS="$(flyctl secrets list -a "$GATEWAY_APP" 2>/dev/null || true)"
+if [ -z "$GF_SECRETS" ]; then
+  echo "==> gpu-flip preflight: could not list secrets on $GATEWAY_APP (or none set) — skipping"
+elif printf '%s\n' "$GF_SECRETS" | grep -qE '(CONDUCTOR|ORACLE|REASONER|EXECUTOR)_DEPLOYMENT_PATH'; then
+  echo "==> gpu-flip preflight: dedicated tier flip(s) present on $GATEWAY_APP — verifying with gpu-flip.sh --verify"
+  if ! "$HERE/gpu-flip.sh" --verify; then
+    echo "ERROR: gateway has a STALE dedicated flip — run ./gpu-flip.sh --verify (and --revert if dead) before preparing a fleet" >&2
+    exit 1
+  fi
+  echo "    gpu-flip preflight: verified OK"
+fi
 
 # ── campaign image pin (locks one image across all tranches of a multi-run
 # campaign) — skipped entirely when CAMPAIGN is unset (DESTROY_ONLY already

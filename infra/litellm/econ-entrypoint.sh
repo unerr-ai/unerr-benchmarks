@@ -18,18 +18,17 @@
 # teardown, so the gateway auto-reverts to serverless. CONDUCTOR_DEPLOYMENT_PATH keeps
 # its original single-tier behaviour (back-compat with DEDICATED_CONDUCTOR runs).
 #
-# NOTE: a dedicated deployment's param support cannot be resolved by LiteLLM, so with
-# drop_params:false it REJECTS tool_choice/reasoning_effort (UnsupportedParamsError) and
-# that tier's calls fail. TWO layers guard this: (1) the flipped tiers' config entries
-# carry allowed_openai_params:["tool_choice","reasoning_effort"] (already on minimax-m3;
-# added to glm-5p2 + deepseek-v4-pro) — but LiteLLM ONLY honors that on /chat/completions,
-# NOT on the /responses endpoint (opencode's default surface: it 400s every call, which is
-# what broke the terminal-bench econ arm — 0 tokens, 0 resolved). So (2) flip_tier ALSO
-# injects a per-tier `drop_params: true` below, which DOES take effect on /responses (it
-# drops the unsupported params instead of 400ing). allowed_openai_params still wins on
-# /chat/completions, so econ's reasoning_effort pins ride through untouched there. Harmless
-# on serverless (never flipped); global litellm_settings.drop_params stays false so
-# non-flipped tiers are unaffected.
+# NOTE: LiteLLM resolves a fireworks model's supported params from the model STRING,
+# so a dedicated `#deployments/...` path used to lose tool_choice/reasoning_effort →
+# UnsupportedParamsError 400s with drop_params:false (2026-07-13), and the interim
+# per-tier `drop_params: true` injection that stopped the /responses 400s silently
+# STRIPPED those params there instead — tool-call behaviour differed between
+# serverless and dedicated. FIXED at the IMAGE level since 2026-07-19:
+# patches/fireworks_supported_params.py (appended by the Dockerfile) resolves
+# capabilities from the base-model half of the string, so dedicated == serverless on
+# BOTH /chat/completions and /responses and this wrapper injects NOTHING — the flip
+# is a pure model-line swap. allowed_openai_params stays in config.yaml as a
+# harmless extra belt on /chat/completions.
 #
 # We CHAIN the base image entrypoint (/app/docker/prod_entrypoint.sh) rather than exec
 # litellm directly so its startup work (prisma / spend-logs DB setup) still runs.
@@ -47,12 +46,10 @@ flip_tier() {
   [ -n "$_path" ] || return 0
   _re="^[[:space:]]*model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$"
   if grep -qE "$_re" "$CONFIG"; then
-    # Flip the model line to the dedicated path AND inject a sibling `drop_params: true`
-    # into the same litellm_params block (\1 = leading whitespace, matching indent) so the
-    # dedicated deployment's calls survive the /responses endpoint (see header NOTE). GNU
-    # sed (the Debian base image) expands \n in the replacement to a newline.
-    sed -i -E "s|^([[:space:]]*)model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$|\\1model: ${_path}\\n\\1drop_params: true|" "$CONFIG"
-    echo "[econ-entrypoint] ${_tier} flipped to DEDICATED (+drop_params:true): ${_path}"
+    # Pure model-line swap — no drop_params injection; the image-level param patch
+    # (see header NOTE) makes the dedicated path resolve the serverless capability set.
+    sed -i -E "s|^([[:space:]]*)model:[[:space:]]*fireworks_ai/accounts/fireworks/models/${_slug}[[:space:]]*\$|\\1model: ${_path}|" "$CONFIG"
+    echo "[econ-entrypoint] ${_tier} flipped to DEDICATED: ${_path}"
   else
     echo "[econ-entrypoint] WARN: ${_tier}_DEPLOYMENT_PATH set but the serverless ${_tier} line (${_slug}) was not found in $CONFIG — serving as-is" >&2
   fi
