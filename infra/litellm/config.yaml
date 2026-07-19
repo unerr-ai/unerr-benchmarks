@@ -126,6 +126,71 @@ model_list:
       output_cost_per_token: 0.000004
       cache_read_input_token_cost: 0.00000019
 
+  # OpenAI GPT-5.6 family (2026-07-19): real-OpenAI ensemble for the claude arm's
+  # ANTHROPIC_DEFAULT_* tier map — haiku=luna, sonnet=terra, opus=sol, fable=sol-high.
+  # Costs verified against developers.openai.com/api/docs/pricing 2026-07-19.
+  # NOTE: requests with >272k input tokens bill 2x-input/1.5x-output (OpenAI-side);
+  # keep payloads under that line.
+  - model_name: openai/gpt-5.6-luna
+    litellm_params:
+      model: openai/gpt-5.6-luna
+      api_key: os.environ/OPENAI_API_KEY
+      # Defensive: our LiteLLM 1.91.x predates gpt-5.6 in its model-capability map;
+      # without this allow-list, drop_params:false could 400 on tool_choice/reasoning_effort.
+      # Same rationale as the minimax-m3 dedicated-deployment comment above.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000006
+      cache_read_input_token_cost: 0.0000001
+    model_info:
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000006
+      cache_read_input_token_cost: 0.0000001
+
+  - model_name: openai/gpt-5.6-terra
+    litellm_params:
+      model: openai/gpt-5.6-terra
+      api_key: os.environ/OPENAI_API_KEY
+      # Same allow-list rationale as the openai/gpt-5.6-luna entry above.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
+      input_cost_per_token: 0.0000025
+      output_cost_per_token: 0.000015
+      cache_read_input_token_cost: 0.00000025
+    model_info:
+      input_cost_per_token: 0.0000025
+      output_cost_per_token: 0.000015
+      cache_read_input_token_cost: 0.00000025
+
+  - model_name: openai/gpt-5.6-sol
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_key: os.environ/OPENAI_API_KEY
+      # Same allow-list rationale as the openai/gpt-5.6-luna entry above.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.00003
+      cache_read_input_token_cost: 0.0000005
+    model_info:
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.00003
+      cache_read_input_token_cost: 0.0000005
+
+  - model_name: openai/gpt-5.6-sol-high
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_key: os.environ/OPENAI_API_KEY
+      reasoning_effort: "high"
+      # fable/oracle tier alias — same model as openai/gpt-5.6-sol, forced high reasoning.
+      # Same allow-list rationale as the openai/gpt-5.6-luna entry above.
+      allowed_openai_params: ["tool_choice", "reasoning_effort"]
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.00003
+      cache_read_input_token_cost: 0.0000005
+    model_info:
+      input_cost_per_token: 0.000005
+      output_cost_per_token: 0.00003
+      cache_read_input_token_cost: 0.0000005
+
 litellm_settings:
   # Pass request params through untouched — reasoning-effort pins ride the request from econ
   # (executor/oracle models must never see reasoning-off; registry wrn).

@@ -215,7 +215,11 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
       claude -> --agent-import-path harbor_agents:ClaudeUnerrAgent (unless
                 TERMINAL_STOCK_AGENT=1, which reverts to Harbor's bare
                 first-party --agent claude-code — the control run), same
-                ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN either way.
+                ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN either way, plus the
+                four ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL tier
+                aliases forwarded from the host env when set (absent stays
+                absent — no invented defaults) so an in-agent escalation to
+                opus/haiku/fable resolves through the gateway too.
       claude-real -> same import-path swap, CLAUDE_CODE_OAUTH_TOKEN only —
                 real Anthropic subscription auth passed through from the
                 worker's own env untouched, same as e2e/reference/claude/
@@ -255,6 +259,20 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
         env: dict[str, str] = {"ANTHROPIC_BASE_URL": gateway}
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
+        # Forward the four Claude Code tier aliases when the host set them, so
+        # an in-agent escalation to opus/haiku/fable also resolves through the
+        # gateway (the conductor already works because `conductor` above is
+        # passed as --model directly). Absent stays absent — no invented
+        # defaults, byte-identical behavior when the host doesn't set these.
+        for tier_var in (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        ):
+            tier_val = os.environ.get(tier_var)
+            if tier_val:
+                env[tier_var] = tier_val
         return claude_agent, conductor, env
 
     if worker.arm == "claude-real":

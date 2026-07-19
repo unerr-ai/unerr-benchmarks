@@ -900,6 +900,12 @@ fi
 [ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
 [ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
 [ -n "${TERMINAL_MAX_RETRIES:-}" ] && EXTRA_ENV+=(-e TERMINAL_MAX_RETRIES="$TERMINAL_MAX_RETRIES")
+# Claude Code tier aliases (gateway ensembles, e.g. the GPT-5.6 map) — forwarded
+# only when set; harness_terminal passes them into the claude arm's containers.
+[ -n "${ANTHROPIC_DEFAULT_SONNET_MODEL:-}" ] && EXTRA_ENV+=(-e ANTHROPIC_DEFAULT_SONNET_MODEL="$ANTHROPIC_DEFAULT_SONNET_MODEL")
+[ -n "${ANTHROPIC_DEFAULT_OPUS_MODEL:-}" ] && EXTRA_ENV+=(-e ANTHROPIC_DEFAULT_OPUS_MODEL="$ANTHROPIC_DEFAULT_OPUS_MODEL")
+[ -n "${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}" ] && EXTRA_ENV+=(-e ANTHROPIC_DEFAULT_HAIKU_MODEL="$ANTHROPIC_DEFAULT_HAIKU_MODEL")
+[ -n "${ANTHROPIC_DEFAULT_FABLE_MODEL:-}" ] && EXTRA_ENV+=(-e ANTHROPIC_DEFAULT_FABLE_MODEL="$ANTHROPIC_DEFAULT_FABLE_MODEL")
 # Optional pull-through registry mirror for SWE-bench testbed image pulls — ARM-
 # AGNOSTIC (unlike EXTRA_ENV above), shared across econ, claude, and future arms
 # (see e2e/distributed/lib/boot.sh::boot_dockerd). Passed through only when set in

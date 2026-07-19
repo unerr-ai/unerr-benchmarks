@@ -430,7 +430,9 @@ are bare-Claude baselines.
 **Control knobs** (read by `harness_terminal.py`; `run-distributed.sh` forwards only when set):
 `TERMINAL_STOCK_AGENT=1` reverts both claude arms to the bare first-party agent (the no-harness baseline
 control). `HARNESS_HOOKS=1` opts into the `cc-harness-hooks` finish-gate (default OFF for terminal because
-its deny/gate rules are SWE-bench-shaped, not terminal-shaped). **Cost** on terminal for `claude-real`:
+its deny/gate rules are SWE-bench-shaped, not terminal-shaped).
+`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL` — forwarded into the claude arm's task containers
+when set (tier aliases for gateway ensembles, e.g. the GPT-5.6 map). **Cost** on terminal for `claude-real`:
 `meta.cost` is stamped `source="claude-native"` with the agent's own reported USD (no LiteLLM vk mint),
 consistent with the resolve flow; the `claude` (open-weights) arm still uses LiteLLM spend.
 
