@@ -899,6 +899,7 @@ fi
 # agent, hooks off (the defaults baked into harness_terminal/harbor_agents).
 [ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
 [ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
+[ -n "${TERMINAL_MAX_RETRIES:-}" ] && EXTRA_ENV+=(-e TERMINAL_MAX_RETRIES="$TERMINAL_MAX_RETRIES")
 # Optional pull-through registry mirror for SWE-bench testbed image pulls — ARM-
 # AGNOSTIC (unlike EXTRA_ENV above), shared across econ, claude, and future arms
 # (see e2e/distributed/lib/boot.sh::boot_dockerd). Passed through only when set in

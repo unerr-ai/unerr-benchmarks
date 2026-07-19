@@ -418,6 +418,10 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     stats.cost_usd with source "claude-native" (real-Anthropic $, never
     LiteLLM spend — the same label/shape run-benchmark.py's claude-real path
     uses, which tigris_archive.py's _norm_cost already special-cases).
+    `--max-retries` defaults to 1 for the claude/claude-real custom-agent
+    path (recovers a transient OAuth 429 burst) and 0 for econ/stock-agent,
+    overridable for any arm via TERMINAL_MAX_RETRIES — this function only
+    reads that env var, the launcher forwards it as a knob only when set.
     @sem domain=benchmark-harness role=orchestration
     """
     task_dir = _task_dir(worker, iid)
@@ -499,6 +503,19 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # itself now also accepts the "module.path:Class" form, but the explicit
     # flag is kept for clarity that this is a custom, not first-party, agent.
     agent_flag = "--agent-import-path" if ":" in agent else "--agent"
+    # --max-retries: 0 everywhere by default (econ, TERMINAL_STOCK_AGENT=1,
+    # and any other bare-agent path), EXCEPT the custom-agent path (claude/
+    # claude-real driving harbor_agents:ClaudeUnerrAgent, same ":" in agent
+    # test as agent_flag above) where the default is 1 — that harness's big
+    # tool-result payload (~235k in/req) can burst the OAuth per-minute rate
+    # limit under parallel workers, and with --max-retries 0 Harbor treats a
+    # single 429 as trial-fatal. TERMINAL_MAX_RETRIES, when set, overrides
+    # the default for every arm — this worker only READS the env; the
+    # launcher (run-distributed.sh) forwards a knob only when the caller
+    # sets it, and does not yet have a TERMINAL_MAX_RETRIES passthrough line
+    # (see report).
+    default_max_retries = "1" if ":" in agent else "0"
+    max_retries = os.environ.get("TERMINAL_MAX_RETRIES", default_max_retries)
     cmd = [
         HARBOR_BIN, "run",
         "--path", task_dir,
@@ -508,7 +525,7 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         "--jobs-dir", jobs_dir,
         "--job-name", iid,
         "-n", "1",
-        "--max-retries", "0",
+        "--max-retries", max_retries,
         "--yes",
         "--quiet",
     ]

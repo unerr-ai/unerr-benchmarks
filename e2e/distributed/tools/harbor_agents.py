@@ -52,17 +52,20 @@ by this module.
    uploaded into the task container, Node is nvm-installed, `npm install -g`
    stages the unerr binary, `dev-entitlement.mjs mint pro` mints an offline-Pro
    entitlement (parsed from its stdout — each exec() below is its own process,
-   so there is no shared shell to `eval` into, unlike run-instance.sh), then
-   `unerr index --force` + `unerr pm start` + `unerr install claude-code` wire
-   the graph + daemon + .mcp.json/.claude/settings.json/CLAUDE.md, and finally
-   the shipped `.claude/agents/unerr-*.md` sub-agent defs are copied over
-   whatever `unerr install` just wrote — same order, same artifacts,
-   run-instance.sh's ON path. Only getting `unerr` onto PATH is a hard gate
-   (raises, matching the "unerr binary not on PATH" fatal check in
-   run-instance.sh); the graph index / daemon start / `unerr install
-   claude-code` steps are BEST-EFFORT past that gate, exactly as lenient there
-   too (a cold index or slow daemon boot degrades the run, it does not abort
-   it).
+   so there is no shared shell to `eval` into, unlike run-instance.sh), then a
+   git repo is bootstrapped (git installed as root if missing + `git init` +
+   baseline commit as the agent user, since an arbitrary terminal-bench
+   workdir — unlike a SWE-bench checkout — often starts with no `.git` at
+   all and `unerr index` hard-requires one), then `unerr index --force` +
+   `unerr pm start` + `unerr install claude-code` wire the graph + daemon +
+   .mcp.json/.claude/settings.json/CLAUDE.md, and finally the shipped
+   `.claude/agents/unerr-*.md` sub-agent defs are copied over whatever
+   `unerr install` just wrote — same order, same artifacts, run-instance.sh's
+   ON path. Only getting `unerr` onto PATH is a hard gate (raises, matching
+   the "unerr binary not on PATH" fatal check in run-instance.sh); the git
+   bootstrap / graph index / daemon start / `unerr install claude-code` steps
+   are BEST-EFFORT past that gate, exactly as lenient there too (a cold index
+   or slow daemon boot degrades the run, it does not abort it).
 
 ── cc-harness-hooks.py determination (read live: e2e/reference/claude/
    local-docker/context/cc-harness-hooks.py): its deny/gate rules are
@@ -315,11 +318,14 @@ class ClaudeUnerrAgent(ClaudeCode):
         ]
 
     async def _lenient_exec(self, environment: BaseEnvironment, command: str,
-                             env: dict[str, str] | None = None):
+                             env: dict[str, str] | None = None,
+                             user: str | int | None = None):
         """Best-effort step — logs and continues past a failure instead of
         raising, mirroring run-instance.sh's own log-only/`|| true` treatment
-        of everything past the hard unerr-binary-on-PATH gate in install()."""
-        result = await environment.exec(command=command, env=env)
+        of everything past the hard unerr-binary-on-PATH gate in install().
+        `user` lets a root-only step (e.g. an apt-get install) stay lenient
+        too, same as the default-agent-user steps around it."""
+        result = await environment.exec(command=command, env=env, user=user)
         if result.return_code != 0:
             self.logger.warning(
                 "unerr harness setup step failed (non-fatal): %s\nstdout: "
@@ -400,6 +406,33 @@ class ClaudeUnerrAgent(ClaudeCode):
             )
         entitlement_env["UNERR_TOKEN"] = os.environ.get(
             "UNERR_TOKEN", "unerr_sk_e2e_offline_benchmark")
+
+        # `unerr index` hard-requires a git repo (`git rev-parse
+        # --is-inside-work-tree`) — true by construction for a SWE-bench
+        # workdir (always a git checkout) but NOT for an arbitrary
+        # terminal-bench task workdir, which is often a bare fixture with no
+        # `.git` at all. Bootstrap one so the index step below can actually
+        # succeed instead of failing "not inside a git repository": install
+        # git as root if the base image doesn't already have it (ClaudeCode's
+        # own root-install step above only pulls in curl/procps, never git),
+        # then init + a single baseline commit as the agent user, with the
+        # identity inlined via `-c` so the commit can never prompt/fail on
+        # missing user.email/user.name. Both steps are best-effort/
+        # log-and-continue like every other step past the PATH gate.
+        await self._lenient_exec(
+            environment,
+            "command -v git >/dev/null 2>&1 || "
+            "(apt-get update -qq && apt-get install -y -qq git)",
+            user="root",
+        )
+        await self._lenient_exec(
+            environment,
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || "
+            "(git init -q && git add -A && "
+            "git -c user.email=agent@unerr-bench.local "
+            "-c user.name='unerr bench agent' "
+            "commit -q -m baseline --allow-empty)",
+        )
 
         # Best-effort past the PATH gate above — graph index, daemon start,
         # and `unerr install claude-code` are ALL log-and-continue in
