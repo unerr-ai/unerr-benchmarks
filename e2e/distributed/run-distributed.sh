@@ -467,14 +467,29 @@ echo "==> LITELLM_API_KEY: set (len ${#LITELLM_API_KEY})"
 # the sibling econ-coding-agent infra .env.local (never econ's .env.local).
 if [ "$ARM" = "claude" ]; then
   if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
-    _INFRA_ENV="$HERE/../../../econ-coding-agent/infra/litellm/.env.local"
+    _INFRA_ENV="$HERE/../../infra/litellm/.env.local"
     if [ -f "$_INFRA_ENV" ]; then
       LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "$_INFRA_ENV" | head -1 | sed 's/^LITELLM_MASTER_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
     fi
   fi
-  [ -n "${LITELLM_MASTER_KEY:-}" ] || { echo "set LITELLM_MASTER_KEY (or add it to ../econ-coding-agent/infra/litellm/.env.local) — claude arm needs it to mint per-instance keys"; exit 1; }
+  [ -n "${LITELLM_MASTER_KEY:-}" ] || { echo "set LITELLM_MASTER_KEY (or add it to infra/litellm/.env.local) — claude arm needs it to mint per-instance keys"; exit 1; }
   export LITELLM_MASTER_KEY
   echo "==> LITELLM_MASTER_KEY: set (len ${#LITELLM_MASTER_KEY})"
+fi
+
+# ── auth: Claude Code OAuth token (claude-real arm only) — REAL Anthropic models,
+# stock Claude Code: no base-URL/model-alias env overrides, no LiteLLM anywhere.
+# Prefer env, else repo-root .env.local. Value never printed.
+if [ "$ARM" = "claude-real" ]; then
+  if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    _ROOT_ENV="$HERE/../../.env.local"
+    if [ -f "$_ROOT_ENV" ]; then
+      CLAUDE_CODE_OAUTH_TOKEN="$(grep -E '^CLAUDE_CODE_OAUTH_TOKEN=' "$_ROOT_ENV" | head -1 | sed 's/^CLAUDE_CODE_OAUTH_TOKEN=//; s/^["'"'"']//; s/["'"'"']$//')"
+    fi
+  fi
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "set CLAUDE_CODE_OAUTH_TOKEN (or add it to .env.local at repo root) — claude-real arm needs it"; exit 1; }
+  export CLAUDE_CODE_OAUTH_TOKEN
+  echo "==> CLAUDE_CODE_OAUTH_TOKEN: set (len ${#CLAUDE_CODE_OAUTH_TOKEN})"
 fi
 
 # EXA web-search key — the econ agent now ships Exa web search DEFAULT-ON across all
@@ -597,8 +612,8 @@ if [ "$ARM" = "econ" ]; then
   else
     echo "    engine: none at $CI_SRC/src — in-container plugins fall back and stay disabled"
   fi
-elif [ "$ARM" = "claude" ]; then
-  log "arm=claude: no vendor step"
+elif [ "$ARM" = "claude" ] || [ "$ARM" = "claude-real" ]; then
+  log "arm=$ARM: no vendor step"
 fi
 
 # ── resolve the task set → INSTANCE_IDS (comma-separated) ─────────────────────
@@ -868,6 +883,14 @@ ROOTFS_FLAG=(); [ -n "$ROOTFS_GB" ] && ROOTFS_FLAG=(--rootfs-size "$ROOTFS_GB")
 EXTRA_ENV=()
 if [ "$ARM" = "claude" ]; then
   EXTRA_ENV+=(-e CLAUDE_OPEN_MODELS=1 -e LITELLM_MASTER_KEY="$LITELLM_MASTER_KEY" -e ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://econ-litellm.fly.dev}")
+elif [ "$ARM" = "claude-real" ]; then
+  # stock Claude Code on REAL Anthropic models: OAuth token only — no
+  # base-URL/model-alias envs, no LiteLLM. CLAUDE_REAL=1 turns on the same
+  # harness staging (agents/hooks/ON prompt) the open-models arm gets.
+  # TOOLBOX_TAG pins the SHARED claude toolbox (same local-docker dir,
+  # identical image) — without it worker-entrypoint derives
+  # unerr-claude-real-toolbox and rebuilds an identical toolbox per arm.
+  EXTRA_ENV+=(-e CLAUDE_REAL=1 -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" -e CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" -e TOOLBOX_TAG=unerr-claude-toolbox)
 fi
 # Optional pull-through registry mirror for SWE-bench testbed image pulls — ARM-
 # AGNOSTIC (unlike EXTRA_ENV above), shared across econ, claude, and future arms
