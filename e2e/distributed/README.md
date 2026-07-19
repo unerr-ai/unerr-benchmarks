@@ -38,7 +38,8 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
 
 ## 1. Architecture (summary — see `PLAN.md` §1 for the full rationale)
 One small **coordinator** machine (SQLite work queue + aiohttp HTTP server on 6PN) plus N **worker**
-machines (shared-cpu-8x / 16 GB, no volume). Each worker claims one instance at a time
+machines (16 GB / 8 dedicated `performance` CPUs by default, no volume — `CPU_KIND=shared` is the
+explicit cheap override). Each worker claims one instance at a time
 (`POST /claim`), resolves + grades it by shelling out to the SAME `e2e/<arm>/local-docker/
 run-benchmark.py` + swebench harness the single-machine runner uses, heartbeats during the run, and
 reports the patch + grade back (`POST /complete`/`/fail`). A worker exits 0 and self-stops
@@ -55,8 +56,11 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
 - **Smoke first** (always): `MACHINES=2 ARM=econ LABEL=dist-smoke TASKS="django__django-11880,django__django-11951,django__django-11790" ./run-distributed.sh`
 - Task set: `SUITE=mini|lite|full` (full = all 500 SWE-bench_Verified, the default if none of
   `SUITE`/`TASKS`/`TASKS_FILE` is given), or `TASKS="id1,id2,..."`, or `TASKS_FILE=path`.
-- `ROOTFS_GB=50` enlarges each worker's ephemeral rootfs (**fly caps this at 50 GB**; higher values
-  are clamped to 50 by the launcher) — see the calibration note below for when you need this.
+- `ROOTFS_GB` defaults to **50** (fly's max) for every benchmark since 2026-07-19 — workers pull
+  1-4 GB per-task eval images from the private mirror and ENOSPC below it. Values 1-49 are floored
+  back to 50 (**fly caps this at 50 GB**; higher values are clamped down to 50 too); set
+  `ROOTFS_GB=0` to opt out entirely (fly's 8 GB default rootfs, no `--rootfs-size` flag — the
+  old-flyctl fallback) — see the calibration note below.
 - **Long tasks** (multi-hour resolves): the harness enforces nothing task-level anymore — no
   per-instance wall-clock ceiling (difficulty tiers deleted), no stall/progress watchdog, no
   timeout wrapper around the resolve call; the coding agent owns its own watchdog/thrash
@@ -127,7 +131,8 @@ parallel.
 
 ```bash
 # one-time: ship the gateway image that can do the flip (adds infra/litellm/econ-entrypoint.sh)
-cd ../../../econ-coding-agent/infra/litellm && fly deploy -a econ-litellm
+# (gateway infra lives IN THIS REPO at infra/litellm/ since 2026-07-19)
+cd ../../infra/litellm && fly deploy -a econ-litellm
 
 # then any distributed run can opt in:
 cd e2e/distributed
@@ -231,9 +236,13 @@ with if they weren't the defaults, so the derived `APP` and the metadata lookup 
 ## 6. Known calibration note — ephemeral-rootfs IOPS
 Workers have no volume; DinD's data-root sits on the worker's ephemeral rootfs, which is capped at
 roughly 2000 IOPS / 8 MiB/s (vs ~8000 IOPS for a fly volume). If a smoke run shows env-image unpack
-stalling, flip a worker to a volume instead — pass a larger `ROOTFS_GB` first (cheap, one flag), and
-if that isn't enough, the workaround is a per-worker volume analogous to the coordinator's (not
-wired by default — this is the flagged escape hatch, not the steady-state path).
+stalling and the default `ROOTFS_GB=50` (§0/§2) isn't enough, the workaround is a per-worker volume
+analogous to the coordinator's (not wired by default — this is the flagged escape hatch, not the
+steady-state path).
+
+**Disk space (ENOSPC) — per-instance eval images.** The worker-loop prunes images surgically after each instance's container exits: it removes all images except `econ-toolbox` and `alpine`, then runs `docker image prune -f` for dangling layers. This surgical approach (not blanket `docker image prune -a -f`) is necessary because `Dockerfile.instance` does `COPY --from=econ-toolbox`; deleting the toolbox between tasks breaks the next build. The prune reclaims per-task eval+run images (`51jaswanth15/sweap-images:*` for Pro, `swebench/sweb.eval.x86_64.*` for Verified, `starryzhang/*` for Live) while preserving the toolbox, keeping disk to ~one instance's footprint (~7GB peak). `ROOTFS_GB=50` is now the global default (§0/§2) so no per-benchmark opt-in is needed for Pro/Live/live_verified.
+
+**Worker disk housekeeping.** Beyond the per-instance image prune above, the worker (`worker/worker-loop.py`) reclaims per-instance eval/run images after EVERY graded task regardless of pass/fail (keep-list: the arm's toolbox image + `alpine`, `KEEP_IMAGE_REPOS` overrides it), runs a pre-instance disk guard before each `/claim` (soft threshold `DISK_SOFT_PCT`, default 75% — cheap image-only prune; hard threshold `DISK_HARD_PCT`, default 88% — escalates to a deep reclaim: stopped containers + builder cache + dangling volumes on top of the image prune), and fires that SAME deep reclaim as an emergency measure whenever an instance dies with an ENOSPC-signature error (errno 28 / "no space left" / "input/output error") before reporting `/fail`. Together this bounds disk to roughly one instance's footprint (~7GB peak) so the 50GB rootfs floor suffices across the whole SWE-bench family (Verified/Pro/Live) without a per-worker volume.
 
 ## 7. Troubleshooting (hard-won — read before re-touching the build)
 - **Every resolve returns a 0-byte patch (`n_preds=0`, 0 turns, ~85 s wall).** The toolbox image is
@@ -358,12 +367,12 @@ confusingly named `swebench` v1.0.0 and a shared-venv `pip install -e .` would *
 `SUITE=live_verified-mini` is the 5-id smoke set. The arm axis is orthogonal — both `econ` and
 `claude` run it.
 
-**Disk:** `live_verified` auto-defaults `ROOTFS_GB=50` (fly's max) when the operator hasn't set it —
-its per-instance footprint (the large `starryzhang/*` eval images plus `grade_live` cloning/extracting
-into the worker's OUTER rootfs) overflows fly's 8 GB default and ENOSPCs every task (proven live:
-run `seq-live-0718` lost 4/5 tasks to `OSError: [Errno 28] No space left on device` at 8 GB). Verified/
-Pro/Terminal fit in 8 GB and are unaffected — same disk class as the Claude `ROOTFS_GB=50` fleet fix
-(§0). Set `ROOTFS_GB` explicitly to override.
+**Disk:** `live_verified`'s per-instance footprint (the large `starryzhang/*` eval images plus
+`grade_live` cloning/extracting into the worker's OUTER rootfs) overflows fly's 8 GB default rootfs
+and ENOSPCs every task (proven live: run `seq-live-0718` lost 4/5 tasks to `OSError: [Errno 28] No
+space left on device` at 8 GB). `ROOTFS_GB` now defaults to fly's 50 GB max for EVERY benchmark (§0/
+§2), so `live_verified` needs no special case here anymore — set `ROOTFS_GB=0` to opt out if you
+need the old 8 GB default rootfs behavior.
 
 **Pro** — vendored ids + mirrored images, longer timeout:
 ```bash

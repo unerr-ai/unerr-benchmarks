@@ -102,35 +102,36 @@ CONDUCTOR_SECRET="${CONDUCTOR_SECRET:-CONDUCTOR_DEPLOYMENT_PATH}"
 # worker sizing (shared-cpu-8x / 16GB — SWE-bench env images + DinD need the room)
 MEM="${MEM:-16384}"
 CPUS="${CPUS:-8}"
-CPU_KIND="${CPU_KIND:-shared}"              # 'shared' (default) or 'performance' — dedicated cores; A/B knob for the CPU-starvation → stuck-escalation hypothesis
-ROOTFS_GB="${ROOTFS_GB:-}"                  # OPTIONAL ephemeral-rootfs size (see NOTE at worker create)
-# fly hard-caps config.rootfs.size_gb at 50 (0/unset = image default). Clamp so a
-# too-large value degrades to the max instead of failing every worker create.
-if [ -n "$ROOTFS_GB" ] && [ "$ROOTFS_GB" -gt 50 ] 2>/dev/null; then
+CPU_KIND="${CPU_KIND:-performance}"         # 'performance' (default since 2026-07-19, dedicated cores) for every arm×benchmark combo; 'shared' remains the explicit cheap override
+ROOTFS_GB="${ROOTFS_GB:-50}"                 # ephemeral-rootfs size in GB (see NOTE at worker create). 50 = fleet
+                                              # floor, now the GLOBAL default for every benchmark (was live_verified-
+                                              # only — workers pull 1-4GB per-task eval images from the private
+                                              # mirror and ENOSPC below it across the whole SWE-bench family, not
+                                              # just live_verified). Set ROOTFS_GB=0 to opt out entirely (fly
+                                              # default 8GB rootfs, no --rootfs-size flag — old-flyctl fallback).
+# fly hard-caps config.rootfs.size_gb at 50. 0 = explicit opt-out (treated as unset,
+# no flag). Anything else is clamped/floored to the valid [50] value instead of
+# failing every worker create.
+if [ "$ROOTFS_GB" = "0" ]; then
+  ROOTFS_GB=""
+elif [ "$ROOTFS_GB" -gt 50 ] 2>/dev/null; then
   echo "==> ROOTFS_GB=$ROOTFS_GB exceeds fly's 50 GB max — clamping to 50" >&2
   ROOTFS_GB=50
-fi
-# Benchmark-aware rootfs default: live_verified's per-instance footprint (the large
-# public starryzhang eval images + the grade_live harness cloning/extracting into
-# the OUTER rootfs) overflows fly's 8GB default rootfs and ENOSPCs every task, while
-# Verified/Pro/Terminal fit. Default live_verified to fly's 50GB max unless the
-# operator pinned ROOTFS_GB explicitly. (Proven: seq-live-0718 lost 4/5 to
-# "OSError [Errno 28] No space left on device" at 8GB; same disk class as the Claude
-# ROOTFS_GB=50 fleet fix.)
-if [ -z "$ROOTFS_GB" ] && [ "$BENCHMARK" = "live_verified" ]; then
+elif [ "$ROOTFS_GB" -lt 50 ] 2>/dev/null; then
+  echo "==> ROOTFS_GB=$ROOTFS_GB is below the 50GB fleet floor — raising to 50" >&2
   ROOTFS_GB=50
-  echo "==> live_verified: defaulting ROOTFS_GB=50 (large eval images + grade_live overflow the 8GB default rootfs)" >&2
 fi
 
-# coordinator sizing (tiny — it only runs SQLite + aiohttp)
-COORD_SIZE="${COORD_SIZE:-shared-cpu-1x}"
-COORD_MEM="${COORD_MEM:-1024}"
+# coordinator sizing (bumped 2026-07-19: performance CPU + more headroom for the
+# archive/grade fan-in across every arm×benchmark combo)
+COORD_SIZE="${COORD_SIZE:-performance-1x}"
+COORD_MEM="${COORD_MEM:-2048}"
 # fly volume names allow only lowercase alphanumeric + underscores, ≤30 chars —
 # LABEL may contain hyphens/uppercase, so sanitize it for the volume name only
 # (metadata fleet=<LABEL> keeps the raw label).
 _VOL_SLUG="$(printf 'dist_coord_%s' "$LABEL" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_' '_' | cut -c1-30)"
 COORD_VOL="${COORD_VOL:-$_VOL_SLUG}"            # the fleet's ONE small volume
-COORD_VOL_GB="${COORD_VOL_GB:-10}"
+COORD_VOL_GB="${COORD_VOL_GB:-50}"
 
 # task set + grading
 SUITE="${SUITE:-}"
@@ -826,8 +827,8 @@ fi
 # Machines API create is ~1 req/s (burst 3) per app → burst 3, sleep 3; retry
 # 429/MANIFEST/capacity in run_machine. Workers take NO volume — DinD data-root
 # lives on ephemeral rootfs (PLAN decision 2). NOTE: if flyctl in use lacks
-# `--rootfs-size`, leave ROOTFS_GB unset (default rootfs) and, if the env-image
-# unpack is IOPS-starved on the smoke, flip a worker to a volume instead.
+# `--rootfs-size`, set ROOTFS_GB=0 to opt out (fly default rootfs) and, if the
+# env-image unpack is IOPS-starved on the smoke, flip a worker to a volume instead.
 echo "==> creating $MACHINES worker(s) (${MEM}MB/${CPUS}cpu/${CPU_KIND}, no volume, paced <=1/s)"
 ROOTFS_FLAG=(); [ -n "$ROOTFS_GB" ] && ROOTFS_FLAG=(--rootfs-size "$ROOTFS_GB")
 # claude-only worker env — EMPTY for every other arm (econ unaffected).

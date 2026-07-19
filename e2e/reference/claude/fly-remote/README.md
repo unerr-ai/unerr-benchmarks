@@ -29,15 +29,17 @@ MACHINES=2 ARM=claude LABEL=<run-name> SUITE=mini FLY_ORG=vamsee-k-933 \
   stall a multi-worker fleet) — NOT pull wall-time (a `docker pull` is
   extraction-bound, not download-bound). Omit the var if the registry app is down; the
   fleet still works, just against Docker Hub directly.
-- `ROOTFS_GB=50` is **NOT optional** — see the gotcha in §9. The default outer-container
-  rootfs is **8 GB**, and the in-VM toolbox build fills it to 100% (`none 7.8G 7.8G 0
-  100% /`); the SWE-bench instance builds then die with DinD `input/output error` →
-  **every instance dead, 0 resolved**. `ROOTFS_GB=50` grows the outer rootfs to 49 GB
-  (46 GB free after warm). This is the real DinD-failure fix — verified by `df -h /` on a
-  worker.
+- `ROOTFS_GB=50` and `CPU_KIND=performance` are now `run-distributed.sh`'s **DEFAULTS**
+  since 2026-07-19 (every arm×benchmark fleet gets them) — setting them explicitly here
+  is no longer required, just harmless. See the gotcha in §9 for why they matter: the
+  default outer-container rootfs is **8 GB**, and the in-VM toolbox build fills it to
+  100% (`none 7.8G 7.8G 0 100% /`); the SWE-bench instance builds then die with DinD
+  `input/output error` → **every instance dead, 0 resolved**. `ROOTFS_GB=50` grows the
+  outer rootfs to 49 GB (46 GB free after warm). This is the real DinD-failure fix —
+  verified by `df -h /` on a worker.
 - `CPU_KIND=performance` gives dedicated cores (avoids the daemon event-loop starvation
-  that drops Claude's first MCP call → heartbeat stall). Keep it, but note it does **not**
-  fix the disk failure on its own — the disk fix is `ROOTFS_GB=50`.
+  that drops Claude's first MCP call → heartbeat stall). It does **not** fix the disk
+  failure on its own — the disk fix is `ROOTFS_GB=50`.
 - Both LiteLLM keys and `CLAUDE_OPEN_MODELS=1` are auto-wired for `ARM=claude` — you do
   not pass them (see §5, §6).
 - Omit `IMAGE=` to bake fresh from live source (default). To reuse an existing image and
@@ -176,14 +178,14 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 | `MACHINES=2` | **yes** (all-in-one/prepare) | worker count |
 | `SUITE=mini` | for Mini-10 | else full Verified |
 | `FLY_ORG=vamsee-k-933` | **yes** | the team org |
-| `CPU_KIND=performance` | **effectively yes** | **default `shared` fails** — see §9 |
+| `CPU_KIND=performance` | no (default since 2026-07-19) | was required when the default was `shared` — see §9 |
 | `CLAUDE_OPEN_MODELS=1` | auto | injected for `ARM=claude` (`run-distributed.sh:609-610`) |
 | `LITELLM_MASTER_KEY` | auto | read from infra `.env.local`; injected into workers |
 | `LITELLM_API_KEY` | auto | read from `e2e/econ/.env.local` |
 | `ANTHROPIC_BASE_URL` | auto | defaults to `https://econ-litellm.fly.dev` for claude |
 | `IMAGE=` | no | unset = fresh bake (default). Set to reuse — §7 |
 | `DEDICATED_CONDUCTOR=1` | no | raises the $80/hr GPU; NOT needed for serverless minimax |
-| `ROOTFS_GB` | no | ephemeral rootfs size (max 50); only if a disk-starve recurs on top of `performance` |
+| `ROOTFS_GB` | no | ephemeral rootfs size (max 50); defaults to **50** since 2026-07-19 — set `ROOTFS_GB=0` to opt out |
 | `SWEBENCH_REGISTRY_MIRROR` | recommended | `http://swebench-registry.flycast:5000` — workers' dockerd mirrors docker.io through the shared cache (`lib/boot.sh:74-83`); registry app must be deployed (see `e2e/distributed/registry/README.md`) |
 | `PER_INSTANCE_TIMEOUT` | no | the benchmark descriptor's grade-side cap only (default **86400** s, `benchmarks.py`) — bounds the swebench grade subprocess, not the resolve. There is no per-task resolve ceiling and no stall/progress watchdog; the coding agent owns its own watchdog/thrash detection. |
 | `WEBSEARCH=1` | no — **changes the result class** | **`ARM=claude` only** (STRICT opt-in): enables `TAVILY_API_KEY` (read from `e2e/econ/.env.local`, injected into workers) → `run-instance.sh` merges **Tavily's hosted MCP server** (`mcp.tavily.com`, HTTP transport, no npm dep) into the instance's `.mcp.json`, and the ON-arm prompt points the model at `tavily_search`/`tavily_extract` (underscores!). Unset → ambient keys IGNORED, zero search tools. **`ARM=econ` is DIFFERENT: Exa web search is DEFAULT-ON (see below) — set `WEBSEARCH=0` to force it off.** A web-on run can look up the actual upstream fix — label it (e.g. `-web` suffix) and never compare it 1:1 against no-web baselines or submit it. |
@@ -318,8 +320,9 @@ escalate (§12), so the harness now mechanically gates the same behaviors.
    even though the DinD data-root on `/var/lib/docker-dind` (loop0, 42 G) has plenty free.
    Every instance dies (`counts{dead:10}`, `n_preds:0`, resolved 0/10), workers exit
    `exit_code=0` ("queue drained"), and `claude -p` never runs — so it looks like a
-   benchmark result but is pure infra. **Always pass `ROOTFS_GB=50`** (grows `/` to 49 G).
-   This failed identically on BOTH `shared-cpu-8x` and `performance-8x` before the disk
+   benchmark result but is pure infra. `ROOTFS_GB=50` (grows `/` to 49 G) is now
+   `run-distributed.sh`'s DEFAULT since 2026-07-19 — passing it explicitly is harmless
+   but no longer required. This failed identically on BOTH `shared-cpu-8x` and `performance-8x` before the disk
    fix — `CPU_KIND` is orthogonal (it fixes daemon starvation, not disk). Confirm the fix
    took: after `prepare` warms, `flyctl ssh console --machine <w> -C "df -h /"` must show
    ~49 G total / ~46 G avail, not 7.8 G.

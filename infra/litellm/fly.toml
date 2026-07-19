@@ -1,0 +1,46 @@
+# econ LiteLLM gateway — Fly.io app (Sprint OL-8; feature doc lives in the
+# econ-coding-agent repo, docs/features/08-litellm-gateway.md — infra home is HERE).
+# Org: vamsee-k-933 (team space) · Region: iad (Ashburn, US-East) — colocated with the
+# US-hosted model providers and the swebench-agent-* benchmark fleet (all in iad).
+app = "econ-litellm"
+# iad (US-East) keeps the gateway in the same region as every provider it proxies to and
+# the rest of the fly fleet — ample capacity, lowest hop to US-hosted providers. Residency
+# is unaffected: the gateway proxies to US-hosted providers either way. (History: originally
+# bom/Mumbai for in-region egress; bom had no machine capacity on 2026-07-04, so it ran on
+# sin/Singapore until the 2026-07-13 relocation to iad.)
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 4000
+force_https = true
+# The gateway is on econ's every-turn hot path — never scale to zero.
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 2
+
+# LiteLLM boots slowly — the docs' own k8s probes allow 120s initial delay; a short
+# grace period gets machines killed mid-boot.
+[[http_service.checks]]
+interval = "15s"
+timeout = "5s"
+grace_period = "120s"
+method = "GET"
+path = "/health/liveliness"
+
+# 4gb floor: 2gb OOM-boot-looped on 2026-07-13 — the base image's prisma migration
+# step (`$VENV_PYTHON $MIGRATION_SCRIPT`, ~1GB RSS with 127 migrations loaded) plus
+# LiteLLM's own ~870MB startup RSS exceed 2gb, and the kernel SIGKILLs the migration
+# (exit 137 → reboot loop). (History: on 1gb LiteLLM alone OOM-looped — fly logs
+# 2026-07-04.)
+#
+# 2026-07-19 scale-up after the overload buckle of 2026-07-18 ~22:30 UTC (single
+# shared-2x machine saturated under fleet load; Prisma logged a hard DB-connection
+# Closed): dedicated performance cores + 8gb + TWO machines (run `fly scale count 2`
+# after first deploy — count is app state, not fly.toml). The proxy is stateless
+# (shared postgres econ-litellm-db), so N machines are safe.
+[[vm]]
+size = "performance-4x"
+memory = "8gb"

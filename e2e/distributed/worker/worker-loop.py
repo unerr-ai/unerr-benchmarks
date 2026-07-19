@@ -38,6 +38,7 @@ Worker.__init__ and worker-entrypoint.sh.
 from __future__ import annotations
 
 import base64
+import errno
 import glob
 import json
 import os
@@ -129,6 +130,11 @@ class Worker:
         self.timeout = _int_env(_tmo.get("default_env", "PER_INSTANCE_TIMEOUT"),
                                 _tmo.get("default", 2700))
         self.grade_workers = _int_env("GRADE_WORKERS", 6)
+        # Disk guard thresholds (pct used on the docker data-root) — see
+        # _disk_pct/_reclaim_disk. SOFT triggers the cheap image-only prune,
+        # HARD escalates to the deep reclaim (containers/builder/volumes too).
+        self.disk_soft_pct = _int_env("DISK_SOFT_PCT", 75)
+        self.disk_hard_pct = _int_env("DISK_HARD_PCT", 88)
 
     # ── logging ──────────────────────────────────────────────────────────────
     def log(self, msg: str) -> None:
@@ -209,6 +215,16 @@ class Worker:
                 continue
 
             self.log(f"claimed {iid}")
+            # Pre-instance disk guard: catch a slow creep (e.g. a prior instance's
+            # prune under-collected) BEFORE it ENOSPCs mid-resolve, where a failure
+            # is much costlier to diagnose than a wasted few seconds here.
+            pct = self._disk_pct()
+            if pct >= self.disk_soft_pct:
+                self.log(f"disk at {pct:.1f}% (soft={self.disk_soft_pct}) — pruning images")
+                self._prune_images()
+                pct = self._disk_pct()
+                if pct >= self.disk_hard_pct:
+                    self._reclaim_disk("pre-instance disk guard")
             try:
                 self._process(iid)
             except CoordinatorError as e:
@@ -218,6 +234,18 @@ class Worker:
                          f"lease will expire & requeue")
             except Exception as e:  # noqa: BLE001 — one instance must not sink the loop
                 self.log(f"{iid}: unhandled error {type(e).__name__}: {e}")
+                msg = str(e).lower()
+                is_disk_err = (
+                    (isinstance(e, OSError) and e.errno == errno.ENOSPC)
+                    or any(sig in msg for sig in
+                           ("no space left", "enospc", "input/output error"))
+                )
+                if is_disk_err:
+                    # Clean the disk before the /fail report so the NEXT claim (this
+                    # worker or another) doesn't inherit the same full disk — the
+                    # failed instance itself rides the coordinator's normal
+                    # fail/retry path, unchanged.
+                    self._reclaim_disk("ENOSPC-signature failure")
                 try:
                     self._post_fail(iid, f"{type(e).__name__}: {str(e)[:500]}")
                 except CoordinatorError:
@@ -630,12 +658,89 @@ class Worker:
                 return
 
     # ── docker housekeeping ──────────────────────────────────────────────────
+    # Images that MUST survive a between-instance prune. econ-toolbox/unerr-claude-
+    # toolbox are built once at worker-warm and every per-task build does
+    # `COPY --from=<arm>-toolbox` (Dockerfile.instance/boot.sh build_toolbox), so a
+    # blanket `prune -a` — which deletes the toolbox the moment no image references
+    # it — would break the NEXT build. alpine is the tiny scratch base. Everything
+    # else on disk is a big per-task artifact (the pulled eval image
+    # sweb.eval.*/sweap-images/starryzhang + the built unerr-econ-run:*).
+    # KEEP_IMAGE_REPOS overrides the default set (comma-separated substrings) for
+    # ad-hoc arms without a code change.
+    _KEEP_IMAGE_REPOS = tuple(
+        s.strip() for s in os.environ.get(
+            "KEEP_IMAGE_REPOS",
+            "econ-toolbox,unerr-claude-toolbox,alpine",
+        ).split(",") if s.strip()
+    )
+
     def _prune_images(self) -> None:
+        # Reclaim each instance's ~3-3.5GB eval+run images once its containers exit,
+        # WITHOUT nuking econ-toolbox (see _KEEP_IMAGE_REPOS). Bounds disk to ~one
+        # instance's footprint (~7GB peak) so a full ~50-73-task/worker run never
+        # ENOSPCs the 50GB rootfs cap — the reason a plain `prune -f` (dangling-only)
+        # failed: the eval/run images are TAGGED, so dangling-only left them all.
         try:
+            listing = subprocess.run(
+                ["docker", "images", "--format", "{{.ID}}\t{{.Repository}}"],
+                capture_output=True, text=True, timeout=120).stdout
+            drop = []
+            for line in listing.splitlines():
+                parts = line.split("\t")
+                if len(parts) != 2:
+                    continue
+                img_id, repo = parts
+                if any(k in repo for k in self._KEEP_IMAGE_REPOS):
+                    continue
+                drop.append(img_id)
+            # dedup (one image can have several tags) so `rmi` doesn't double-hit an id
+            drop = list(dict.fromkeys(drop))
+            if drop:
+                subprocess.run(["docker", "rmi", "-f", *drop], timeout=600,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # sweep any now-dangling intermediate layers left behind
             subprocess.run(["docker", "image", "prune", "-f"], timeout=300,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:  # noqa: BLE001
             self.log(f"docker image prune failed (ignored): {e}")
+
+    def _disk_pct(self) -> float:
+        # DinD's data-root is the rootfs (no volume — module docstring), so disk
+        # pressure shows up there, not on `/`, when the two differ. -1 on OSError
+        # (e.g. path missing) tells callers to skip the guard rather than trip it.
+        path = "/var/lib/docker" if os.path.isdir("/var/lib/docker") else "/"
+        try:
+            usage = shutil.disk_usage(path)
+            return usage.used / usage.total * 100
+        except OSError:
+            return -1
+
+    def _reclaim_disk(self, reason: str) -> None:
+        # Deeper than _prune_images: also drops stopped containers, the build
+        # cache, and unreferenced volumes. Reserved for the pre-instance HARD
+        # threshold and an ENOSPC-signature failure — routine per-instance cleanup
+        # stays on the cheaper _prune_images alone. Each step is independently
+        # guarded so one hang/failure doesn't skip the rest.
+        before = self._disk_pct()
+        self.log(f"reclaim_disk: {reason} (disk {before:.1f}% before)")
+        try:
+            subprocess.run(["docker", "container", "prune", "-f"], timeout=600,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"reclaim_disk: container prune failed (ignored): {e}")
+        self._prune_images()
+        try:
+            subprocess.run(["docker", "builder", "prune", "-af"], timeout=600,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"reclaim_disk: builder prune failed (ignored): {e}")
+        try:
+            subprocess.run(["docker", "volume", "prune", "-f"], timeout=300,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"reclaim_disk: volume prune failed (ignored): {e}")
+        after = self._disk_pct()
+        self.log(f"reclaim_disk: {reason} (disk {after:.1f}% after)")
 
     # ── arm-agnostic runner path ─────────────────────────────────────────────
     def _runner_path(self) -> str:
