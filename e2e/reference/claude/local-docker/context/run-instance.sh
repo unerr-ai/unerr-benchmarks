@@ -64,6 +64,27 @@ HARNESS_ON=0
 if [ "$OPEN_MODELS" = "1" ] || [ "$CLAUDE_REAL" = "1" ]; then
   HARNESS_ON=1
 fi
+# PROFILE selects which hook behavior + prompt text the harness uses when
+# HARNESS_ON=1: "swe" (default) is this benchmark's existing test-file-deny +
+# test-based finish contract, byte-identical to before this var existed;
+# "generic" (via HARNESS_PROFILE=generic, or the shorthand HARNESS_HOOKS=generic)
+# swaps in a benchmark-agnostic checkable-outcome contract (see step 3.15 and the
+# ON prompt block below). run-benchmark.py does not forward either var into this
+# container today, so PROFILE stays "swe" on the SWE-bench flow unless a caller
+# explicitly wires one through.
+PROFILE="${HARNESS_PROFILE:-swe}"
+if [ "${HARNESS_HOOKS:-}" = "generic" ]; then
+  PROFILE=generic
+fi
+# ESCALATION_PANEL selects the ON-prompt escalation shape, orthogonal to PROFILE
+# and applied in both: unset/"0"/anything but "1" -> PANEL=0, the default two-rung
+# LADDER (unerr-opus alone, then unerr-fable only if still unresolved — cheapest
+# when both tiers are one model family at different effort, e.g. claude-gpt/
+# claude-native); "1" -> PANEL=1, the original judge-panel (unerr-opus AND
+# unerr-fable spawned together) reserved for genuinely decorrelated tiers
+# (claude-open). See the ON prompt block below for the two text variants.
+PANEL=0
+[ "${ESCALATION_PANEL:-}" = "1" ] && PANEL=1
 PROBLEM_FILE="${1:?usage: run-instance.sh <problem_statement_file>}"
 
 # Hardening for reproducible headless runs: no mid-run auto-update, no
@@ -211,7 +232,11 @@ if [ "$MODE" = "on" ]; then
   #      near the end of this script excludes .claude/ too, but /tmp is the
   #      real reason it's safe. All three hooks are FAIL-OPEN by construction
   #      (cc-harness-hooks.py: any internal exception -> exit 0), so a bug
-  #      here degrades to a no-op gate/deny, never a broken run.
+  #      here degrades to a no-op gate/deny, never a broken run. Each hook
+  #      command is prefixed `env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1
+  #      ESCALATION_PANEL=$PANEL` so cc-harness-hooks.py sees PROFILE and the
+  #      escalation-panel flag deterministically regardless of the shell that
+  #      spawns it (mirrors the terminal agent's own hook wiring).
   if [ "$HARNESS_ON" = "1" ]; then
     # $TOOLBOX is NOT set inside the instance container: Dockerfile.instance COPYs
     # the toolbox to /opt/toolbox but does not carry the toolbox image's ENV, and no
@@ -230,7 +255,7 @@ if [ "$MODE" = "on" ]; then
       {
         "matcher": "Edit|Write|MultiEdit|mcp__unerr__file_edit",
         "hooks": [
-          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py deny" }
+          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py deny" }
         ]
       }
     ],
@@ -238,14 +263,14 @@ if [ "$MODE" = "on" ]; then
       {
         "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",
         "hooks": [
-          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py record" }
+          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py record" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "$PYBIN $TOOLBOX/cc-harness-hooks.py gate" }
+          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py gate" }
         ]
       }
     ]
@@ -353,25 +378,51 @@ if [ "$MODE" = "on" ]; then
   # claude-real) only, since a hook gate is not prompt prose and can't
   # double-harness (it fires once, at Stop, never mid-turn).
   if [ "$HARNESS_ON" = "1" ]; then
+    # Profile-specific fragments (see PROFILE above): swe (default) is this
+    # harness's existing text, unchanged; generic swaps the two SWE-only pieces
+    # — the test-files-read-only bullet and the whole FINISH CONTRACT paragraph
+    # — for a checkable-outcome contract that fits any task shape (build/run/
+    # curl/diff), not just a SWE-bench repo checkout.
+    if [ "$PROFILE" = "generic" ]; then
+      TEST_FILES_BULLET=""
+      ESCALATION_TRIGGER_D="your fix turned a previously-passing marked verification red and one rework did not recover it"
+      FINISH_CONTRACT="FINISH CONTRACT: every task has a checkable outcome. Before your first change, decide the command that proves success for THIS task (build + run it, a script you write, curl the endpoint, diff output against expected) and run it via Bash with the marker comment \`# unerr:verify\` appended — the harness tracks marked commands only. After your final change, re-run the marked check and confirm it exits 0. The stop gate blocks finishing when no marked verification has succeeded since your last change; a marked command that once passed and now fails is a regression — fix it before finishing. Mark only the check you would stake the task on, never exploratory commands."
+    else
+      TEST_FILES_BULLET="
+- Test files are read-only in this benchmark — the harness mechanically denies test edits; never attempt them, and never count a test edit as part of a fix."
+      ESCALATION_TRIGGER_D="your fix turned a previously-passing test red and one rework did not recover it"
+      FINISH_CONTRACT="FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions):
+- After your final edit, re-run your reproduction of the issue AND the narrowest existing test module covering each edited file; a finish without a green post-edit verification run is blocked.
+- A test that passed before your change and fails after it is a regression caused by your fix — rework it until green; finishing while it is red is blocked.
+- If the stop gate blocks you, do exactly what its message names, then finish. Do not fight the gate; it releases after its condition is met."
+    fi
+    # ESCALATION_PANEL fragment (see PANEL above, orthogonal to PROFILE): PANEL=1
+    # keeps the original judge-panel text byte-identical (both tiers spawned
+    # together, one escalation round — worth it only when the tiers are
+    # genuinely decorrelated models, e.g. claude-open); PANEL=0 (default) swaps
+    # in a two-rung ladder (unerr-opus alone first, unerr-fable only if still
+    # unresolved) so a same-family-different-effort arm (claude-gpt,
+    # claude-native) doesn't pay for a correlated second opinion by default.
+    if [ "$PANEL" = "1" ]; then
+      ESCALATION_SPAWN="Escalate by spawning unerr-opus AND unerr-fable IN PARALLEL (one message, two Task calls). Give each the SAME evidence brief — the issue text, what you observed, what you tried, and ALL candidate sites — but NOT your preferred hypothesis, so their reads stay independent. Instruct them to investigate and return a one-line root cause plus an exact minimal patch proposal WITHOUT editing files. Reconcile: if they agree, implement it; if they disagree, prefer the verdict that explains ALL observed evidence, then the one that fixes a definition site over one that compensates at a flow site. Exception — if a concrete fix already exists but has failed twice, run them in SEQUENCE instead: unerr-opus implements directly, then unerr-fable reviews the diff against the issue. At most one escalation round per problem; after reconciling, implement and finish."
+    else
+      ESCALATION_SPAWN="Escalate by spawning unerr-opus — ONE Task call. Give it the evidence brief — the task text, what you observed, what you tried, and ALL candidate approaches — but NOT your preferred hypothesis, so its read stays independent. Instruct it to investigate and return a one-line root cause plus an exact minimal proposal WITHOUT editing files. Implement that proposal, then re-run your verification. If the problem is STILL not resolved after that, escalate a SECOND time — spawn unerr-fable, and include unerr-opus's proposal and exactly why it failed; prefer the verdict that explains ALL observed evidence, and a fix at the definition site over one that compensates at a flow site. Exception — if a concrete fix already exists but has failed twice, have unerr-opus implement directly and then unerr-fable review the diff against the task. At most two escalation rounds per task; after the second, implement and finish."
+    fi
     AUTONOMY_PROMPT="$AUTONOMY_PROMPT
 
 TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to write the plan down (one task per slice) and TaskUpdate each to completed as it lands; treat the tracker as your working memory across a long run, not bookkeeping, and clear it when the fix is done.
 
 FIX DISCIPLINE (applies to every edit you make):
 - Fix at the definition. Change the entity whose behavior the issue calls wrong at the site where it is DEFINED; a fix that coerces or special-cases at a downstream site where the value merely flows through is almost always the wrong layer.
-- Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.
-- Test files are read-only in this benchmark — the harness mechanically denies test edits; never attempt them, and never count a test edit as part of a fix.
+- Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.$TEST_FILES_BULLET
 
 DELEGATION — use your agents when they pay, not by reflex:
 - unerr-junior (fast, cheap): parallel recon across many files, running test suites or repro scripts (it reports exact output), web lookups. Do a single quick lookup yourself.
 - unerr-worker (executor): scoped multi-file mechanical changes; run independent slices in parallel. Do a small single-file edit yourself.
 
-ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard instances are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct fix attempts the issue's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate defect sites and the evidence does not decide between them; (d) your fix turned a previously-passing test red and one rework did not recover it.
-Escalate by spawning unerr-opus AND unerr-fable IN PARALLEL (one message, two Task calls). Give each the SAME evidence brief — the issue text, what you observed, what you tried, and ALL candidate sites — but NOT your preferred hypothesis, so their reads stay independent. Instruct them to investigate and return a one-line root cause plus an exact minimal patch proposal WITHOUT editing files. Reconcile: if they agree, implement it; if they disagree, prefer the verdict that explains ALL observed evidence, then the one that fixes a definition site over one that compensates at a flow site. Exception — if a concrete fix already exists but has failed twice, run them in SEQUENCE instead: unerr-opus implements directly, then unerr-fable reviews the diff against the issue. At most one escalation round per problem; after reconciling, implement and finish. Triggers (b) and (d) are machine-checked at stop: if they have fired and you try to finish without having escalated, the stop gate blocks you and returns you to work.
-FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions):
-- After your final edit, re-run your reproduction of the issue AND the narrowest existing test module covering each edited file; a finish without a green post-edit verification run is blocked.
-- A test that passed before your change and fails after it is a regression caused by your fix — rework it until green; finishing while it is red is blocked.
-- If the stop gate blocks you, do exactly what its message names, then finish. Do not fight the gate; it releases after its condition is met."
+ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard instances are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct fix attempts the issue's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate defect sites and the evidence does not decide between them; (d) $ESCALATION_TRIGGER_D.
+$ESCALATION_SPAWN Triggers (b) and (d) are machine-checked at stop: if they have fired and you try to finish without having escalated, the stop gate blocks you and returns you to work.
+$FINISH_CONTRACT"
   fi
 fi
 SYSPROMPT_ARGS=( --append-system-prompt "$AUTONOMY_PROMPT" )

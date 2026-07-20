@@ -175,7 +175,11 @@ def solve_instance(instance: dict, mode: str, auth_env: dict[str, str], repo_dir
                   "-e", f"REPO_DIR={repo_dir}"]
     # DEBUG-ONLY: forward the gated MCP-heartbeat flags into the instance container
     # so run-instance.sh can probe unerr health concurrently with claude -p.
-    for passthru in ("DEBUG_MCP_PROBE", "PROBE_INTERVAL"):
+    # harness gate profile — run-instance.sh resolves PROFILE from these (unset = swe)
+    # ESCALATION_PANEL — run-instance.sh resolves PANEL from this (unset/"0" = the
+    # default two-rung ladder; "1" = the opt-in judge-panel, byte-identical to before)
+    for passthru in ("DEBUG_MCP_PROBE", "PROBE_INTERVAL",
+                     "HARNESS_HOOKS", "HARNESS_PROFILE", "ESCALATION_PANEL"):
         if os.environ.get(passthru):
             docker_cmd += ["-e", f"{passthru}={os.environ[passthru]}"]
     # subscription / api auth — pass through whichever is present (token preferred)

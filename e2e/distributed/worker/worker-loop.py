@@ -14,14 +14,16 @@ Never reimplements resolve or grade — it drives the existing per-arm tools:
                             --max_workers <GRADE_WORKERS> --cache_level env
                             --clean True --timeout <PER_INSTANCE_TIMEOUT>
 
-The harness enforces NO task-level limit on the RESOLVE step: no stall/
-progress watchdog and no per-instance wall-clock deadline — the resolve
-subprocess is simply waited on until it exits. The coding agent now owns its
-own hang detection; a dead worker/VM is caught by the coordinator's heartbeat
-reaper (below), never by this process. `self.timeout` survives ONLY as a
-grade-side/outer-wrapper cap (swebench `run_evaluation --timeout`,
-grade_pro/grade_live's `worker.timeout + 600`, harness_terminal's flat
-fallback) — it is never passed to the resolve runner.
+The RESOLVE step imposes no TIGHT task-level limit — the coding agent owns its
+own fine-grained pacing. It is bounded only by a HIGH backstop (re-added
+2026-07-20): a no-output idle watchdog (TASK_IDLE_S, default 45min) plus a hard
+wall-clock ceiling (TASK_CEILING_S, default 4h), both far above any healthy
+task, so a hung-but-still-heartbeating agent can't hold a worker forever (the
+coordinator's heartbeat reaper only catches a dead VM, not a wedged one). See
+Worker._wait_with_backstop. `self.timeout` remains a SEPARATE grade-side/
+outer-wrapper cap (swebench `run_evaluation --timeout`, grade_pro/grade_live's
+`worker.timeout + 600`, harness_terminal's flat fallback) — it is never passed
+to the resolve runner.
 
 Lease model (PLAN.md decision 5): a background heartbeat thread POSTs /heartbeat
 every 30s; if the coordinator answers {stale:true} the lease was reaped (another
@@ -43,6 +45,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -94,6 +97,19 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL the whole process group (start_new_session=True made proc a group
+    leader). Re-added 2026-07-20 for the resolve backstop; mirrors
+    harness_terminal.py's copy."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 class CoordinatorError(Exception):
     """The coordinator could not be reached / answered an error status."""
 
@@ -129,6 +145,14 @@ class Worker:
         # docstring) — the coding agent owns its own hang detection.
         self.timeout = _int_env(_tmo.get("default_env", "PER_INSTANCE_TIMEOUT"),
                                 _tmo.get("default", 2700))
+        # Per-task RESOLVE backstop (re-added 2026-07-20, replacing the pure
+        # "no task-level limit" wait): a no-output idle watchdog + a hard
+        # wall-clock ceiling, both far above any healthy task, so a hung agent
+        # can't hold this worker forever (the heartbeat reaper only catches a
+        # dead VM, not a wedged-but-heartbeating one). harness_terminal reads
+        # the same two knobs off this Worker for its Harbor wrapper.
+        self.task_ceiling_s = _int_env("TASK_CEILING_S", 14400)  # 4h hard cap
+        self.task_idle_s = _int_env("TASK_IDLE_S", 2700)         # 45min no-output kill
         self.grade_workers = _int_env("GRADE_WORKERS", 6)
         # Disk guard thresholds (pct used on the docker data-root) — see
         # _disk_pct/_reclaim_disk. SOFT triggers the cheap image-only prune,
@@ -289,7 +313,7 @@ class Worker:
                 preds_path = os.path.join(run_dir, "preds.json")
                 meta_path = os.path.join(run_dir, "meta.jsonl")
 
-                rc = self._resolve(iid, scratch)
+                rc = self._resolve(iid, scratch, abandon)
                 patch, model_name = self._read_patch(preds_path, iid)
                 meta_text = self._read_meta(meta_path, iid)
 
@@ -351,7 +375,7 @@ class Worker:
         return mod.run(self, iid, scratch, abandon)
 
     # ── resolve step (shell out to the arm's runner) ─────────────────────────
-    def _resolve(self, iid: str, scratch: str) -> int:
+    def _resolve(self, iid: str, scratch: str, abandon: threading.Event) -> int:
         runner = self._runner_path()
         cmd = [VENV_PY, runner, "--ids", iid, "--out", scratch,
                "--label", self.run_id, "--parallel", "1"]
@@ -362,7 +386,7 @@ class Worker:
         # /app repo dir off the descriptor, so it stops resolving Pro ids against
         # Verified (the smoke's "no instances after filter" → empty-patch bug).
         # For Verified this is a no-op — --dataset equals the runner's own default.
-        if self.arm in ("econ", "claude", "claude-real"):
+        if self.arm == "econ" or self.arm.startswith("claude"):
             cmd += ["--dataset", self.dataset, "--split", self.split]
             ids_jsonl = self.bench.get("ids_jsonl")
             if ids_jsonl:
@@ -391,14 +415,58 @@ class Worker:
         with open(logpath, "wb") as logf:
             proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT,
                                      start_new_session=True)
-            # No task-level limit: the resolve subprocess is simply waited on
-            # until it exits. The coding agent owns its own hang detection; a
-            # dead worker/VM is caught by the coordinator's heartbeat reaper,
-            # not by this process (see module docstring / abandon flow).
-            rc = proc.wait()
+            # High per-task backstop (re-added 2026-07-20): the agent owns its
+            # own fine-grained pacing, but a hung task must not hold this worker
+            # forever. _wait_with_backstop adds a no-output idle watchdog
+            # (TASK_IDLE_S) and a hard wall-clock ceiling (TASK_CEILING_S), both
+            # far above any healthy task; a reaped lease (abandon) also breaks
+            # the wait (the result is discarded by _process anyway).
+            rc = self._wait_with_backstop(proc, logpath, iid, abandon)
             self._tail_log_to_stdout(iid, logpath)
         self.log(f"{iid}: resolve rc={rc}")
         return rc
+
+    def _wait_with_backstop(self, proc: "subprocess.Popen", logpath: str,
+                            iid: str, abandon: threading.Event) -> int:
+        """Wait for the resolve subprocess under two HIGH wall-clock guards: a
+        no-output idle watchdog (TASK_IDLE_S) that reclaims a silent hang, and a
+        hard ceiling (TASK_CEILING_S) that caps an endless-but-noisy one. Returns
+        the child's exit code, or its negative signal rc after a SIGKILL. Both
+        guards sit far above any healthy task — they reclaim the worker, never a
+        legitimately long run. A reaped lease (abandon) breaks the wait at once;
+        _process discards that result regardless."""
+        deadline = time.time() + self.task_ceiling_s
+        last_size = -1
+        last_activity = time.time()
+        while True:
+            try:
+                return proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                now = time.time()
+                if abandon.is_set():
+                    self.log(f"{iid}: resolve abandoned (lease reaped) — killing")
+                    _kill_process_group(proc)
+                    proc.wait()
+                    return proc.returncode
+                try:
+                    size = os.path.getsize(logpath)
+                except OSError:
+                    size = last_size
+                if size != last_size:
+                    last_size = size
+                    last_activity = now
+                if now - last_activity >= self.task_idle_s:
+                    self.log(f"{iid}: resolve idle-watchdog fired — no output for "
+                             f"{self.task_idle_s}s; killing hung task")
+                    _kill_process_group(proc)
+                    proc.wait()
+                    return proc.returncode
+                if now >= deadline:
+                    self.log(f"{iid}: resolve ceiling reached — past "
+                             f"{self.task_ceiling_s}s; killing")
+                    _kill_process_group(proc)
+                    proc.wait()
+                    return proc.returncode
 
     # ── resolve-output debuggability: output no longer streams directly ─────
     def _tail_log_to_stdout(self, iid: str, logpath: str, n: int = 40) -> None:
@@ -666,14 +734,15 @@ class Worker:
     # else on disk is a big per-task artifact (the pulled eval image
     # sweb.eval.*/sweap-images/starryzhang + the built unerr-econ-run:*).
     # KEEP_IMAGE_REPOS overrides the default set (comma-separated substrings) for
-    # ad-hoc arms without a code change. unerr-claude-real-toolbox covers the
-    # claude-real arm's own tag (worker-entrypoint.sh's TOOLBOX_TAG default is
-    # unerr-${ARM}-toolbox unless a launcher overrides it to reuse claude's tag) —
-    # listed defensively so either resolution survives a between-instance prune.
+    # ad-hoc arms without a code change. The 'unerr-claude' substring covers EVERY
+    # claude-<mix>/claude-native toolbox tag: all claude arms share unerr-claude-toolbox
+    # (launcher pins TOOLBOX_TAG), and the substring also matches any per-arm
+    # unerr-claude-*-toolbox a stray path might derive — so the toolbox always
+    # survives a between-instance prune.
     _KEEP_IMAGE_REPOS = tuple(
         s.strip() for s in os.environ.get(
             "KEEP_IMAGE_REPOS",
-            "econ-toolbox,unerr-claude-toolbox,unerr-claude-real-toolbox,alpine",
+            "econ-toolbox,unerr-claude,alpine",
         ).split(",") if s.strip()
     )
 
@@ -749,15 +818,17 @@ class Worker:
     def _runner_path(self) -> str:
         # Each arm ships its resolver at a fixed /work path in the distributed image
         # (Slice E COPYs the arm's local-docker context there). econ is the v1 arm.
-        # claude-real (real Anthropic models) shares claude's run-benchmark.py file —
-        # that script's own --open-models/CLAUDE_OPEN_MODELS branch is what forks
-        # LiteLLM-routed vs real-Claude auth; claude-real just never sets it.
-        runners = {
-            "econ": "/work/local-docker/run-benchmark.py",
-            "claude": "/work/claude/local-docker/run-benchmark.py",
-            "claude-real": "/work/claude/local-docker/run-benchmark.py",
-        }
-        return runners.get(self.arm, "/work/local-docker/run-benchmark.py")
+        # Every claude-<mix> gateway arm AND claude-native share claude's single
+        # run-benchmark.py — that script forks LiteLLM-routed vs real-Anthropic auth
+        # on its own CLAUDE_OPEN_MODELS/CLAUDE_REAL env (set by the launcher), NOT on
+        # the arm string, so it needs no per-mix knowledge. Unknown arm -> fail loud:
+        # a silent econ fallback here would run the WRONG resolver for a typo'd arm.
+        if self.arm == "econ":
+            return "/work/local-docker/run-benchmark.py"
+        if self.arm == "claude" or self.arm.startswith("claude-"):
+            return "/work/claude/local-docker/run-benchmark.py"
+        raise RuntimeError(
+            f"unknown ARM {self.arm!r} — expected econ | claude-<mix> | claude-native")
 
 
 def main() -> int:

@@ -44,6 +44,51 @@ cd "$HERE"
 ORG="${FLY_ORG:-your-fly-org}"               # fly org; override via FLY_ORG
 REGION="${REGION:-iad}"
 ARM="${ARM:-econ}"
+# ── Claude arm family (naming scheme, 2026-07-20): ARM = econ | claude-<mix> |
+# claude-native. The <mix> suffix NAMES the gateway model ensemble (claude-gpt,
+# claude-open, …); claude-native is real Anthropic (OAuth), no gateway. Legacy
+# names are aliased so old invocations/scripts keep working:
+#   claude -> claude-open ,  claude-real -> claude-native.
+case "$ARM" in
+  claude)      ARM="claude-open" ;;
+  claude-real) ARM="claude-native" ;;
+esac
+# Classify: gateway (LiteLLM-routed ensemble) | native (real Anthropic) | "" (econ).
+# Everything downstream keys off CLAUDE_ARM_KIND, never the literal name, so a new
+# mix needs no new conditionals — only a model-map case below.
+case "$ARM" in
+  claude-native) CLAUDE_ARM_KIND="native" ;;
+  claude-*)      CLAUDE_ARM_KIND="gateway" ;;
+  *)             CLAUDE_ARM_KIND="" ;;
+esac
+# Per-mix MODEL MAP — the SINGLE source of truth for which models each claude-<mix>
+# ensemble runs (bash 3.2 has no assoc arrays -> case). Each arm sets the four Claude
+# Code tier aliases (haiku/sonnet/opus/fable) UNLESS the operator already exported an
+# override (`:=` keeps an exported value); sonnet is the main-loop (conductor) model.
+# ADD A NEW MIX = add ONE case arm here with its four models, then document it in the
+# READMEs (prompt.txt / README §8). Unknown mix with no override ABORTS (fail-loud) —
+# never silently fall back to another ensemble.
+if [ "$CLAUDE_ARM_KIND" = "gateway" ]; then
+  case "${ARM#claude-}" in
+    gpt)
+      : "${ANTHROPIC_DEFAULT_HAIKU_MODEL:=openai/gpt-5.6-luna}"
+      : "${ANTHROPIC_DEFAULT_SONNET_MODEL:=openai/gpt-5.6-terra}"
+      : "${ANTHROPIC_DEFAULT_OPUS_MODEL:=openai/gpt-5.6-sol}"
+      : "${ANTHROPIC_DEFAULT_FABLE_MODEL:=openai/gpt-5.6-sol-high}" ;;
+    open)
+      : "${ANTHROPIC_DEFAULT_HAIKU_MODEL:=openai/gpt-oss-120b}"
+      : "${ANTHROPIC_DEFAULT_SONNET_MODEL:=minimax/minimax-m3}"
+      : "${ANTHROPIC_DEFAULT_OPUS_MODEL:=deepseek/deepseek-v4-pro}"
+      : "${ANTHROPIC_DEFAULT_FABLE_MODEL:=z-ai/glm-5.2}" ;;
+    *)
+      if [ -z "${ANTHROPIC_DEFAULT_SONNET_MODEL:-}" ]; then
+        echo "FATAL: unknown claude mix '${ARM#claude-}' (arm=$ARM) and no ANTHROPIC_DEFAULT_*_MODEL exported — add a case to the model map in run-distributed.sh, or export the four tier models"; exit 1
+      fi
+      echo "==> claude mix '${ARM#claude-}': using operator-exported ANTHROPIC_DEFAULT_*_MODEL (no baked map)" ;;
+  esac
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_FABLE_MODEL
+  echo "==> arm=$ARM (gateway ensemble): sonnet=$ANTHROPIC_DEFAULT_SONNET_MODEL opus=$ANTHROPIC_DEFAULT_OPUS_MODEL haiku=$ANTHROPIC_DEFAULT_HAIKU_MODEL fable=$ANTHROPIC_DEFAULT_FABLE_MODEL"
+fi
 # BENCHMARK (verified|lite|pro|terminal|live_verified) is ORTHOGONAL to ARM: ARM
 # picks the runner (econ/claude), BENCHMARK picks the task set + grading —
 # tools/benchmarks.py is the single source of truth (do not duplicate its
@@ -177,11 +222,13 @@ if [ -z "${DATASET:-}" ]; then
 fi
 
 HOLD="${HOLD:-3600}"                        # coordinator holds open this long after bundle for the pull
-MAXWAIT="${MAXWAIT:-864000}"                 # absolute coordinator drain backstop (10 days) — propagated to the coordinator; NOT a normal limiter (the harness imposes no per-task wall-clock or stall kill — the agent owns its own watchdog — so a legitimate full 500-task run may run for days; the coordinator waits PROGRESS-aware, giving up early only when wedged — see NO_PROGRESS_GIVEUP)
+MAXWAIT="${MAXWAIT:-864000}"                 # absolute coordinator drain backstop (10 days) — propagated to the coordinator; NOT a normal limiter (per-task the worker imposes only a HIGH backstop — TASK_CEILING_S 4h + TASK_IDLE_S 45min no-output watchdog, not a tight limit — so a legitimate full 500-task run may run for days; the coordinator waits PROGRESS-aware, giving up early only when wedged — see NO_PROGRESS_GIVEUP)
 NO_PROGRESS_GIVEUP="${NO_PROGRESS_GIVEUP:-7200}"  # coordinator gives up EARLY only if the fleet is WEDGED: nothing leased AND no completion for this long (workers gone, tasks stranded). Passed to the coordinator.
 MAX_FAILURE_RERUN="${MAX_FAILURE_RERUN:-1}"  # coordinator's failure-rerun-on-drain budget per instance; read by coordinator-entrypoint.sh
 GRADE_WORKERS="${GRADE_WORKERS:-6}"         # swebench harness --max_workers on the worker
 HEARTBEAT_TIMEOUT="${HEARTBEAT_TIMEOUT:-300}"          # coordinator reaps a lease after this much heartbeat silence (10 beats @30s)
+TASK_CEILING_S="${TASK_CEILING_S:-14400}"   # per-task HARD wall-clock ceiling on the worker (agent budget): terminal raises task.toml [agent] timeout to this + resolve/harbor SIGKILL. 4h default — a HIGH backstop, not a tight limit
+TASK_IDLE_S="${TASK_IDLE_S:-2700}"          # per-task no-output idle watchdog on the worker: SIGKILL a task that has emitted nothing for this long (hung). 45min default
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
 
@@ -461,33 +508,33 @@ fi
 export LITELLM_API_KEY
 echo "==> LITELLM_API_KEY: set (len ${#LITELLM_API_KEY})"
 
-# ── auth: LiteLLM MASTER key (claude arm only) — the econ LITELLM_API_KEY above
+# ── auth: LiteLLM MASTER key (gateway claude arms only) — the econ LITELLM_API_KEY above
 # may be a non-master/placeholder; claude mints a per-instance virtual key on
 # each worker and needs a mint-capable master key to do it. Prefer env, else
 # the sibling econ-coding-agent infra .env.local (never econ's .env.local).
-if [ "$ARM" = "claude" ]; then
+if [ "$CLAUDE_ARM_KIND" = "gateway" ]; then
   if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
     _INFRA_ENV="$HERE/../../infra/litellm/.env.local"
     if [ -f "$_INFRA_ENV" ]; then
       LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "$_INFRA_ENV" | head -1 | sed 's/^LITELLM_MASTER_KEY=//; s/^["'"'"']//; s/["'"'"']$//')"
     fi
   fi
-  [ -n "${LITELLM_MASTER_KEY:-}" ] || { echo "set LITELLM_MASTER_KEY (or add it to infra/litellm/.env.local) — claude arm needs it to mint per-instance keys"; exit 1; }
+  [ -n "${LITELLM_MASTER_KEY:-}" ] || { echo "set LITELLM_MASTER_KEY (or add it to infra/litellm/.env.local) — gateway claude arms need it to mint per-instance keys"; exit 1; }
   export LITELLM_MASTER_KEY
   echo "==> LITELLM_MASTER_KEY: set (len ${#LITELLM_MASTER_KEY})"
 fi
 
-# ── auth: Claude Code OAuth token (claude-real arm only) — REAL Anthropic models,
+# ── auth: Claude Code OAuth token (claude-native arm only) — REAL Anthropic models,
 # stock Claude Code: no base-URL/model-alias env overrides, no LiteLLM anywhere.
 # Prefer env, else repo-root .env.local. Value never printed.
-if [ "$ARM" = "claude-real" ]; then
+if [ "$CLAUDE_ARM_KIND" = "native" ]; then
   if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     _ROOT_ENV="$HERE/../../.env.local"
     if [ -f "$_ROOT_ENV" ]; then
       CLAUDE_CODE_OAUTH_TOKEN="$(grep -E '^CLAUDE_CODE_OAUTH_TOKEN=' "$_ROOT_ENV" | head -1 | sed 's/^CLAUDE_CODE_OAUTH_TOKEN=//; s/^["'"'"']//; s/["'"'"']$//')"
     fi
   fi
-  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "set CLAUDE_CODE_OAUTH_TOKEN (or add it to .env.local at repo root) — claude-real arm needs it"; exit 1; }
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "set CLAUDE_CODE_OAUTH_TOKEN (or add it to .env.local at repo root) — claude-native arm needs it"; exit 1; }
   export CLAUDE_CODE_OAUTH_TOKEN
   echo "==> CLAUDE_CODE_OAUTH_TOKEN: set (len ${#CLAUDE_CODE_OAUTH_TOKEN})"
 fi
@@ -612,7 +659,7 @@ if [ "$ARM" = "econ" ]; then
   else
     echo "    engine: none at $CI_SRC/src — in-container plugins fall back and stay disabled"
   fi
-elif [ "$ARM" = "claude" ] || [ "$ARM" = "claude-real" ]; then
+elif [ -n "$CLAUDE_ARM_KIND" ]; then
   log "arm=$ARM: no vendor step"
 fi
 
@@ -881,24 +928,39 @@ echo "==> creating $MACHINES worker(s) (${MEM}MB/${CPUS}cpu/${CPU_KIND}, no volu
 ROOTFS_FLAG=(); [ -n "$ROOTFS_GB" ] && ROOTFS_FLAG=(--rootfs-size "$ROOTFS_GB")
 # claude-only worker env — EMPTY for every other arm (econ unaffected).
 EXTRA_ENV=()
-if [ "$ARM" = "claude" ]; then
+if [ "$CLAUDE_ARM_KIND" = "gateway" ]; then
+  # Any claude-<mix> gateway ensemble: LiteLLM-routed. The four ANTHROPIC_DEFAULT_*
+  # tier aliases (set from the model-map case at the top of this script, or an
+  # operator override) are forwarded a few lines below — identical for every mix.
   EXTRA_ENV+=(-e CLAUDE_OPEN_MODELS=1 -e LITELLM_MASTER_KEY="$LITELLM_MASTER_KEY" -e ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://econ-litellm.fly.dev}")
-elif [ "$ARM" = "claude-real" ]; then
-  # stock Claude Code on REAL Anthropic models: OAuth token only — no
-  # base-URL/model-alias envs, no LiteLLM. CLAUDE_REAL=1 turns on the same
-  # harness staging (agents/hooks/ON prompt) the open-models arm gets.
-  # TOOLBOX_TAG pins the SHARED claude toolbox (same local-docker dir,
-  # identical image) — without it worker-entrypoint derives
-  # unerr-claude-real-toolbox and rebuilds an identical toolbox per arm.
-  EXTRA_ENV+=(-e CLAUDE_REAL=1 -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" -e CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}" -e TOOLBOX_TAG=unerr-claude-toolbox)
+elif [ "$CLAUDE_ARM_KIND" = "native" ]; then
+  # claude-native: stock Claude Code on REAL Anthropic models — OAuth token only,
+  # no base-URL/model-alias envs, no LiteLLM. CLAUDE_REAL=1 turns on the same
+  # harness staging (agents/hooks/ON prompt) the gateway arms get.
+  EXTRA_ENV+=(-e CLAUDE_REAL=1 -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" -e CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}")
 fi
-# terminal-flow knobs (both claude arms; harness_terminal.py reads them on the
+# Every claude-* arm shares ONE toolbox image (the mix is runtime env, not baked),
+# so pin the SHARED tag for all of them — without it worker-entrypoint derives a
+# per-arm unerr-<arm>-toolbox and rebuilds an identical toolbox per mix. The
+# worker-loop disk keep-list matches the substring 'unerr-claude', so this tag
+# survives between-instance pruning.
+[ -n "$CLAUDE_ARM_KIND" ] && EXTRA_ENV+=(-e TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-claude-toolbox}")
+# terminal-flow knobs (all claude arms; harness_terminal.py reads them on the
 # worker): TERMINAL_STOCK_AGENT=1 = bare first-party claude-code agent (the
 # no-harness baseline control), HARNESS_HOOKS=1 = opt back into the SWE-shaped
-# finish-gate hooks. Forwarded only when set — unset = full unerr harness
-# agent, hooks off (the defaults baked into harness_terminal/harbor_agents).
+# finish-gate hooks ("generic" = same hooks under the benchmark-agnostic
+# profile), HARNESS_PROFILE=swe|generic = explicit profile override (default
+# swe when HARNESS_HOOKS=1 and this is unset). Forwarded only when set — unset
+# = full unerr harness agent, hooks off (the defaults baked into
+# harness_terminal/harbor_agents); no default value is set here for either var.
 [ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
 [ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
+[ -n "${HARNESS_PROFILE:-}" ] && EXTRA_ENV+=(-e HARNESS_PROFILE="$HARNESS_PROFILE")
+# ESCALATION_PANEL=1 = Gate E demands unerr-opus AND unerr-fable in parallel (the
+# judge-panel; worth its cost only when the two tiers are genuinely different
+# models, e.g. the claude-open ensemble). Unset/0 = the default two-rung ladder
+# (opus first; fable only if trouble persists). Forwarded only when set.
+[ -n "${ESCALATION_PANEL:-}" ] && EXTRA_ENV+=(-e ESCALATION_PANEL="$ESCALATION_PANEL")
 [ -n "${TERMINAL_MAX_RETRIES:-}" ] && EXTRA_ENV+=(-e TERMINAL_MAX_RETRIES="$TERMINAL_MAX_RETRIES")
 # Claude Code tier aliases (gateway ensembles, e.g. the GPT-5.6 map) — forwarded
 # only when set; harness_terminal passes them into the claude arm's containers.
@@ -922,6 +984,7 @@ for i in $(seq 1 "$MACHINES"); do
       -e COORDINATOR_URL="$COORD_URL" -e ARM="$ARM" -e BENCHMARK="$BENCHMARK" -e RUN_ID="$LABEL" \
       -e DATASET="$DATASET" -e SPLIT="$SPLIT" \
       -e GRADE_WORKERS="$GRADE_WORKERS" \
+      -e TASK_CEILING_S="$TASK_CEILING_S" -e TASK_IDLE_S="$TASK_IDLE_S" \
       -e MAX_ARTIFACT_TEXT_BYTES="${MAX_ARTIFACT_TEXT_BYTES:-5000000}" -e MAX_ARTIFACT_DB_BYTES="${MAX_ARTIFACT_DB_BYTES:-8000000}" \
       -e LITELLM_API_KEY="$LITELLM_API_KEY" -e EXA_API_KEY="$EXA_API_KEY" \
       -e TAVILY_API_KEY="$TAVILY_API_KEY" \

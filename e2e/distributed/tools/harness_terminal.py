@@ -165,7 +165,31 @@ DEFAULT_GATEWAY_URL = "https://econ-litellm.fly.dev"
 # ANTHROPIC_DEFAULT_SONNET_MODEL under open-models.
 DEFAULT_CONDUCTOR_MODEL = "minimax/minimax-m3"
 
-# The claude/claude-real arms drive Harbor's `--agent-import-path` at this
+# ── Arm family (naming scheme, 2026-07-20): econ | claude-<mix> | claude-native.
+# claude-<mix> = Claude Code + unerr via the LiteLLM gateway (the <mix> suffix names
+# the model ensemble: claude-gpt, claude-open, …); claude-native = real Anthropic
+# (OAuth), no gateway. Behavior keys off these predicates, NEVER a literal arm name,
+# so a new mix needs no change here. Legacy claude/claude-real are normalized upstream
+# (run-distributed.sh) but are handled here too, for direct/local invocations.
+_NATIVE_CLAUDE_ARMS = ("claude-native", "claude-real")
+
+
+def _is_native_claude(arm: str) -> bool:
+    """claude-native (real Anthropic / OAuth, no gateway). Includes legacy claude-real."""
+    return arm in _NATIVE_CLAUDE_ARMS
+
+
+def _is_claude_arm(arm: str) -> bool:
+    """Any claude arm — gateway mix or native (incl. the legacy bare 'claude')."""
+    return arm == "claude" or arm.startswith("claude-")
+
+
+def _is_gateway_claude(arm: str) -> bool:
+    """A claude-<mix> gateway ensemble (LiteLLM-routed) — every claude arm but native."""
+    return _is_claude_arm(arm) and not _is_native_claude(arm)
+
+
+# The claude-<mix>/claude-native arms drive Harbor's `--agent-import-path` at this
 # module.path:ClassName (harbor_agents.py, this same tools/ dir — on
 # PYTHONPATH, see run()) instead of Harbor's bare first-party claude-code
 # agent, so the FULL unerr harness (install + shipped sub-agents + ON
@@ -176,7 +200,9 @@ UNERR_AGENT_IMPORT_PATH = "harbor_agents:ClaudeUnerrAgent"
 
 # Wall-clock grace beyond the task's own declared timeout (task.toml's
 # agent+verifier timeout_sec) or the worker's flat ceiling, covering harbor's
-# own CLI/environment-build overhead — mirrors _resolve's `inst_timeout + 300`.
+# own CLI/environment-build overhead. (The per-task AGENT budget itself is set
+# by _bump_agent_timeout below; the no-output idle watchdog in run() uses
+# worker.task_idle_s.)
 GRACE_S = 600
 
 
@@ -212,20 +238,22 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     docstring), pointed at OUR gateway the same way each arm's own
     local-docker runner wires it:
 
-      claude -> --agent-import-path harbor_agents:ClaudeUnerrAgent (unless
+      claude-<mix> (gateway) -> --agent-import-path harbor_agents:ClaudeUnerrAgent (unless
                 TERMINAL_STOCK_AGENT=1, which reverts to Harbor's bare
                 first-party --agent claude-code — the control run), same
                 ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN either way, plus the
                 four ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL tier
-                aliases forwarded from the host env when set (absent stays
-                absent — no invented defaults) so an in-agent escalation to
+                aliases forwarded from the host env when set (the launcher's
+                per-mix model map populates these — claude-gpt, claude-open, …;
+                an operator override still wins; absent stays absent here — no
+                invented defaults at this layer) so an in-agent escalation to
                 opus/haiku/fable resolves through the gateway too. The unerr
                 path passes NO concrete --model (returns "") — Harbor would
                 otherwise flatten every tier alias to that one model behind a
                 custom base URL, collapsing the ensemble; the SONNET alias is
                 pinned to `conductor` as the main-loop model instead. The
                 stock baseline still gets a concrete --model.
-      claude-real -> same import-path swap, CLAUDE_CODE_OAUTH_TOKEN only —
+      claude-native -> same import-path swap, CLAUDE_CODE_OAUTH_TOKEN only —
                 real Anthropic subscription auth passed through from the
                 worker's own env untouched, same as e2e/reference/claude/
                 local-docker/run-benchmark.py's non-open-models auth path. No
@@ -235,7 +263,7 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
                 stock Claude Code alias like "sonnet"/"opus") or "sonnet" if
                 unset; raises (before Harbor ever launches) if
                 CLAUDE_CODE_OAUTH_TOKEN is missing, so a misconfigured
-                claude-real worker fails loudly instead of silently falling
+                claude-native worker fails loudly instead of silently falling
                 into the econ branch below.
       econ   -> --agent opencode, OPENAI_BASE_URL/OPENAI_API_KEY, UNTOUCHED by
                 the import-path swap above. econ's own toolbox binary is NOT
@@ -249,7 +277,7 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     result, or None on a mint miss/no master key) — when set it's used as
     the agent's gateway auth token INSTEAD of the shared master key, so
     run()'s later fetch_cost can read this instance's spend back in
-    isolation from every other instance sharing the gateway. claude-real
+    isolation from every other instance sharing the gateway. claude-native
     never touches the gateway so `vk` is irrelevant to it (run() also never
     mints one for claude-real — see its real-Anthropic cost-stamp branch).
     """
@@ -260,7 +288,7 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
     stock_agent = os.environ.get("TERMINAL_STOCK_AGENT") == "1"
     claude_agent = "claude-code" if stock_agent else UNERR_AGENT_IMPORT_PATH
 
-    if worker.arm == "claude":
+    if _is_gateway_claude(worker.arm):
         env: dict[str, str] = {"ANTHROPIC_BASE_URL": gateway}
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
@@ -300,7 +328,7 @@ def _arm_agent_config(worker, vk: str | None = None) -> tuple[str, str, dict]:
         model = conductor if stock_agent else ""
         return claude_agent, model, env
 
-    if worker.arm == "claude-real":
+    if _is_native_claude(worker.arm):
         oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         if not oauth_token:
             raise RuntimeError(
@@ -346,6 +374,44 @@ def _task_timeout_hint(task_dir: str) -> int:
         except ValueError:
             continue
     return total
+
+
+# Matches the [agent] section's timeout_sec (NOT [verifier]'s) — `[^\[]*?` can't
+# cross into the next section header, so only the agent's value is captured.
+_AGENT_TIMEOUT_RE = re.compile(r"(\[agent\][^\[]*?\btimeout_sec\s*=\s*)([0-9.]+)", re.S)
+
+
+def _bump_agent_timeout(task_dir: str, ceiling_s: int) -> bool:
+    """Raise task.toml's [agent] timeout_sec up to ceiling_s so Harbor gives the
+    agent the full per-task budget instead of the stock terminal-bench 2.1 900s
+    (which Harbor enforces INTERNALLY and would otherwise kill a legit long task
+    mid-work). Idempotent — only rewrites when the declared value is lower.
+    Best-effort: a missing/unreadable/unmatched task.toml returns False and is
+    never fatal (the outer wrapper + idle watchdog still bound the run). Returns
+    True when the file was changed. Leaves [verifier] timeout_sec (the grading
+    budget) untouched."""
+    path = os.path.join(task_dir, "task.toml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+    m = _AGENT_TIMEOUT_RE.search(text)
+    if not m:
+        return False
+    try:
+        cur = float(m.group(2))
+    except ValueError:
+        return False
+    if cur >= ceiling_s:
+        return False
+    new_text = text[:m.start(2)] + str(ceiling_s) + text[m.end(2):]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_text)
+    except OSError:
+        return False
+    return True
 
 
 def _find_result_json(jobs_dir: str) -> str | None:
@@ -497,7 +563,7 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     run_id_env = os.environ.get("RUN_ID", "")
     vk = None
     vk_alias = ""
-    if litellm_key and worker.arm != "claude-real":
+    if litellm_key and not _is_native_claude(worker.arm):
         vk_alias = f"terminal-{run_id_env}-{iid}"
         vk = mint_instance_key(
             gateway_root, litellm_key, alias=vk_alias,
@@ -524,6 +590,19 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         env["PYTHONPATH"] = (
             f"{tools_dir}{os.pathsep}{existing_pp}" if existing_pp else tools_dir)
 
+    # Per-task backstop knobs, read off the Worker so terminal and the resolve
+    # path (worker-loop._wait_with_backstop) honor the SAME TASK_CEILING_S /
+    # TASK_IDLE_S. Defaults match Worker.__init__ (4h / 45min).
+    task_ceiling_s = getattr(worker, "task_ceiling_s", 14400)
+    task_idle_s = getattr(worker, "task_idle_s", 2700)
+
+    # Give the agent the full per-task budget: raise task.toml's [agent]
+    # timeout_sec (stock terminal-bench 2.1 ships 900s, which Harbor enforces
+    # INTERNALLY and would otherwise SIGKILL a legit long task mid-work — this is
+    # what failed build-cython-ext) up to the ceiling before harbor reads it.
+    if _bump_agent_timeout(task_dir, task_ceiling_s):
+        worker.log(f"{iid}: raised task.toml [agent] timeout_sec -> {task_ceiling_s}s")
+
     ceiling = worker.timeout
     task_hint = _task_timeout_hint(task_dir)
     timeout_s = max(ceiling, task_hint) + GRACE_S
@@ -533,14 +612,10 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # an ABSOLUTE epoch-ms deadline (packages/opencode/src/session/prompts/
     # preambles.ts timeBudgetLine(): `Number(process.env.ECON_TASK_DEADLINE_MS)`
     # compared straight against Date.now(); prompt.ts headlessHoldMs() same
-    # convention) — never a duration. Set from the TASK's OWN declared
-    # budget (task_hint, scraped from task.toml timeout_sec), NOT timeout_s
-    # above — that bakes in GRACE_S (600s harbor/CLI overhead slack the
-    # agent has no business budgeting against). Falls back to the worker's
-    # flat per-instance ceiling only when task.toml has no timeout_sec to
-    # scrape (task_hint == 0).
-    task_budget_s = task_hint or ceiling
-    env["ECON_TASK_DEADLINE_MS"] = str(int(time.time() * 1000) + task_budget_s * 1000)
+    # convention) — never a duration. Hand it the AGENT's real budget
+    # (task_ceiling_s, the [agent] timeout we just wrote), not the raw task.toml
+    # sum (which folds in the verifier's separate grading budget).
+    env["ECON_TASK_DEADLINE_MS"] = str(int(time.time() * 1000) + task_ceiling_s * 1000)
 
     # `agent` is a plain Harbor agent name ("claude-code"/"opencode") for
     # econ and a TERMINAL_STOCK_AGENT=1 control run, or "module.path:Class"
@@ -592,17 +667,35 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         proc = subprocess.Popen(cmd, env=env, stdout=logf,
                                  stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.time() + timeout_s
+        last_size = -1
+        last_activity = time.time()
         while True:
             try:
                 rc = proc.wait(timeout=5)
                 break
             except subprocess.TimeoutExpired:
+                now = time.time()
                 if abandon.is_set():
                     stall_reason = "abandoned: lease reaped mid-run"
                     _kill_process_group(proc)
                     proc.wait()
                     break
-                if time.time() >= deadline:
+                # No-output idle watchdog: harbor streams the agent's whole
+                # session into logf, so a wedged run stops growing the file.
+                # Reclaims a silent hang well before the outer `timeout_s`.
+                try:
+                    size = os.path.getsize(logpath)
+                except OSError:
+                    size = last_size
+                if size != last_size:
+                    last_size = size
+                    last_activity = now
+                if now - last_activity >= task_idle_s:
+                    stall_reason = f"idle-watchdog: no output for {task_idle_s}s (hung task)"
+                    _kill_process_group(proc)
+                    proc.wait()
+                    break
+                if now >= deadline:
                     stall_reason = f"timeout: no completion within {timeout_s}s"
                     _kill_process_group(proc)
                     proc.wait()
@@ -675,7 +768,7 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         "cost_usd": stats.get("cost_usd"),
         "rc": rc,
     }
-    if worker.arm == "claude-real":
+    if _is_native_claude(worker.arm):
         # Real-Anthropic $ (never LiteLLM spend — this arm never touches the
         # gateway, see _arm_agent_config) — no vk was minted, no fetch_cost
         # call. Stamp whatever Harbor's own job-level stats.cost_usd carries

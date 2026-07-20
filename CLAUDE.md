@@ -220,6 +220,30 @@ server-side (kept for audit, excluded from queries).
   `./tools/tigris-archive.sh list|overview <label>|get <label> [--only traces|grading|submission|bundle]`
   (creds from env or `.env.tigris`; never prints secrets). Wiring lives in `coordinator-entrypoint.sh`
   §6.9+§8, `Dockerfile.dist` (`boto3`), `run-distributed.sh` (env passthrough — never AWS_*).
+- **Harbor + Claude Code custom agents (the `claude-<mix>` / `claude-native` terminal arms):**
+  [`e2e/distributed/HARBOR_CLAUDE_CODE.md`](e2e/distributed/HARBOR_CLAUDE_CODE.md) — the
+  agent-integration deep-dive for driving Claude Code as a *custom Harbor agent* (`ClaudeUnerrAgent`,
+  subclassing Harbor's `ClaudeCode` and reusing its `run()`). Covers the FOUR root-caused fixes
+  (root permission bypass → `--dangerously-skip-permissions` + `IS_SANDBOX=1`; tier flatten →
+  **empty `--model`**; missing alias forwarding → `ENV_VARS` → the `claude-opus-4-8` 400; and the
+  **sub-agent permission gap** → a **PreToolUse auto-approve hook** in `.claude/settings.local.json`,
+  since `--dangerously-skip-permissions` does NOT reach Task sub-agents — proven version-independent),
+  the GPT-5.6 gateway tier map, the local `harbor run` repro loop, and the main-vs-subagent
+  denial-split debug playbook. `unerr install claude-code` sets up the unerr MCP + active-cognition
+  hooks only — NOT tool permissions, which is why the harness owns the bypass. Reusable for wiring
+  Claude Code into ANY other Harbor benchmark. Update it in the SAME change as any
+  agent-integration/fix edit.
+- **Arm naming scheme (`claude-<mix>`, 2026-07-20):** `ARM` = `econ` | `claude-<mix>` (gateway
+  ensemble via the econ-litellm gateway; `<mix>` names the models — `claude-gpt` = GPT-5.6,
+  `claude-open` = open-weight) | `claude-native` (real Anthropic, OAuth, no gateway). Legacy
+  `claude`/`claude-real` are auto-normalized to `claude-open`/`claude-native` by
+  `run-distributed.sh` + `bench.sh` + `fleet-common.sh`. The per-mix MODEL MAP is a single bash
+  `case` in `run-distributed.sh` (the source of truth; `ANTHROPIC_DEFAULT_*_MODEL` env overrides;
+  unknown mix w/o override = fail-loud). **Adding a mix = one `case` arm there + document it** — the
+  runner/worker/coordinator code treats every `claude-<mix>` uniformly as a gateway arm (predicates,
+  not literal names) and reads the map from env, so no other code changes. All `claude-*` arms share
+  one toolbox image (`unerr-claude-toolbox`); each gets its own fly app + Tigris path. Detail:
+  distributed README §0 "Arm naming scheme".
 - **Rule:** when you change the distributed run flow, the model map, or the result scripts,
   update that README in the SAME change. The result scripts live in
   `e2e/distributed/tools/` (+ `e2e/reference/claude/local-docker/cost_report.py`) — extend

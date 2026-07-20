@@ -15,9 +15,11 @@
 #   COORDINATOR_URL       required — http://<coord_id>.vm.<app>.internal:8080 (6PN)
 #   RUN_ID                required — shared run/label id (== swebench --run_id)
 #   WORKER_ID             optional — worker-loop.py defaults it to $FLY_MACHINE_ID
-#   ARM                   optional — econ|claude|claude-real|codex (default econ); picks runner + toolbox.
-#                         claude-real (real Anthropic models, CLAUDE_CODE_OAUTH_TOKEN, no LiteLLM)
-#                         shares claude's ARM_DIR/context below — see the ARM_DIR pick just below.
+#   ARM                   optional — econ | claude-<mix> | claude-native | codex (default econ); picks runner + toolbox.
+#                         claude-<mix> (gateway ensemble via LiteLLM, e.g. claude-gpt/claude-open) and
+#                         claude-native (real Anthropic, CLAUDE_CODE_OAUTH_TOKEN, no LiteLLM) share
+#                         claude's ARM_DIR/context below. Legacy claude/claude-real are aliased to
+#                         claude-open/claude-native by the launcher before this runs.
 #   DATASET / SPLIT       optional — HF dataset + split for resolve + grade
 #   PER_INSTANCE_TIMEOUT  optional — per-instance seconds (default 2700)
 #   GRADE_WORKERS         optional — swebench --max_workers (default 6)
@@ -64,19 +66,25 @@ emit '"dockerd_up"'
 
 # ── 2. Build the arm toolbox image once (grafted into every instance) ────────
 # Arm-parameterized tag. Econ's toolbox does NOT install unerr, so its tag drops
-# the prefix: `econ-toolbox`, matching Dockerfile.instance's `COPY --from`.
-# Claude/codex toolboxes DO install unerr, so they keep `unerr-<arm>-toolbox`.
+# the prefix: `econ-toolbox`, matching Dockerfile.instance's `COPY --from`. Every
+# claude-<mix>/claude-native arm installs unerr and builds an IDENTICAL toolbox
+# (the model mix is runtime env, not baked), so they ALL share one tag —
+# unerr-claude-toolbox — with no per-mix rebuild. Codex keeps unerr-<arm>-toolbox.
 if [ "$ARM" = "econ" ]; then
   TOOLBOX_TAG="${TOOLBOX_TAG:-econ-toolbox}"
 else
-  TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-${ARM}-toolbox}"
+  case "$ARM" in
+    claude|claude-*) TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-claude-toolbox}" ;;
+    *)               TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-${ARM}-toolbox}" ;;
+  esac
 fi
 log "building toolbox $TOOLBOX_TAG (arm=$ARM)"
 ARM_DIR="/work/local-docker"
-# claude-real (real Anthropic models) reuses the SAME claude context/runner as
-# claude (the open-weight ensemble) — only its auth env differs, wired at the
-# launcher level (CLAUDE_CODE_OAUTH_TOKEN, no LiteLLM), not here.
-case "$ARM" in claude|claude-real) ARM_DIR="/work/claude/local-docker" ;; esac
+# Every claude-<mix> gateway arm AND claude-native reuse the SAME claude
+# context/runner (identical image) — only the auth/model env differs, wired at the
+# launcher level (LiteLLM + tier aliases for gateway; CLAUDE_CODE_OAUTH_TOKEN for
+# native), not here.
+case "$ARM" in claude|claude-*) ARM_DIR="/work/claude/local-docker" ;; esac
 build_toolbox "$ARM_DIR/Dockerfile.toolbox" "$ARM_DIR/context" "$TOOLBOX_TAG" "$LOGDIR"
 emit "\"toolbox_built\",\"tag\":\"$TOOLBOX_TAG\""
 

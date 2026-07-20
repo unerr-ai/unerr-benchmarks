@@ -1,11 +1,17 @@
-# Running the Claude arms on SWE-bench — unerr ON (open-weight ensemble or real Anthropic models), distributed on fly
+# Running the Claude arms on SWE-bench — unerr ON (gateway-routed model ensembles or real Anthropic models), distributed on fly
 
 **This is the single source of truth for running Claude Code against SWE-bench with unerr's MCP tools ON,
-distributed across a fly fleet. Two arms are available:** `claude` (Claude Code + unerr with open-weight ensemble
-via LiteLLM gateway — recommended for cost-efficient ablations) and `claude-real` (stock Claude Code + unerr with
-real Anthropic models — production-grade). Both share the same harness, MCP pipeline, and distributed infrastructure.
-This doc covers the open-weight **`claude` arm**; see the distributed [README §0](../../distributed/README.md) for the
-`claude-real` authentication (`CLAUDE_CODE_OAUTH_TOKEN`) and cost model (Anthropic native, not LiteLLM).
+distributed across a fly fleet. Arm naming scheme (2026-07-20):** `econ` (unchanged) · **`claude-<mix>`**
+(Claude Code + unerr routed through the econ-litellm gateway; `<mix>` picks the model ensemble — defined
+mixes are `claude-gpt` for GPT-5.6 and `claude-open` for the open-weight ensemble) · **`claude-native`**
+(stock Claude Code + unerr on real Anthropic models — OAuth, no gateway). The bare `claude` and `claude-real`
+arm values from before this scheme are kept as **legacy aliases**, auto-normalized to `claude-open` and
+`claude-native` respectively — this doc's command examples still use them and remain valid. All `claude-*`
+arms share the same harness, MCP pipeline, and distributed infrastructure; adding a new mix is one `case`
+entry in `run-distributed.sh`'s per-mix model map (see §3) plus documenting it here.
+This doc covers the gateway-routed **`claude-<mix>` arms** (both model maps are in §3); see the distributed
+[README §0](../../distributed/README.md) for `claude-native` authentication (`CLAUDE_CODE_OAUTH_TOKEN`) and
+cost model (Anthropic native, not LiteLLM).
 Written after repeatedly re-deriving these commands (and burning a run on a wrong VM default). If the run
 process or config changes, **update this file** — it is referenced from the repo-root
 `CLAUDE.md` for exactly that reason.
@@ -68,7 +74,7 @@ MACHINES=2 ARM=claude LABEL=<run-name> SUITE=mini FLY_ORG=vamsee-k-933 \
 
 ---
 
-## 2. One-time prerequisites (for `ARM=claude` — open-weight ensemble)
+## 2. One-time prerequisites (for `ARM=claude-open` — open-weight ensemble; legacy alias `claude`)
 
 | Thing | Where / value |
 |---|---|
@@ -80,16 +86,31 @@ MACHINES=2 ARM=claude LABEL=<run-name> SUITE=mini FLY_ORG=vamsee-k-933 \
 | unerr-cli checkout (to re-vendor) | `../unerr-cli` (i.e. `/Users/<you>/IdeaProjects/unerr-cli`) |
 | gateway health | `curl -s https://econ-litellm.fly.dev/health/liveliness` → `"I'm alive!"` |
 
-**Never disturb the econ arm** or its running distributed jobs. The open-weight claude overrides
-apply only to the benchmark's Claude instances, never to machine-level `~/.claude`. **For `ARM=claude-real`**
-(real Anthropic models), see the distributed [README §0](../../distributed/README.md) for its own
-prerequisites (`CLAUDE_CODE_OAUTH_TOKEN`) — it does NOT use LiteLLM or the gateway.
+**Never disturb the econ arm** or its running distributed jobs. The gateway-routed `claude-<mix>` overrides
+apply only to the benchmark's Claude instances, never to machine-level `~/.claude`. **For `ARM=claude-native`**
+(real Anthropic models, legacy alias `claude-real`), see the distributed [README §0](../../distributed/README.md)
+for its own prerequisites (`CLAUDE_CODE_OAUTH_TOKEN`) — it does NOT use LiteLLM or the gateway.
 
 ---
 
-## 3. The open-weight model map
+## 3. The `claude-<mix>` model maps
 
-Set in `e2e/reference/claude/local-docker/run-benchmark.py:280-287`; overridable per-env.
+Both mixes are driven by the same four env vars (`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL`).
+`ARM=claude-<mix>` picks which values `run-distributed.sh` exports, via a single bash `case` keyed on the
+mix name — one entry per mix (see the recipe below). An `ANTHROPIC_DEFAULT_*_MODEL` set explicitly in your
+own env still overrides the mix default. The open mix's values also live as hardcoded fallbacks in
+`e2e/reference/claude/local-docker/run-benchmark.py:280-287`.
+
+### `claude-gpt` — GPT-5.6
+
+| Claude tier slot | Env var | Model | Role in the ensemble |
+|---|---|---|---|
+| sonnet (main loop) | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `openai/gpt-5.6-terra` | **conductor** — runs the whole turn |
+| opus | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `openai/gpt-5.6-sol` | **reasoner** — escalation (`unerr-opus`) |
+| haiku | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `openai/gpt-5.6-luna` | **fast** — cheap sub-tasks |
+| fable | `ANTHROPIC_DEFAULT_FABLE_MODEL` | `openai/gpt-5.6-sol-high` | **oracle** — escalation (`unerr-fable`) |
+
+### `claude-open` — open-weight ensemble (legacy alias `claude`)
 
 | Claude tier slot | Env var | Default model | Role in the ensemble |
 |---|---|---|---|
@@ -98,12 +119,16 @@ Set in `e2e/reference/claude/local-docker/run-benchmark.py:280-287`; overridable
 | haiku | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `openai/gpt-oss-120b` | **fast** — cheap sub-tasks |
 | fable | `ANTHROPIC_DEFAULT_FABLE_MODEL` | `z-ai/glm-5.2` | **oracle** — escalation (`unerr-fable`) |
 
-- Gateway model ids are **provider-prefixed** (`minimax/minimax-m3`, not `minimax-m3`).
-- `claude -p` runs with `--model sonnet` when open-models is on, so the main agent loop =
-  the minimax conductor. Escalation (spawning `unerr-opus`/`unerr-fable` subagents) is
-  what pulls in deepseek/glm; in practice it rarely fires (conductor solos most turns).
-- `minimax-m3` **reasons by default** at the provider level regardless of any client
-  thinking param — reasoning is ON without `MAX_THINKING_TOKENS`.
+- Gateway model ids are **provider-prefixed** (`minimax/minimax-m3`, not `minimax-m3`; `openai/gpt-5.6-terra`,
+  not `gpt-5.6-terra`).
+- `claude -p` runs with `--model sonnet`, so the main agent loop = the conductor tier for whichever mix is
+  active. Escalation (spawning `unerr-opus`/`unerr-fable` subagents) is what pulls in the opus/fable tiers;
+  in practice it rarely fires on either mix (conductor solos most turns).
+- `minimax-m3` (the `claude-open` conductor) **reasons by default** at the provider level regardless of any
+  client thinking param — reasoning is ON without `MAX_THINKING_TOKENS`.
+- **Adding a mix:** one `case` entry in `run-distributed.sh` mapping `ARM=claude-<newmix>` to its four
+  `ANTHROPIC_DEFAULT_*_MODEL` values, plus a table here. The runner treats every `claude-<mix>` value
+  uniformly as a gateway arm reading its model map from env — no other runner code changes needed.
 
 ---
 
@@ -174,11 +199,11 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 
 ---
 
-## 6. Environment variables — required vs auto (for `ARM=claude` — open-weight ensemble)
+## 6. Environment variables — required vs auto (for `ARM=claude-open` — open-weight ensemble; legacy alias `claude`)
 
 | Var | Required? | Notes |
 |---|---|---|
-| `ARM=claude` | **yes** | selects the open-weight ensemble pipeline (default is econ); use `ARM=claude-real` for Anthropic real models (see distributed README §0) |
+| `ARM=claude-<mix>` | **yes** | selects the gateway-routed ensemble pipeline (default is econ); `<mix>` = `claude-gpt` (GPT-5.6) or `claude-open` (open-weight, §3) — the bare `claude` value is a legacy alias for `claude-open`. Use `ARM=claude-native` for real Anthropic models (legacy alias `claude-real`; see distributed README §0) |
 | `LABEL=<name>` | **yes** | names the fleet, the coordinator volume, and `out/dist-<label>/`. Use a fresh name per run. |
 | `MACHINES=2` | **yes** (all-in-one/prepare) | worker count |
 | `SUITE=mini` | for Mini-10 | else full Verified |
@@ -197,6 +222,8 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 | `WEBSEARCH=0` | no | **econ arm only** — force Exa web search OFF for a clean, baseline-comparable (no-web) econ run. No effect on claude (already opt-in). |
 | `EXA_API_KEY` | auto (econ arm) | econ-arm Exa search key — **default-on** for econ, sourced from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`; injected into workers unless `WEBSEARCH=0`. |
 | `TAVILY_API_KEY` | auto (only when `WEBSEARCH=1`) | claude-arm search key (opt-in). econ arm uses `EXA_API_KEY` (default-on, above). |
+| `HARNESS_HOOKS` | no | **This flow hard-enables the hooks** (`HARNESS_ON=1` in `run-instance.sh`) — the knob mainly matters on the terminal flow (unset/"0" = OFF, its default; "1" = ON with profile from `HARNESS_PROFILE`; "generic" = ON with the generic profile). See [HARBOR_CLAUDE_CODE.md §3.5](../../../distributed/HARBOR_CLAUDE_CODE.md) for gate details. |
+| `HARNESS_PROFILE` | no | `"swe"` (default here — pytest/test-file sensors, byte-identical legacy behavior) or `"generic"` (Bash ledger + agent-declared `# unerr:verify` marks; built for terminal, available on this flow only as a labeled A/B — never for baseline-comparable runs). |
 
 ---
 

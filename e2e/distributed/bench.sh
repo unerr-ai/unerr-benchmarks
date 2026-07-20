@@ -19,7 +19,8 @@
 #              prepare + GPU flip). Requires a prior `prepare`. (rd `run`)
 #     destroy  tear down every combo's fleet by its fleet=<LABEL> metadata. (rd `destroy`)
 #   <arm>    any value passes straight through as ARM=<value> (no allowlist here) —
-#            currently econ | claude | claude-real, e.g. --arms econ,claude,claude-real.
+#            econ | claude-<mix> | claude-native, e.g. --arms econ,claude-gpt,claude-open,claude-native.
+#            Legacy claude/claude-real are auto-normalized to claude-open/claude-native.
 #   (no `status`/`arm` here — a bad mode would risk run-distributed's default all-in-one launching
 #    a real fleet; check a live fleet per README §3, or use ./download-all.sh.)
 #
@@ -105,6 +106,10 @@ rc_overall=0
 
 launch() {  # $1 = arm:benchmark
   local combo="$1" arm="${1%%:*}" bench="${1##*:}"
+  # Normalize legacy arm aliases to the canonical scheme (SAME mapping as
+  # run-distributed.sh) so this manifest's app/label match what the launcher
+  # actually creates: claude -> claude-open, claude-real -> claude-native.
+  case "$arm" in claude) arm="claude-open" ;; claude-real) arm="claude-native" ;; esac
   local raw_label="${MATRIX}-${arm}"
   local log="$LOGDIR/${arm}-${bench}.log"
   # Probe run-distributed.sh in PLAN_ONLY (no fly API calls) for the AUTHORITATIVE

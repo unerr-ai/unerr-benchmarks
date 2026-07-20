@@ -88,14 +88,22 @@ by this module.
    layout (often no repo at all), so wiring these hooks unconditionally would
    silently deny legitimate edits or assert a guarantee that doesn't hold.
    Gated OFF by default here via HARNESS_HOOKS (unset/0 for terminal);
-   HARNESS_HOOKS=1 opts back in verbatim (same file, same
-   .claude/settings.local.json shape run-instance.sh writes) for a terminal
-   task that IS a SWE-bench-style repo checkout. The appended ON prompt
+   HARNESS_HOOKS=1 opts back in with a PROFILE picked by HARNESS_PROFILE
+   (default "swe" — verbatim the same file, same .claude/settings.local.json
+   shape run-instance.sh writes, for a terminal task that IS a SWE-bench-style
+   repo checkout); HARNESS_HOOKS=generic opts in with the profile forced to
+   "generic" regardless of HARNESS_PROFILE, for an arbitrary terminal-bench
+   task with no fixed repo/test layout — cc-harness-hooks.py's own generic
+   mode swaps the read-only-test deny rule for a `# unerr:verify`
+   marker-tracked, task-defines-its-own-check contract instead (see
+   __init__'s profile resolution). The appended ON prompt
    (_build_autonomy_prompt below) mirrors this: the FIX-DISCIPLINE "test files
    are read-only" bullet and the whole FINISH CONTRACT paragraph — both of
    which describe the hooks' mechanical behavior — are only appended when
-   HARNESS_HOOKS=1; the TRACK/FIX-DISCIPLINE(root-cause+native-type)/
-   DELEGATION/ESCALATION guidance is generic prose and always included.
+   hooks are on, and swapped swe-vs-generic by the resolved profile (the
+   ESCALATION trigger (d) wording is the one other profile-dependent spot);
+   the TRACK/FIX-DISCIPLINE(root-cause+native-type)/DELEGATION guidance is
+   generic prose and always included regardless of hooks/profile.
 """
 from __future__ import annotations
 
@@ -131,19 +139,35 @@ _ON_OPERATOR_POLICY = (
 )
 
 
-def _build_autonomy_prompt(hooks_on: bool) -> str:
+def _build_autonomy_prompt(hooks_on: bool, profile: str = "swe",
+                            escalation_panel: bool = False) -> str:
     """The ON operator policy appended via --append-system-prompt — same base
     autonomy directive + shortest-path/delegation policy + TRACK/FIX-
     DISCIPLINE/DELEGATION/ESCALATION contract run-instance.sh's HARNESS_ON
     block uses for the claude SWE-bench arms (kept verbatim; not re-authored).
     The two hooks-describing pieces (the read-only-tests bullet and the whole
-    FINISH CONTRACT paragraph) are appended ONLY when `hooks_on` — see the
-    module docstring's cc-harness-hooks.py determination."""
+    FINISH CONTRACT paragraph) are appended ONLY when `hooks_on`, and their
+    content is picked by `profile`: "swe" keeps this class's original
+    SWE-bench-shaped text byte-identical; "generic" swaps both for the
+    `# unerr:verify`-marker-based FINISH CONTRACT cc-harness-hooks.py's
+    generic mode actually enforces, since an arbitrary terminal-bench task
+    has no fixed repo/test layout to assert a read-only-tests guarantee over
+    — see the module docstring's cc-harness-hooks.py determination and
+    __init__'s profile resolution. `escalation_panel` picks the ESCALATION
+    paragraph's shape: False (default) is a mechanical two-rung LADDER
+    (unerr-opus alone first, unerr-fable only if still unresolved) — the
+    default because on the gateway arms both agents map to the same model
+    family at different effort, so a parallel panel is a doubled bill for a
+    correlated second opinion; True is the original PARALLEL panel
+    (unerr-opus AND unerr-fable together), opt-in via ESCALATION_PANEL=1 for
+    arms (e.g. claude-open) where the two tiers are genuinely different
+    models."""
+    is_generic = hooks_on and profile == "generic"
     test_files_bullet = (
         "\n- Test files are read-only in this benchmark — the harness "
         "mechanically denies test edits; never attempt them, and never "
         "count a test edit as part of a fix."
-        if hooks_on else ""
+        if hooks_on and not is_generic else ""
     )
     escalation_gate_note = (
         " Triggers (b) and (d) are machine-checked at stop: if they have "
@@ -151,19 +175,81 @@ def _build_autonomy_prompt(hooks_on: bool) -> str:
         "gate blocks you and returns you to work."
         if hooks_on else ""
     )
+    # Trigger (d) is otherwise-identical shared ESCALATION prose (below) —
+    # only its "what turned red" noun swaps per profile: the swe profile's
+    # hooks assert a mechanical test-suite check, the generic profile's
+    # hooks track whatever command the agent itself marked with
+    # `# unerr:verify` (there is no fixed "check" to name generically).
+    trigger_d = (
+        "your change turned your marked verification red and one rework "
+        "did not recover it"
+        if is_generic else
+        "your change turned a previously-passing check red and one rework "
+        "did not recover it"
+    )
     finish_contract = (
-        "\n\nFINISH CONTRACT — machine-checked when you try to stop (an "
-        "unmet gate returns you to work with instructions):\n"
-        "- After your final edit, re-run your reproduction of the issue AND "
-        "the narrowest existing verification covering each edited file; a "
-        "finish without a green post-edit verification run is blocked.\n"
-        "- A check that passed before your change and fails after it is a "
-        "regression caused by your fix — rework it until green; finishing "
-        "while it is red is blocked.\n"
-        "- If the stop gate blocks you, do exactly what its message names, "
-        "then finish. Do not fight the gate; it releases after its "
-        "condition is met."
-        if hooks_on else ""
+        (
+            "\n\nFINISH CONTRACT: every task has a checkable outcome. "
+            "Before your first change, decide the command that proves "
+            "success for THIS task (build + run it, a script you write, "
+            "curl the endpoint, diff output against expected) and run it "
+            "via Bash with the marker comment `# unerr:verify` appended — "
+            "the harness tracks marked commands only. After your final "
+            "change, re-run the marked check and confirm it exits 0. The "
+            "stop gate blocks finishing when no marked verification has "
+            "succeeded since your last change; a marked command that once "
+            "passed and now fails is a regression — fix it before "
+            "finishing. Mark only the check you would stake the task on, "
+            "never exploratory commands."
+        ) if is_generic else
+        (
+            "\n\nFINISH CONTRACT — machine-checked when you try to stop (an "
+            "unmet gate returns you to work with instructions):\n"
+            "- After your final edit, re-run your reproduction of the issue AND "
+            "the narrowest existing verification covering each edited file; a "
+            "finish without a green post-edit verification run is blocked.\n"
+            "- A check that passed before your change and fails after it is a "
+            "regression caused by your fix — rework it until green; finishing "
+            "while it is red is blocked.\n"
+            "- If the stop gate blocks you, do exactly what its message names, "
+            "then finish. Do not fight the gate; it releases after its "
+            "condition is met."
+        ) if hooks_on else ""
+    )
+    # ESCALATION_PANEL frozen contract: True is the ORIGINAL parallel-panel
+    # paragraph, byte-identical — never re-word it. False (default) is the
+    # mechanical two-rung ladder — see this function's own docstring for why.
+    escalation_action = (
+        "Escalate by spawning unerr-opus AND unerr-fable IN PARALLEL (one "
+        "message, two Task calls). Give each the SAME evidence brief — the "
+        "task text, what you observed, what you tried, and ALL candidate "
+        "approaches — but NOT your preferred hypothesis, so their reads "
+        "stay independent. Instruct them to investigate and return a "
+        "one-line root cause plus an exact minimal proposal WITHOUT editing "
+        "files. Reconcile: if they agree, implement it; if they disagree, "
+        "prefer the verdict that explains ALL observed evidence, then the "
+        "one that fixes a definition site over one that compensates at a "
+        "flow site. Exception — if a concrete fix already exists but has "
+        "failed twice, run them in SEQUENCE instead: unerr-opus implements "
+        "directly, then unerr-fable reviews the diff against the task. At "
+        "most one escalation round per task; after reconciling, implement "
+        "and finish."
+    ) if escalation_panel else (
+        "Escalate by spawning unerr-opus — ONE Task call. Give it the "
+        "evidence brief — the task text, what you observed, what you tried, "
+        "and ALL candidate approaches — but NOT your preferred hypothesis, "
+        "so its read stays independent. Instruct it to investigate and "
+        "return a one-line root cause plus an exact minimal proposal "
+        "WITHOUT editing files. Implement that proposal, then re-run your "
+        "verification. If the problem is STILL not resolved after that, "
+        "escalate a SECOND time — spawn unerr-fable, and include "
+        "unerr-opus's proposal and exactly why it failed; prefer the "
+        "verdict that explains ALL observed evidence, and a fix at the "
+        "definition site over one that compensates at a flow site. "
+        "Exception — if a concrete fix already exists but has failed "
+        "twice, have unerr-opus implement directly and then unerr-fable "
+        "review the diff against the task. At most two escalation rounds "
+        "per task; after the second, implement and finish."
     )
 
     return (
@@ -199,22 +285,8 @@ def _build_autonomy_prompt(hooks_on: bool) -> str:
         "the problem's symptom is still present when you re-check; (b) you "
         "have edited the same file 3 or more times without reaching a "
         "working fix; (c) you have 2+ candidate approaches and the evidence "
-        "does not decide between them; (d) your change turned a previously-"
-        "passing check red and one rework did not recover it.\n"
-        "Escalate by spawning unerr-opus AND unerr-fable IN PARALLEL (one "
-        "message, two Task calls). Give each the SAME evidence brief — the "
-        "task text, what you observed, what you tried, and ALL candidate "
-        "approaches — but NOT your preferred hypothesis, so their reads "
-        "stay independent. Instruct them to investigate and return a "
-        "one-line root cause plus an exact minimal proposal WITHOUT editing "
-        "files. Reconcile: if they agree, implement it; if they disagree, "
-        "prefer the verdict that explains ALL observed evidence, then the "
-        "one that fixes a definition site over one that compensates at a "
-        "flow site. Exception — if a concrete fix already exists but has "
-        "failed twice, run them in SEQUENCE instead: unerr-opus implements "
-        "directly, then unerr-fable reviews the diff against the task. At "
-        "most one escalation round per task; after reconciling, implement "
-        "and finish." + escalation_gate_note
+        "does not decide between them; (d) " + trigger_d + ".\n"
+        + escalation_action + escalation_gate_note
         + finish_contract
     )
 
@@ -253,37 +325,112 @@ def _find_unerr_tgz(context_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def _hooks_settings_command(remote_dir: str) -> str:
-    """Shell command writing .claude/settings.local.json — byte-identical
-    shape to run-instance.sh's own HARNESS_ON block (step 3.15): PreToolUse
-    deny + PostToolUse record + Stop gate, all pointed at the uploaded
-    cc-harness-hooks.py. Only invoked when HARNESS_HOOKS=1 (see module
-    docstring's cc-harness-hooks.py determination). Never .claude/settings.json
-    — unerr owns that file (written by `unerr install claude-code`); Claude
-    Code UNIONS PreToolUse/PostToolUse/Stop hook arrays from both files, so
-    this only ADDS hooks, never clobbers unerr's own."""
+def _hooks_settings_command(remote_dir: str, hooks_on: bool, profile: str,
+                             hooks_value: str, escalation_panel: bool) -> str:
+    """Shell command writing .claude/settings.local.json + the PreToolUse
+    auto-approve helper script (`allow-all.sh`).
+
+    The AUTO-APPROVE PreToolUse hook is written UNCONDITIONALLY. Root cause
+    (2026-07-20, build-pmars): `--dangerously-skip-permissions` bypasses the
+    permission resolver for the MAIN Claude session ONLY — it does NOT propagate
+    to Task SUB-AGENTS under `claude -p` as root, so a sub-agent's Bash / Read /
+    WebSearch / WebFetch all come back "Permission to use <tool> has been denied"
+    (main-agent Bash = 0 denials, sub-agent Bash = every call denied — identical
+    on claude-code 2.1.212 and 2.1.215, so version-independent). The ON prompt
+    delegates the real work to sub-agents, so this silently zeroed every task.
+    A PreToolUse hook — unlike the flag, settings `defaultMode`, or sub-agent
+    frontmatter `permissionMode`, none of which propagate — IS inherited by
+    sub-agents from settings and fires before the permission resolver on every
+    tool call, so emitting the documented {permissionDecision:"allow"}
+    (code.claude.com/docs/en/hooks) grants the sub-agent's tools. VERIFIED
+    locally: sub-agent denials 11->0, build-pmars reward 0/1 -> 1/1.
+
+    Whenever hooks are on (HARNESS_HOOKS="1" or "generic") the SAME three
+    mechanical gate hooks — PreToolUse deny, PostToolUse record, and the Stop
+    gate (byte-identical wiring to run-instance.sh step 3.15) — are added to
+    the SAME hook arrays; cc-harness-hooks.py itself (not this function)
+    branches its deny/gate rules on the forwarded HARNESS_PROFILE. Claude
+    Code evaluates a `deny` before an `allow`, so a denied edit stays
+    blocked even though the allow-hook matches "*". Never
+    .claude/settings.json — unerr owns that (written by `unerr install
+    claude-code`); Claude Code UNIONS hook arrays across both files, so this
+    only ADDS hooks, never clobbers unerr's own.
+
+    Each gate-hook command is prefixed with an inline `env
+    HARNESS_PROFILE=<profile> HARNESS_HOOKS=<hooks_value>
+    ESCALATION_PANEL=<0|1>` — a Claude Code hook is spawned by the CLI as
+    its OWN subprocess, not inherited from this install() step's Python
+    process, so cc-harness-hooks.py cannot rely on session-env propagation
+    to know which profile's rules (or escalation shape) to apply; the
+    inline prefix pins it deterministically on every invocation. The
+    PreToolUse allow-all hook above is profile-agnostic and stays
+    unprefixed."""
+    # matcher "*" => fire on EVERY tool call; allow-all.sh prints the decision.
+    pretooluse = (
+        '      { "matcher": "*",\n'
+        '        "hooks": [ { "type": "command", "command": "bash '
+        + remote_dir + '/allow-all.sh" } ] }'
+    )
+    posttooluse = ""
+    stop = ""
+    if hooks_on:
+        # Pinned inline so cc-harness-hooks.py's OWN subprocess sees the
+        # right profile regardless of session-env propagation (see this
+        # function's own docstring).
+        escalation_panel_value = "1" if escalation_panel else "0"
+        hook_env_prefix = (
+            f"env HARNESS_PROFILE={profile} HARNESS_HOOKS={hooks_value} "
+            f"ESCALATION_PANEL={escalation_panel_value} "
+        )
+        pretooluse += (
+            ",\n"
+            '      { "matcher": "Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
+            '        "hooks": [ { "type": "command", "command": "'
+            + hook_env_prefix + '$PYBIN '
+            + remote_dir + '/cc-harness-hooks.py deny" } ] }'
+        )
+        posttooluse = (
+            ',\n'
+            '    "PostToolUse": [\n'
+            '      { "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
+            '        "hooks": [ { "type": "command", "command": "'
+            + hook_env_prefix + '$PYBIN '
+            + remote_dir + '/cc-harness-hooks.py record" } ] }\n'
+            "    ]"
+        )
+        stop = (
+            ',\n'
+            '    "Stop": [\n'
+            '      { "hooks": [ { "type": "command", "command": "'
+            + hook_env_prefix + '$PYBIN '
+            + remote_dir + '/cc-harness-hooks.py gate" } ] }\n'
+            "    ]"
+        )
     settings_json = (
         "{\n"
         '  "hooks": {\n'
         '    "PreToolUse": [\n'
-        '      { "matcher": "Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
-        '        "hooks": [ { "type": "command", "command": "$PYBIN '
-        + remote_dir + '/cc-harness-hooks.py deny" } ] }\n'
-        "    ],\n"
-        '    "PostToolUse": [\n'
-        '      { "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
-        '        "hooks": [ { "type": "command", "command": "$PYBIN '
-        + remote_dir + '/cc-harness-hooks.py record" } ] }\n'
-        "    ],\n"
-        '    "Stop": [\n'
-        '      { "hooks": [ { "type": "command", "command": "$PYBIN '
-        + remote_dir + '/cc-harness-hooks.py gate" } ] }\n'
-        "    ]\n"
+        + pretooluse + "\n"
+        "    ]"
+        + posttooluse + stop + "\n"
         "  }\n"
         "}\n"
     )
+    # Quoted heredoc keeps the JSON literal; settings.local.json uses an
+    # unquoted heredoc so $PYBIN expands (only referenced on the hooks_on path).
+    approve_sh = (
+        "#!/bin/bash\n"
+        "cat <<'JSON'\n"
+        '{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+        '"permissionDecision":"allow",'
+        '"permissionDecisionReason":"unerr benchmark sandbox auto-approve"}}\n'
+        "JSON\n"
+        "exit 0\n"
+    )
     return (
         'PYBIN="$(command -v python3 || command -v python || echo python3)"; '
+        "cat > " + remote_dir + "/allow-all.sh <<'SH'\n" + approve_sh + "SH\n"
+        "chmod +x " + remote_dir + "/allow-all.sh; "
         "mkdir -p .claude && cat > .claude/settings.local.json <<EOF\n"
         + settings_json + "EOF"
     )
@@ -390,8 +537,25 @@ class ClaudeUnerrAgent(ClaudeCode):
         return f"{flags} --dangerously-skip-permissions".strip()
 
     def __init__(self, logs_dir, *args, **kwargs):
-        self._hooks_on = os.environ.get("HARNESS_HOOKS") == "1"
-        prompt = _build_autonomy_prompt(self._hooks_on)
+        # HARNESS_HOOKS: unset/"0" -> off; "1" -> on, profile from
+        # HARNESS_PROFILE (default "swe"); "generic" -> on, profile forced
+        # "generic" regardless of HARNESS_PROFILE. self._hooks_env_value is
+        # the raw string, re-forwarded verbatim to the hook processes
+        # themselves (see _hooks_settings_command) since a Claude Code hook
+        # subprocess isn't guaranteed to inherit this session's env.
+        self._hooks_env_value = os.environ.get("HARNESS_HOOKS", "")
+        self._hooks_on = self._hooks_env_value in ("1", "generic")
+        self._hooks_profile = (
+            "generic" if self._hooks_env_value == "generic"
+            else os.environ.get("HARNESS_PROFILE", "swe")
+        )
+        # ESCALATION_PANEL is orthogonal to HARNESS_PROFILE — it toggles
+        # ladder-vs-panel escalation shape in BOTH profiles. Default (unset/
+        # not "1") is the ladder; only "1" opts back into the parallel panel
+        # (see _build_autonomy_prompt's docstring for why the default flipped).
+        self._escalation_panel = os.environ.get("ESCALATION_PANEL", "") == "1"
+        prompt = _build_autonomy_prompt(
+            self._hooks_on, self._hooks_profile, self._escalation_panel)
         existing = kwargs.get("append_system_prompt")
         kwargs["append_system_prompt"] = (
             f"{existing}\n\n{prompt}" if existing else prompt
@@ -457,7 +621,8 @@ class ClaudeUnerrAgent(ClaudeCode):
             hooks_src = context_dir / "cc-harness-hooks.py"
             if not hooks_src.is_file():
                 raise RuntimeError(
-                    f"HARNESS_HOOKS=1 but cc-harness-hooks.py is missing under {context_dir}")
+                    f"HARNESS_HOOKS={self._hooks_env_value!r} but "
+                    f"cc-harness-hooks.py is missing under {context_dir}")
             await environment.upload_file(
                 source_path=hooks_src, target_path=f"{remote}/cc-harness-hooks.py")
 
@@ -545,7 +710,16 @@ class ClaudeUnerrAgent(ClaudeCode):
                 f"cp -f {remote}/agents/unerr-*.md .claude/agents/ 2>/dev/null || true",
             )
 
-        # Mechanical finish-gate hooks — gated behind HARNESS_HOOKS (see
-        # module docstring's cc-harness-hooks.py determination).
-        if self._hooks_on:
-            await self._lenient_exec(environment, _hooks_settings_command(remote))
+        # Settings.local.json: the PreToolUse auto-approve hook that lets Task
+        # SUB-AGENTS run tools under -p/root is written ALWAYS (--dangerously-
+        # skip-permissions reaches the main session only — see
+        # _hooks_settings_command). The mechanical deny + record + Stop gate
+        # ride in the SAME file whenever hooks are on (HARNESS_HOOKS="1" or
+        # "generic"); profile/hooks_value/escalation_panel are re-forwarded
+        # inline on each gate-hook command (see _hooks_settings_command's own
+        # docstring).
+        await self._lenient_exec(
+            environment,
+            _hooks_settings_command(
+                remote, self._hooks_on, self._hooks_profile,
+                self._hooks_env_value, self._escalation_panel))

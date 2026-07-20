@@ -38,6 +38,10 @@ fc_fly_token() {
 # verified when omitted (back-compat with older single-arg callers). ──
 fc_default_app() {  # <arm> [benchmark]
   local arm="${1:-econ}" bench="${2:-verified}"
+  # Normalize legacy arm aliases (SAME mapping as run-distributed.sh/bench.sh) so a
+  # monitor keyed on a legacy name resolves the canonical app: claude -> claude-open,
+  # claude-real -> claude-native.
+  case "$arm" in claude) arm="claude-open" ;; claude-real) arm="claude-native" ;; esac
   bench="${bench//_/-}"
   # fly's abuse filter BLOCKS app names containing "verified" (phishing target),
   # so the app slug shortens it: verified -> verif, live-verified -> live-verif.
@@ -46,10 +50,24 @@ fc_default_app() {  # <arm> [benchmark]
 }
 
 # ── machine ids for a fleet, optionally role-scoped (same query as run-distributed.sh fleet_ids) ──
-# metadata is only in the --json view, so we parse that. A flyctl error -> empty (caller decides).
+# metadata is only in the --json view, so we parse that.
+#
+# EXIT CODES — a caller MUST be able to tell "fleet is gone" from "we could not ask":
+#   0  query succeeded; stdout = matching machine ids (possibly NONE => fleet really is gone)
+#   3  the fly API call FAILED (auth/5xx/timeout) => fleet state is UNKNOWN, not empty
+# Previously this swallowed flyctl's stderr and returned empty on failure, so a fly
+# control-plane outage (e.g. GraphQL 503) was indistinguishable from a torn-down
+# fleet — and status.sh then asserted "torn down, or not prepared" about a live run.
+# The last error text is left in $FC_LAST_ERR_FILE for the caller to surface.
+FC_LAST_ERR_FILE="${TMPDIR:-/tmp}/fc-last-error.$$"
 fc_machines() {  # <app> <label> [role]
   local app="$1" label="$2" role="${3:-}"
-  flyctl machines list -a "$app" --json 2>/dev/null | "$PY_HOST" -c '
+  local raw rc
+  raw="$(flyctl machines list -a "$app" --json 2>"$FC_LAST_ERR_FILE")"; rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$raw" ]; then
+    return 3
+  fi
+  printf '%s' "$raw" | "$PY_HOST" -c '
 import sys, json
 role, label = sys.argv[1], sys.argv[2]
 try:
@@ -66,8 +84,20 @@ for m in ms:
 ' "$role" "$label"
 }
 
+# Propagates fc_machines' exit code (3 = fly API unreachable => state UNKNOWN).
+# Deliberately NOT piped into `head` directly: a pipeline's exit status is the LAST
+# command's, which would mask the API-failure code behind head's success.
 fc_coord() {  # <app> <label>
-  fc_machines "$1" "$2" coordinator | head -1
+  local out rc
+  out="$(fc_machines "$1" "$2" coordinator)"; rc=$?
+  [ "$rc" -ne 0 ] && return "$rc"
+  printf '%s\n' "$out" | head -1
+}
+
+# Human-readable reason for the last fc_machines failure (empty if none).
+fc_last_error() {
+  [ -f "$FC_LAST_ERR_FILE" ] || return 0
+  tr '\n' ' ' <"$FC_LAST_ERR_FILE" | sed 's/  */ /g' | cut -c1-200
 }
 
 # ── /status probe: curl INSIDE the coordinator via ssh (host is off 6PN) — verbatim from run-distributed.sh poll_status ──

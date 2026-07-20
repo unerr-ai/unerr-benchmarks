@@ -4,7 +4,9 @@ A work-stealing fleet that runs a coding-agent benchmark across N fly.io machine
 parallel instead of one machine serially. Full design in [`PLAN.md`](./PLAN.md) — this
 is the concise operator doc: launch, monitor, pull, teardown.
 
-Two independent axes: **`ARM`** picks the agent (`econ` | `claude` | `claude-real`), **`BENCHMARK`** picks the
+Two independent axes: **`ARM`** picks the agent (`econ` | `claude-<mix>` | `claude-native` — see
+[Arm naming scheme](#arm-naming-scheme-claude-mix) below; `claude`/`claude-real` are still-accepted
+legacy aliases), **`BENCHMARK`** picks the
 dataset (`verified` | `lite` | `pro` | `terminal` | `live_verified`, default `verified`). §1–§7 below describe a
 single fleet (the historical SWE-bench Verified + econ path); **[§8](#8-other-benchmarks--the-matrix-launcher)
 is the multi-benchmark + matrix layer** — run any subset of arm×benchmark combos as independent
@@ -18,17 +20,17 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
   `organization your-fly-org not found`. **App is per `ARM × BENCHMARK`**: `swebench-dist-<arm>-<slug>`,
   slug = benchmark key with `_`→`-` and `verified`→`verif` (fly's abuse filter blocks app names
   containing "verified" — a common phishing target), e.g. `live_verified` →
-  `swebench-dist-econ-live-verif`, `swebench-dist-claude-real-verif` — each combo gets its own app, auto-created at prepare; runs
+  `swebench-dist-econ-live-verif`, `swebench-dist-claude-native-verif` — each combo gets its own app, auto-created at prepare; runs
   within one app are further scoped by `fleet=<LABEL>` machine metadata, not a separate app per run.
-- **Authentication for `claude-real` arm.** Set `CLAUDE_CODE_OAUTH_TOKEN` to your Claude Code subscription token (auto-loaded from repo-root `.env.local` by the launcher if present, else read from the environment). This token is never printed. The `claude` arm (open-weight ensemble) uses `ANTHROPIC_BASE_URL` redirect to the LiteLLM gateway; `claude-real` connects directly to Claude Code without any gateway or environment overrides.
+- **Authentication for the `claude-native` arm.** Set `CLAUDE_CODE_OAUTH_TOKEN` to your Claude Code subscription token (auto-loaded from repo-root `.env.local` by the launcher if present, else read from the environment). This token is never printed. Every `claude-<mix>` arm (gateway ensembles — see [Arm naming scheme](#arm-naming-scheme-claude-mix)) uses `ANTHROPIC_BASE_URL` redirect to the LiteLLM gateway; `claude-native` connects directly to Claude Code without any gateway or environment overrides.
   `APP=` overrides the derived name.
 - **Web search: `ARM=econ` = Exa ON by default** (the econ agent ships Exa web search default-on
   across all tiers/personas), so **every econ benchmark run is a web-on result class**. The launcher
   sources `EXA_API_KEY` from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`,
   and injects it into workers. Set **`WEBSEARCH=0` to force a clean, baseline-comparable (no-web)**
   econ run (SWE-bench fixes are public on GitHub → web search = answer-lookup, so never compare a
-  web-on run 1:1 against a no-web baseline or submit it). `ARM=claude` and `ARM=claude-real` stay STRICT opt-in
-  (`WEBSEARCH=1` → Tavily for both arms).
+  web-on run 1:1 against a no-web baseline or submit it). `ARM=claude-<mix>` and `ARM=claude-native` stay STRICT
+  opt-in (`WEBSEARCH=1` → Tavily for every claude arm).
 - **econ conductor = minimax-m3** for the econ arm (matches the single-machine baseline config).
 - **`LABEL` MUST be unique per run.** It names the fleet metadata (`fleet=<LABEL>`), the coordinator's
   `RUN_ID`, the coordinator volume (`dist_coord_<LABEL>`), and the local out-dir
@@ -36,6 +38,51 @@ fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everyth
 - **Workers are volumeless.** DinD's data-root lives on the ephemeral rootfs (no per-worker volume
   to provision/teardown). Set `ROOTFS_GB` to enlarge that rootfs if env-image unpack is slow — see
   the calibration note below.
+
+### Arm naming scheme (`claude-<mix>`)
+The `claude` arm family (2026-07-20) uses a consistent `claude-<mix>` scheme so multiple model
+ensembles can run side by side — including a GPT-5.6 arm — without colliding. `ARM` takes one of:
+
+| Arm | What it runs | Auth / routing |
+|---|---|---|
+| `econ` | open-weight ensemble compiled into econ/opencode — unchanged, single arm, no on/off | econ's own gateway wiring |
+| `claude-gpt` | Claude Code + unerr harness, GPT-5.6 model ensemble | `econ-litellm` gateway (`ANTHROPIC_BASE_URL` redirect) |
+| `claude-open` | Claude Code + unerr harness, open-weight model ensemble | `econ-litellm` gateway (`ANTHROPIC_BASE_URL` redirect) |
+| `claude-native` | Claude Code + unerr harness on real Anthropic models | `CLAUDE_CODE_OAUTH_TOKEN` (OAuth), no gateway |
+
+**Legacy aliases** — still accepted, auto-normalized by `run-distributed.sh` and `bench.sh`: `claude` →
+`claude-open`; `claude-real` → `claude-native`.
+
+**Model maps** (the four unerr tiers → gateway model id, per mix):
+
+| Tier | `claude-gpt` | `claude-open` |
+|---|---|---|
+| haiku | `openai/gpt-5.6-luna` | `openai/gpt-oss-120b` |
+| sonnet (conductor / main-loop) | `openai/gpt-5.6-terra` | `minimax/minimax-m3` |
+| opus | `openai/gpt-5.6-sol` | `deepseek/deepseek-v4-pro` |
+| fable | `openai/gpt-5.6-sol-high` | `z-ai/glm-5.2` |
+
+The map lives in ONE place — a bash `case` on the mix suffix in
+[`run-distributed.sh`](./run-distributed.sh). `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`
+still override per-run on top of it. An unknown mix with no env override aborts the run (fail-loud)
+rather than silently falling back to a default.
+
+**Adding a new model mix** — no other code changes needed:
+1. Pick a suffix (the operator provides it), e.g. `claude-foo`.
+2. Add ONE `case` arm to the model map in `run-distributed.sh` with the four tier model ids.
+3. Document it in the tables above.
+
+The runner treats every `claude-<mix>` uniformly as a gateway arm and reads its map from env, so a new
+mix never touches the fleet/worker/coordinator code.
+
+**Shared image, separate apps.** All `claude-*` arms (every mix plus `claude-native`) share ONE toolbox
+image (docker tag `unerr-claude-toolbox`) — the image is identical, the mix is runtime env, so switching
+mixes needs no toolbox rebuild. Each arm still gets its own per-combo fly app
+(`swebench-dist-<arm>-<slug>`, above) and its own Tigris archive taxonomy segment (`.../<arm>/...`,
+§9), so e.g. `claude-gpt` and `claude-open` runs never collide.
+
+**Cost.** Gateway arms (`claude-gpt`, `claude-open`) report real LiteLLM gateway spend, same as `econ`;
+`claude-native` reports the Anthropic-native cost stamp (source tag `"claude-native"`) — see §3.
 
 ## 1. Architecture (summary — see `PLAN.md` §1 for the full rationale)
 One small **coordinator** machine (SQLite work queue + aiohttp HTTP server on 6PN) plus N **worker**
@@ -62,18 +109,22 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   back to 50 (**fly caps this at 50 GB**; higher values are clamped down to 50 too); set
   `ROOTFS_GB=0` to opt out entirely (fly's 8 GB default rootfs, no `--rootfs-size` flag — the
   old-flyctl fallback) — see the calibration note below.
-- **Long tasks** (multi-hour resolves): the harness enforces nothing task-level anymore — no
-  per-instance wall-clock ceiling (difficulty tiers deleted), no stall/progress watchdog, no
-  timeout wrapper around the resolve call; the coding agent owns its own watchdog/thrash
-  detection. Liveness needs no tuning: the worker heartbeats every 30 s and the coordinator
-  only requeues a lease after `HEARTBEAT_TIMEOUT` (default `300` s) of silence, so a
-  multi-hour resolve stays leased for its whole duration. The remaining backstops are all
-  fleet-level, not task-level: `MAXWAIT` (default `864000` = 10 days, the *host's* poll
-  ceiling — if it's hit the fleet keeps running and self-stops on drain, you just pull +
-  destroy manually, §4/§5) and `NO_PROGRESS_GIVEUP` (the coordinator's wedge detector — gives
-  up early only when nothing is leased and nothing completes). A grade-side subprocess cap
-  (~24h, from `benchmarks.py`'s `timeout` descriptor field) still bounds the grader itself —
-  eval infra, not the agent — and never binds in practice.
+- **Long tasks** (multi-hour resolves): the harness enforces a **high per-task backstop** to
+  prevent wedged agents from holding workers forever — two env knobs (defaults): `TASK_CEILING_S=14400`
+  (4h hard wall-clock ceiling) and `TASK_IDLE_S=2700` (45-min no-output idle watchdog). These are
+  a HIGH backstop, NOT a tight limit — the coding agent still owns its own fine-grained
+  watchdog/thrash detection. The resolve subprocess is enforced via `Worker._wait_with_backstop`
+  (SIGKILL the process group on either timeout); Terminal tasks via `_bump_agent_timeout()` raises
+  Harbor's per-task `[agent] timeout_sec` up to TASK_CEILING_S before run, preventing Harbor's
+  stock 900s limit from killing legitimate long tasks. Liveness needs no tuning: the worker heartbeats
+  every 30 s and the coordinator only requeues a lease after `HEARTBEAT_TIMEOUT` (default `300` s)
+  of silence, so a multi-hour resolve (including the idle-watchdog pause) stays leased for its
+  duration. The remaining backstops are all fleet-level, not task-level: `MAXWAIT` (default `864000`
+  = 10 days, the *host's* poll ceiling — if it's hit the fleet keeps running and self-stops on
+  drain, you just pull + destroy manually, §4/§5) and `NO_PROGRESS_GIVEUP` (the coordinator's wedge
+  detector — gives up early only when nothing is leased and nothing completes). A grade-side
+  subprocess cap (~24h, from `benchmarks.py`'s `timeout` descriptor field) still bounds the grader
+  itself — eval infra, not the agent — and never binds in practice.
 - **Completion signal is stream-independent.** The host detects "done" two ways: the `bundle_ready`
   beacon in the streamed `flyctl logs`, AND a durable `/data/BUNDLE_READY` sentinel the coordinator
   writes *after* the Tigris archive (race-safe — same moment as the beacon), polled over the reliable
@@ -196,8 +247,8 @@ the launcher died, or you `Ctrl-C`'d it — use the two read-only monitor script
 (`resolved/total (NN%)`) and **retries** (`reatt`=re-attempts so far, `up4retry`=failed rows the fleet
 reruns at drain, `dead`=permanently failed). `--cost` adds a **cost + per-tier breakdown** — total `$`,
 `turns`, tokens, and a conductor/oracle/reasoner/executor split (`$`, %-share, in/out tokens, calls,
-instance-count). **Cost source differs by arm:** econ and claude report real LiteLLM gateway spend
-(from `litellm_spend_logs`); `claude-real` (Anthropic real models, no gateway) reports **claude-native cost**
+instance-count). **Cost source differs by arm:** econ and every `claude-<mix>` report real LiteLLM gateway spend
+(from `litellm_spend_logs`); `claude-native` (Anthropic real models, no gateway) reports **claude-native cost**
 (from Claude Code's own `total_cost_usd`) with source tag `"claude-native"` and is displayed as a separate line
 ("claude-native (Anthropic $, NOT litellm spend)") in the multi-fleet view — never LiteLLM, always Anthropic billing.
 A multi-fleet view folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs). `debug-workers.sh`
@@ -205,6 +256,21 @@ additionally pulls each worker machine's `flyctl logs` and flags (`»»`) the bo
 (dockerd up, toolbox build, `claimed`, `resolve (ceiling=… tier=…)`, `Instances resolved`, `dead`,
 `ERROR`). Reach for `status.sh` first ("where is every combo, and what's it costing?"), then
 `debug-workers.sh` when one looks stuck / a patch came back empty.
+
+**Three outcomes per fleet, not two.** Both scripts distinguish a fly-API failure from a genuinely
+absent fleet — they used to look identical. Per fleet you'll see one of: a normal status line (up,
+armed or WARM); `no coordinator (torn down, or not prepared on <app>)` — the fly API answered and
+there really is no coordinator; or `UNKNOWN — fly API unreachable (<error text>)` — the API call
+itself failed (bad/expired token, 5xx, timeout), so fleet state simply could not be determined.
+**`UNKNOWN` is NOT evidence your run died.** The coordinator and workers talk to each other over fly's
+internal 6PN network and keep running normally while your local fly control-plane API/token is broken
+— check the launcher's own run log (its live `progress:` lines, or `out/dist-<LABEL>/coord.log`, §7)
+before concluding anything. The usual fix is `flyctl auth login`; an error mentioning "missing
+third-party discharge tokens" or "no verified tokens" means the local token has expired. Under the
+hood, `fc_machines`/`fc_coord` (`tools/fleet-common.sh`) return **exit code 3** on an API failure (exit
+0 with no output is what "fleet really is gone" looks like) — any new tooling layered on
+`fleet-common.sh` should check for `3` and propagate the same distinction rather than reintroducing the
+silent-blindness bug.
 
 Both are thin wrappers over the underlying mechanism — find the coordinator by metadata and curl its
 `/status` on 6PN (the same call the launcher makes internally,
@@ -230,7 +296,7 @@ tools/pull_results.sh LABEL [APP]     # sftp-get /data/bundle.tgz -> out/dist-<L
 One-shot pull + extract that does **not** tear the fleet down. `pull_results.sh`'s built-in `APP` default
 (`swebench-agent-dist`) predates the per-combo app scheme (§0) — always pass the combo's app explicitly
 as the second arg: `swebench-dist-<arm>-<slug>` (e.g. `swebench-dist-econ-verif`,
-`swebench-dist-claude-pro`). Overwrite-safe (the local
+`swebench-dist-claude-open-pro`). Overwrite-safe (the local
 `bundle.tgz` is `rm -f`'d before the sftp get). `run-distributed.sh` already does this automatically
 once it sees the `bundle_ready` beacon in the coordinator's logs — this is the manual/safety-net path
 when you want the bundle before teardown (e.g. a `KEEP=1` debug run) or the host process died first.
@@ -323,17 +389,21 @@ Set `BENCHMARK` on any `run-distributed.sh` invocation (default `verified`). It 
 - **Two flows.** `resolve_then_grade` (verified/lite/pro/live_verified) runs the arm → `preds.json` → grade, and
   yields a leaderboard-submittable patch. `harness_run` (terminal) runs the agent *inside* the task
   container and grades with pytest — **there is no git patch**, so there is no submission for it.
-- **The harness enforces no task-level limits.** There is no per-instance wall-clock ceiling, no
-  difficulty-tier timeout, no stall/progress watchdog, and no timeout wrapper around the resolve
-  call — the coding agent owns its own watchdog/thrash detection. Each descriptor's `timeout`
-  field (default `86400` s, still env-overridable: `PER_INSTANCE_TIMEOUT` for
-  verified/lite/live_verified, `PRO_PER_INSTANCE_TIMEOUT` for pro, `TERMINAL_PER_INSTANCE_TIMEOUT`
-  for terminal) is a **grade-side subprocess cap only** — it bounds the grader (swebench
-  `run_evaluation --timeout`, `grade_pro`/`grade_live`, or terminal's outer-wrapper fallback), never
-  the agent's resolve. It never binds in practice. What DOES still protect the fleet: coordinator
-  `HEARTBEAT_TIMEOUT` (dead-worker-VM detection, not slow tasks), fleet backstops `MAXWAIT` (10-day
-  host poll ceiling) + `NO_PROGRESS_GIVEUP` (wedge detection), and — for terminal only — Harbor's own
-  per-task `task.toml` limit, enforced internally as that benchmark's real scoring rule.
+- **Per-task backstop** (as of 2026-07-20): `TASK_CEILING_S` (default `14400` s = 4h) and
+  `TASK_IDLE_S` (default `2700` s = 45min no-output) enforce a high backstop per-task to prevent
+  wedged agents from holding workers forever. SWE-bench resolve (`verify`/`lite`/`pro`/`live_verified`)
+  via `Worker._wait_with_backstop()` enforces both via process group SIGKILL; Terminal tasks via
+  `_bump_agent_timeout()` raises Harbor's per-task `[agent] timeout_sec` up to `TASK_CEILING_S`,
+  superseding Harbor's 900s stock limit so legitimate long tasks aren't killed mid-work. These are
+  a HIGH backstop — the coding agent still owns its own fine-grained watchdog/thrash detection; the
+  idle watchdog fires only on 45-min silence, the ceiling only at 4h. Each descriptor's `timeout`
+  field (default `86400` s, still env-overridable: `PER_INSTANCE_TIMEOUT` for verified/lite/live_verified,
+  `PRO_PER_INSTANCE_TIMEOUT` for pro, `TERMINAL_PER_INSTANCE_TIMEOUT` for terminal) is a **grade-side
+  subprocess cap only** — it bounds the grader (swebench `run_evaluation --timeout`, `grade_pro`/`grade_live`,
+  or terminal's outer-wrapper fallback), never the agent's resolve. It never binds in practice. What
+  DOES protect the fleet: coordinator `HEARTBEAT_TIMEOUT` (dead-worker-VM detection), fleet backstops
+  `MAXWAIT` (10-day host poll ceiling) + `NO_PROGRESS_GIVEUP` (wedge detection), and the per-task
+  ceiling + idle watchdog above.
 - **Failure-rerun (`MAX_FAILURE_RERUN`, default 1).** When the fresh queue drains, the coordinator
   gives each `failed` instance up to this many extra tries; a rerun's success overwrites the earlier
   failure in place (the bundle shows the rerun outcome). Set `0` to disable (exhausted attempts
@@ -379,8 +449,8 @@ confusingly named `swebench` v1.0.0 and a shared-venv `pip install -e .` would *
 `swebench>=4.1` that Verified/Pro grading depends on; and its `launch/` git submodule
 (`microsoft/RepoLaunch`) is init'd **recursively** (a plain clone leaves it empty →
 `ModuleNotFoundError: launch.core` at grade time). `grade_live.py` shells `/work/.venv-live/bin/python`.
-`SUITE=live_verified-mini` is the 5-id smoke set. The arm axis is orthogonal — both `econ` and
-`claude` run it.
+`SUITE=live_verified-mini` is the 5-id smoke set. The arm axis is orthogonal — `econ`, every
+`claude-<mix>`, and `claude-native` all run it.
 
 **Disk:** `live_verified`'s per-instance footprint (the large `starryzhang/*` eval images plus
 `grade_live` cloning/extracting into the worker's OUTER rootfs) overflows fly's 8 GB default rootfs
@@ -408,46 +478,53 @@ lowercase keys the jsonl doesn't have).
 
 **Terminal-Bench 2.1** — Harbor registry dataset `terminal-bench/terminal-bench-2-1` (89 tasks; `2.0`/`2.1` are distinct dataset *names*, not `@version` tags), vendored at build via `harbor dataset download`, fused run+grade, no per-instance registry:
 ```bash
-MACHINES=2 ARM=claude LABEL=tb-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
-MACHINES=2 ARM=claude-real LABEL=tb-real-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
+MACHINES=2 ARM=claude-open LABEL=tb-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
+MACHINES=2 ARM=claude-native LABEL=tb-native-smoke BENCHMARK=terminal SUITE=smoke ./run-distributed.sh run
 ```
 Ids are the vendored `terminal-bench/tasks/` directory names. Each task's image is built at run time
 from its own Dockerfile inside the worker's DinD — nothing to mirror. `tools/harness_terminal.py`
 shells `harbor run --model <m> --env docker` and grades on the pytest end-state; the result rides
 `/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`, no submission).
 
-**Agent selection.** The `econ` arm shells the opencode agent as before (no change). The `claude`
-and `claude-real` arms run a **custom Harbor agent** (`harbor run --agent-import-path harbor_agents:ClaudeUnerrAgent`,
+**Agent selection.** The `econ` arm shells the opencode agent as before (no change). Every `claude-<mix>`
+arm and `claude-native` run a **custom Harbor agent** (`harbor run --agent-import-path harbor_agents:ClaudeUnerrAgent`,
 module: `e2e/distributed/tools/harbor_agents.py`, pinned against `harbor==0.20.0`) that subclasses
 Harbor's own `claude_code.ClaudeCode` and stages the **FULL unerr harness** inside each task container:
 Claude Code install (Harbor's own installer), unerr CLI from vendored tgz (nvm node), `unerr install claude-code`,
 unerr MCP server via Harbor's mcp_servers mechanism, shipped `.claude/agents/unerr-*.md` sub-agents
 (delegation/escalation ladder), and the appended ON operator prompt (TRACK/FIX-DISCIPLINE/DELEGATION/ESCALATION
-always; hook-dependent sections only with hooks on). **Before this change**, both claude arms ran
+always; hook-dependent sections only with hooks on). **Before this change**, all claude arms ran
 Harbor's **bare first-party** `claude-code` agent (no unerr/harness) — results from before this change
 are bare-Claude baselines.
 
 **Control knobs** (read by `harness_terminal.py`; `run-distributed.sh` forwards only when set):
-`TERMINAL_STOCK_AGENT=1` reverts both claude arms to the bare first-party agent (the no-harness baseline
-control). `HARNESS_HOOKS=1` opts into the `cc-harness-hooks` finish-gate (default OFF for terminal because
-its deny/gate rules are SWE-bench-shaped, not terminal-shaped).
-`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL` — forwarded into the claude arm's task containers
-when set (tier aliases for gateway ensembles, e.g. the GPT-5.6 map). **Cost** on terminal for `claude-real`:
-`meta.cost` is stamped `source="claude-native"` with the agent's own reported USD (no LiteLLM vk mint),
-consistent with the resolve flow; the `claude` (open-weights) arm still uses LiteLLM spend.
+`TERMINAL_STOCK_AGENT=1` reverts every claude arm to the bare first-party agent (the no-harness baseline
+control). `HARNESS_HOOKS` enables the finish-gate on terminal combos (unset/"0" = OFF — the terminal default; "1" =
+ON with profile from `HARNESS_PROFILE`, default "swe"; "generic" = ON with the generic profile). SWE-bench
+combos are unaffected by this knob — their flow (`run-instance.sh`) hard-enables the hooks with profile
+"swe" (byte-identical legacy behavior). Terminal combos require `HARNESS_HOOKS=generic` to enable
+terminal-shaped gates (records Bash outcomes + agent-declared verification via `# unerr:verify` marker,
+gates on marked-check success/regression/thrash, never on non-existent test files). See [HARBOR_CLAUDE_CODE.md
+§3.5](./HARBOR_CLAUDE_CODE.md) for gate semantics and the verification marker protocol, and
+[HARNESS_PROFILES.md](./HARNESS_PROFILES.md) for the plain-language rationale + generic-vs-swe policy.
+`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL` — forwarded into each `claude-<mix>` arm's task
+containers when set (tier aliases for gateway ensembles — this is how the `claude-gpt`/`claude-open`
+model maps in [Arm naming scheme](#arm-naming-scheme-claude-mix) get applied). **Cost** on terminal for
+`claude-native`: `meta.cost` is stamped `source="claude-native"` with the agent's own reported USD (no
+LiteLLM vk mint), consistent with the resolve flow; the `claude-<mix>` gateway arms still use LiteLLM spend.
 
 ### 8.3 Fire a matrix: `bench.sh`
 Run any subset of `arm:benchmark` combos as **independent, LABEL-scoped fleets**, in parallel
 (default) or `--seq`. Each combo is its own coordinator + workers.
 ```bash
 # explicit combos (3 independent fleets, in parallel):
-./bench.sh run econ:verified claude:pro claude-real:verified
+./bench.sh run econ:verified claude-open:pro claude-native:verified
 
 # cartesian product (3 arms × 3 benchmarks = 9 fleets):
-./bench.sh run --arms econ,claude,claude-real --benches verified,pro,terminal --matrix july16
+./bench.sh run --arms econ,claude-open,claude-native --benches verified,pro,terminal --matrix july16
 
 # preview only — resolves every combo's app/label/dataset, makes NO fly calls:
-PLAN_ONLY=1 ./bench.sh run --arms econ,claude,claude-real --benches verified,pro,terminal
+PLAN_ONLY=1 ./bench.sh run --arms econ,claude-open,claude-native --benches verified,pro,terminal
 ```
 - **Modes:** `run` = full one-shot per combo (build+seed+create+arm+poll+pull+teardown — this is
   run-distributed.sh's default no-subcommand mode); `prepare` = build + create each fleet WARM
@@ -495,10 +572,10 @@ Warm the fleets before the GPU meter starts, so you only pay for the GPU while w
 resolving:
 ```bash
 M=july16
-./bench.sh prepare --arms econ,claude --benches verified,pro,terminal --matrix $M   # warm, no GPU yet
+./bench.sh prepare --arms econ,claude-open --benches verified,pro,terminal --matrix $M   # warm, no GPU yet
 # ... raise your dedicated GPUs on Fireworks, then route to them:
 ./gpu-flip.sh --conductor <id> --oracle <id> --reasoner <id>
-./bench.sh start   --arms econ,claude --benches verified,pro,terminal --matrix $M   # arm gates → poll → pull → teardown
+./bench.sh start   --arms econ,claude-open --benches verified,pro,terminal --matrix $M   # arm gates → poll → pull → teardown
 ./download-all.sh --matrix $M --submission          # re-summarize every bundle + traces (+ submissions)
 ./gpu-flip.sh --serverless                          # revert the gateway
 ```

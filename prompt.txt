@@ -8,10 +8,16 @@ human go-ahead gate between preparation and execution.
 --------------------------------------------------------------------------------
 INPUTS  (ask me for any not given, then echo them back before doing anything)
 --------------------------------------------------------------------------------
-  ARM        = econ | claude | claude-real           (required)
-               econ = open-weight ensemble via LiteLLM gateway (research baseline);
-               claude = Claude Code + unerr + open-weight ensemble (cost-efficient);
-               claude-real = Claude Code + unerr + real Anthropic models (production)
+  ARM        = econ | claude-<mix> | claude-native    (required)
+               econ          = open-weight ensemble via LiteLLM gateway (research baseline);
+               claude-gpt    = Claude Code + unerr + GPT-5.6 ensemble (via gateway);
+               claude-open   = Claude Code + unerr + open-weight ensemble (via gateway, cost-efficient);
+               claude-native = Claude Code + unerr + real Anthropic models (OAuth, production).
+               Legacy aliases auto-normalized: claude -> claude-open, claude-real -> claude-native.
+               Add a new gateway mix = one `case` arm in run-distributed.sh's model map
+               (the four ANTHROPIC_DEFAULT_*_MODEL ids) + document it in the READMEs. The
+               <mix> suffix is provided by the operator; every claude-<mix> shares one
+               toolbox image and gets its own fly app + Tigris path.
   BENCHMARK  = verified | pro | terminal | live_verified | lite   (required)
   WORKERS    = <integer>   worker machines — DEFAULT 8 for a full run; use 8 unless I
                explicitly give a different number

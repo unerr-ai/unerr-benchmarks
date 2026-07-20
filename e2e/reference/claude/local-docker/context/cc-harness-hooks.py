@@ -28,6 +28,9 @@ Subcommands (each reads one hook-event JSON object from stdin):
            tests catch regressions the target test misses. Gate E escalates
            only on a VERIFICATION-revealed trigger: a prior R-block or 2+ prior
            V-blocks (the raw edit-count arm was removed — see Phase A findings).
+           ESCALATION_PANEL (unset/"0", default) -> LADDER: unerr-opus alone,
+           then unerr-fable only if the trigger persists past opus; "1" ->
+           PANEL: the original spawn-both-in-parallel single block.
   deny     PreToolUse hook. Reads the state log, evaluates the deny rules in
            a fixed order (T, B, C — first match wins), and on a match prints
            a hookSpecificOutput permissionDecision:"deny" object so Claude
@@ -37,6 +40,18 @@ Subcommands (each reads one hook-event JSON object from stdin):
            blocked -> forced escalation) reads the same state log gate uses —
            it no longer fires on edit-count alone. Every deny also appends a
            "deny" event to the state log.
+
+PROFILE-DRIVEN: HARNESS_HOOKS unset/"0" turns every subcommand into a no-op;
+"1" turns hooks on with the profile from HARNESS_PROFILE (default "swe");
+"generic" turns hooks on with profile "generic" outright. "swe" is the
+original sensor above (TEST_CMD_RE-gated pytest/manage.py-test/tox/bin-test/
+repro* "test" events). "generic" instead ledgers EVERY Bash command as a
+"cmd" event and treats a command as verification only when the agent
+suffixes it with the literal `# unerr:verify` (or `#unerr:verify`) marker —
+the same Z/R/V/E gates and T/B/C deny rules then run against that
+agent-declared signal instead of a fixed test runner, so the harness works
+on a Terminal-Bench-style task with no fixed repo/test layout and a hidden
+grader. T and C are SWE-world rules and are no-ops under "generic".
 
 State lives at $CC_HARNESS_STATE/state.jsonl (default /tmp/cc-harness/),
 deliberately OUTSIDE the repo — it must never appear in the graded
@@ -48,6 +63,7 @@ dir and prints PASS/FAIL per case; exits non-zero on any FAIL. Useful as a
 pre-flight check that the gate logic still does what the docstring says.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -59,6 +75,33 @@ from collections import Counter
 
 STATE_ENV = "CC_HARNESS_STATE"
 DEFAULT_STATE_DIR = "/tmp/cc-harness"
+
+# ── profile resolution ───────────────────────────────────────────────────
+# HARNESS_HOOKS: unset/"0" -> hooks off; "1" -> on, profile from
+# HARNESS_PROFILE (default "swe"); "generic" -> on with profile "generic"
+# outright (self-selecting, HARNESS_PROFILE not consulted). Frozen contract —
+# see _profile(). "swe" is the original SWE-bench sensor (TEST_CMD_RE);
+# "generic" senses agent-DECLARED verification instead (any Bash command
+# suffixed with the `# unerr:verify` marker), so the same gates work on a
+# Terminal-Bench-style task with no fixed repo/test layout and a hidden
+# grader.
+#
+# ESCALATION_PANEL: orthogonal to HARNESS_PROFILE, applies under BOTH "swe"
+# and "generic" — controls Gate E's escalation SHAPE, not whether it fires.
+# unset/"0"/anything else -> LADDER (the default): a mechanical two-rung
+# hand-off, unerr-opus alone first, unerr-fable only if the trigger persists
+# after opus. "1" -> PANEL (the original behavior): spawn unerr-opus AND
+# unerr-fable together as a decorrelated judge panel. See _escalation_panel().
+HARNESS_HOOKS_ENV = "HARNESS_HOOKS"
+HARNESS_PROFILE_ENV = "HARNESS_PROFILE"
+ESCALATION_PANEL_ENV = "ESCALATION_PANEL"
+
+# Literal substrings only (no whitespace-tolerant regex) — both forms are
+# accepted verbatim, then stripped before the command is hashed into a
+# ledger key so a marked/unmarked re-run of the same command still collapses
+# to one ledger entry.
+VERIFY_MARKERS = ("# unerr:verify", "#unerr:verify")
+CMDS_CAP = 200
 
 EDIT_TOOL_RE = re.compile(r"^(Edit|Write|MultiEdit|NotebookEdit|mcp__unerr__file_edit)$")
 TEST_CMD_RE = re.compile(
@@ -91,6 +134,10 @@ NARROW_TEST_RE = re.compile(
 
 OVERALL_CAP = 3
 GATE_CAPS = {"Z": 1, "R": 1, "V": 2, "E": 1}
+# LADDER mode's own Gate-E cap (2 rungs: opus alone, then fable) — separate
+# from GATE_CAPS["E"] (1), which stays PANEL mode's cap (a single
+# spawn-both-in-parallel block). See _escalation_panel()/_gate_e_ladder().
+LADDER_E_CAP = 2
 
 # Deliberately NO bare "test": django/test/ is real product source (TestCase,
 # Client, override_settings live there), and every benchmark repo's actual test
@@ -101,6 +148,98 @@ GATE_CAPS = {"Z": 1, "R": 1, "V": 2, "E": 1}
 TEST_PATH_SEGMENTS = {"tests", "testing"}
 RULE_B_EDIT_THRESHOLD = 5
 RULE_B_DENY_CAP = 2
+
+
+# ── profile ───────────────────────────────────────────────────────────────
+
+def _profile():
+    """Resolve the active profile once, early, from the frozen env contract.
+    HARNESS_HOOKS unset/"0" -> None (hooks off, every subcommand is a
+    no-op); "1" -> on, profile taken from HARNESS_PROFILE (default "swe");
+    "generic" -> on, profile "generic" outright — HARNESS_PROFILE is not
+    consulted in that case, it's self-selecting. An unrecognized
+    HARNESS_PROFILE value under HARNESS_HOOKS=1 falls back to "swe" (the
+    well-tested legacy sensor), never to a state the contract doesn't name."""
+    hh = os.environ.get(HARNESS_HOOKS_ENV) or ""
+    if hh == "generic":
+        return "generic"
+    if hh != "1":
+        return None
+    prof = os.environ.get(HARNESS_PROFILE_ENV) or "swe"
+    return prof if prof == "generic" else "swe"
+
+
+def _escalation_panel():
+    """Resolve Gate E's escalation SHAPE once, early, same style as
+    _profile(). "1" -> True (PANEL: today's single block demanding
+    unerr-opus AND unerr-fable spawned together in parallel, byte-identical
+    message). Unset/"0"/anything else -> False (LADDER, the default: a
+    mechanical two-rung hand-off — unerr-opus alone first, unerr-fable only
+    if the trigger persists after opus). Orthogonal to HARNESS_PROFILE —
+    applies identically under "swe" and "generic"."""
+    return (os.environ.get(ESCALATION_PANEL_ENV) or "") == "1"
+
+
+def _verify_marker_present(cmd):
+    """True if `cmd` carries the agent-declared verify marker in either
+    accepted literal form."""
+    return any(m in cmd for m in VERIFY_MARKERS)
+
+
+def _strip_verify_marker(cmd):
+    """Remove the verify marker (either accepted form) so a marked and an
+    unmarked run of the same underlying command hash to the same ledger
+    key."""
+    out = cmd
+    for m in VERIFY_MARKERS:
+        out = out.replace(m, "")
+    return out
+
+
+def _cmd_key(cmd):
+    """Generic-profile ledger key: first 12 hex chars of the sha1 of the
+    whitespace-collapsed command with the verify marker stripped."""
+    collapsed = " ".join(_strip_verify_marker(cmd).split())
+    return hashlib.sha1(collapsed.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _cmd_ledger(cmd_events):
+    """Fold generic-profile `cmd` events into a per-key ledger: key ->
+    {"ok": <latest run's outcome>, "n": <run count>, "verify": <marker ever
+    seen for this key>, "was_ok": <ever succeeded>}. Insertion-ordered and
+    capped at CMDS_CAP distinct keys — once a NEW key would exceed the cap,
+    the oldest-inserted key is dropped first, so an unbounded agent session
+    can't grow this without bound."""
+    ledger = {}
+    for e in cmd_events:
+        if e.get("ev") != "cmd":
+            continue
+        key = e.get("key", "")
+        entry = ledger.get(key)
+        if entry is None:
+            if len(ledger) >= CMDS_CAP:
+                del ledger[next(iter(ledger))]
+            entry = {"ok": False, "n": 0, "verify": False, "was_ok": False}
+            ledger[key] = entry
+        entry["n"] += 1
+        entry["ok"] = bool(e.get("ok"))
+        if e.get("ok"):
+            entry["was_ok"] = True
+        if e.get("verify"):
+            entry["verify"] = True
+    return ledger
+
+
+def _last_green_verify_ts(cmd_events):
+    """Latest `t` among generic-profile `cmd` events that were BOTH
+    verify-marked and successful, or None if no such event exists yet."""
+    ts = None
+    for e in cmd_events:
+        if e.get("ev") == "cmd" and e.get("verify") and e.get("ok"):
+            t = e.get("t", 0)
+            if ts is None or t > ts:
+                ts = t
+    return ts
 
 
 # ── state I/O ─────────────────────────────────────────────────────────────
@@ -146,9 +285,41 @@ def read_events():
 
 # ── record ────────────────────────────────────────────────────────────────
 
-def build_record_event(data):
+def build_record_event(data, profile="swe"):
     """Pure: hook stdin dict -> event dict to append, or None to record
-    nothing. Split out from cmd_record for direct unit testing."""
+    nothing. Split out from cmd_record for direct unit testing. profile
+    != "generic" runs the ORIGINAL swe-sensor code path unchanged (edit/
+    TEST_CMD_RE-gated Bash/task). profile == "generic" keeps edit- and
+    task-recording identical but LEDGERS EVERY Bash command instead of
+    gating on TEST_CMD_RE: key = first 12 hex of sha1(whitespace-collapsed
+    command, verify marker stripped), ok/verify derived the same way as the
+    swe path derives test pass/fail."""
+    if profile != "generic":
+        tool_name = data.get("tool_name") or ""
+        is_error = bool(data.get("is_error"))
+        tool_input = data.get("tool_input") or {}
+        t = time.time()
+
+        if EDIT_TOOL_RE.match(tool_name):
+            if is_error:
+                return None
+            return {"t": t, "ev": "edit", "file": tool_input.get("file_path") or "?"}
+
+        if tool_name == "Bash":
+            cmd = tool_input.get("command") or ""
+            if not TEST_CMD_RE.search(cmd):
+                return None
+            key = " ".join(cmd.split())[:200]
+            exit_code = data.get("exit_code")
+            ok = (exit_code == 0) if exit_code is not None else (not is_error)
+            return {"t": t, "ev": "test", "key": key, "ok": ok}
+
+        if tool_name == "Task":
+            return {"t": t, "ev": "task", "agent": tool_input.get("subagent_type") or ""}
+
+        return None
+
+    # ── generic profile ──
     tool_name = data.get("tool_name") or ""
     is_error = bool(data.get("is_error"))
     tool_input = data.get("tool_input") or {}
@@ -161,12 +332,13 @@ def build_record_event(data):
 
     if tool_name == "Bash":
         cmd = tool_input.get("command") or ""
-        if not TEST_CMD_RE.search(cmd):
+        if not cmd.strip():
             return None
-        key = " ".join(cmd.split())[:200]
+        key = _cmd_key(cmd)
+        verify = _verify_marker_present(cmd)
         exit_code = data.get("exit_code")
         ok = (exit_code == 0) if exit_code is not None else (not is_error)
-        return {"t": t, "ev": "test", "key": key, "ok": ok}
+        return {"t": t, "ev": "cmd", "key": key, "ok": ok, "verify": verify}
 
     if tool_name == "Task":
         return {"t": t, "ev": "task", "agent": tool_input.get("subagent_type") or ""}
@@ -179,7 +351,10 @@ def cmd_record():
         data = json.load(sys.stdin)
     except Exception:
         return
-    ev = build_record_event(data)
+    profile = _profile()
+    if profile is None:
+        return
+    ev = build_record_event(data, profile)
     if ev is not None:
         append_event(ev)
 
@@ -198,131 +373,299 @@ def is_broad_test(key):
     return not NARROW_TEST_RE.search(k)
 
 
-def evaluate_gate(events):
+def _gate_e_panel(tasks, block_counts):
+    """Gate E, PANEL mode (ESCALATION_PANEL=1): byte-identical to the
+    original single-arm behavior — one block, once, demanding unerr-opus
+    AND unerr-fable spawned together as a decorrelated judge panel. Capped
+    at GATE_CAPS["E"] (1). Shared verbatim by both the "swe" and "generic"
+    evaluate_gate branches — the message never differed between them."""
+    if block_counts.get("E", 0) >= GATE_CAPS["E"]:
+        return None
+    r_already = block_counts.get("R", 0) >= 1
+    v_capped = block_counts.get("V", 0) >= 2
+    escalated = any(t.get("agent") in ("unerr-opus", "unerr-fable") for t in tasks)
+    if not ((r_already or v_capped) and not escalated):
+        return None
+    trigger = (
+        "a previously-passing test was regressed and one rework did not recover it"
+        if r_already
+        else "the verification gate (V) has blocked twice without a green finish"
+    )
+    return (
+        "E",
+        f"Escalation trigger hit: {trigger}. Per the escalation contract: "
+        "spawn unerr-opus and unerr-fable in parallel with the same "
+        "evidence brief (issue text, observations, attempts, all "
+        "candidate sites — not your preferred hypothesis), reconcile "
+        "their verdicts, implement the winner, verify, then finish.",
+    )
+
+
+def _gate_e_ladder(tasks, blocks, block_counts):
+    """Gate E, LADDER mode (the default): two rungs, tracked by WHICH agent
+    ran rather than "any" escalation. Rung 1 fires the same
+    verification-revealed trigger as the panel (a prior R-block, or V capped
+    at 2) once neither unerr-opus nor unerr-fable has run, demanding
+    unerr-opus ALONE — one decorrelated-enough second opinion for a
+    same-family reasoning-effort ladder, not the full panel. Rung 2 fires
+    only once opus has run, fable has not, AND a NEW R- or V-block was
+    recorded strictly AFTER the opus Task event's own timestamp (i.e. the
+    trigger PERSISTED past opus's fix) — demanding unerr-fable, primed with
+    opus's proposal and why it failed. Capped at LADDER_E_CAP (2) total
+    E-blocks; once fable has also run (or the cap is spent), Gate E never
+    blocks again."""
+    if block_counts.get("E", 0) >= LADDER_E_CAP:
+        return None
+
+    fable_used = any(t.get("agent") == "unerr-fable" for t in tasks)
+    if fable_used:
+        return None
+
+    opus_ts = [t.get("t", 0) for t in tasks if t.get("agent") == "unerr-opus"]
+
+    if not opus_ts:
+        r_already = block_counts.get("R", 0) >= 1
+        v_capped = block_counts.get("V", 0) >= 2
+        if not (r_already or v_capped):
+            return None
+        trigger = (
+            "a previously-passing test was regressed and one rework did not recover it"
+            if r_already
+            else "the verification gate (V) has blocked twice without a green finish"
+        )
+        return (
+            "E",
+            f"Escalation trigger hit: {trigger}. Per the escalation contract "
+            "(ladder mode, rung 1): spawn unerr-opus ALONE via the Task tool "
+            "with the evidence brief (task text, what you observed, what you "
+            "tried, all candidate approaches) — but NOT your preferred "
+            "hypothesis. Let it investigate and return a one-line root cause "
+            "plus an exact minimal proposal, WITHOUT editing files. Implement "
+            "that proposal, then re-run verification.",
+        )
+
+    # Rung 2: opus already ran, fable has not — fire only if the trigger
+    # PERSISTED, i.e. a NEW R- or V-block landed strictly after opus's own
+    # Task event was recorded (reuses the existing block-event timestamps —
+    # no separate persistence mechanism needed).
+    first_opus_t = min(opus_ts)
+    new_trouble = any(
+        b.get("gate") in ("R", "V") and b.get("t", 0) > first_opus_t
+        for b in blocks
+    )
+    if not new_trouble:
+        return None
+    return (
+        "E",
+        "Escalation trigger PERSISTED after rung 1: unerr-opus's proposal did "
+        "not resolve it. Per the escalation contract (ladder mode, rung 2): "
+        "spawn unerr-fable via the Task tool. Include unerr-opus's proposal "
+        "AND exactly why it failed. Prefer the verdict that explains ALL "
+        "observed evidence and fixes a definition site over one that "
+        "compensates at a flow site. Implement the winner, verify, then "
+        "finish.",
+    )
+
+
+def evaluate_gate(events, profile="swe"):
     """Pure: full event list -> None (allow) or (gate_letter, reason) to
     block. Evaluated in fixed order Z, R, V, E; first hit wins. The overall
-    cap gates the Z/R/V nudges; Gate E (one-shot escalation) is EXEMPT so it
-    stays deliverable even after the cap is spent."""
+    cap gates the Z/R/V nudges; Gate E is EXEMPT from it so escalation stays
+    deliverable even after the cap is spent — Gate E's OWN cap (one-shot
+    PANEL, or two-rung LADDER) is decided by _escalation_panel(), see
+    _gate_e_panel/_gate_e_ladder. profile != "generic" runs the ORIGINAL
+    swe-sensor gates unchanged (TEST_CMD_RE "test" events); profile ==
+    "generic" senses agent-declared `# unerr:verify` "cmd" events instead —
+    same gate letters, caps, and Gate E handoff, different sensor."""
+    if profile != "generic":
+        edits = [e for e in events if e.get("ev") == "edit"]
+        tests = [e for e in events if e.get("ev") == "test"]
+        tasks = [e for e in events if e.get("ev") == "task"]
+        blocks = [e for e in events if e.get("ev") == "block"]
+
+        block_counts = Counter(b.get("gate") for b in blocks)
+        # The overall cap stops the "keep working" nudges (Z/R/V) from nagging
+        # forever. Gate E — the one-shot terminal escalation — is EXEMPT from it:
+        # OVERALL_CAP (3) == V_cap (2) + E_cap (1), so a run that spends its cap on
+        # Z/V blocks would otherwise short-circuit here and never deliver the
+        # escalation instruction (the verification-revealed trigger unreachable —
+        # adversarial-review finding 1). E is capped independently at 1, so
+        # exempting it stays bounded. NB: any 3-block combo reaching the cap
+        # necessarily includes an R-block or 2 V-blocks, so hitting the cap
+        # guarantees E's trigger is satisfiable.
+        over_cap = len(blocks) >= OVERALL_CAP
+
+        # Gate Z — nothing was ever edited.
+        if not over_cap and block_counts.get("Z", 0) < GATE_CAPS["Z"]:
+            if len(edits) == 0:
+                return (
+                    "Z",
+                    "You have not modified any repository source files, so there is "
+                    "no fix to submit. Edit the source now and implement the most "
+                    "reasonable fix for the issue — do not finish with an empty change.",
+                )
+
+        # Gate R — a verification command that used to pass now fails.
+        if not over_cap and block_counts.get("R", 0) < GATE_CAPS["R"]:
+            by_key = {}
+            for e in tests:
+                by_key.setdefault(e.get("key", ""), []).append(bool(e.get("ok")))
+            regressed_key = None
+            for key, hist in by_key.items():
+                if hist and (not hist[-1]) and (True in hist[:-1]):
+                    regressed_key = key
+                    break
+            if regressed_key is not None:
+                return (
+                    "R",
+                    "A verification command that previously passed now fails: "
+                    f"{regressed_key[:120]}. Your change introduced a regression. "
+                    "Rework your fix so the issue behavior AND the previously-passing "
+                    "tests are green — do not finish while it is red. If one focused "
+                    "rework cannot recover it, escalate per the escalation contract.",
+                )
+
+        # Gate V — edited but never re-verified with a BROAD run afterward. A
+        # narrow single-method green does NOT satisfy V: it leaves sibling tests in
+        # the touched module unrun, which is exactly how a fix that passes its
+        # target test still regresses PASS_TO_PASS tests (django-11885, pylint-7277).
+        # Requiring a broad green forces the module suite to run, so Gate R (above)
+        # can then catch any regression it surfaces.
+        if not over_cap and block_counts.get("V", 0) < GATE_CAPS["V"]:
+            if edits:
+                last_edit_t = max(e.get("t", 0) for e in edits)
+                ok_after = [
+                    e for e in tests
+                    if e.get("ok") and e.get("t", 0) > last_edit_t
+                ]
+                broad_ok_after = any(is_broad_test(e.get("key", "")) for e in ok_after)
+                if not broad_ok_after:
+                    seen = []
+                    for e in edits:
+                        f = e.get("file", "?")
+                        if f not in seen:
+                            seen.append(f)
+                    basenames = ", ".join(os.path.basename(f) for f in seen[:5])
+                    if ok_after:
+                        # verified, but only NARROWLY — demand the full module run.
+                        reason = (
+                            "Your only post-edit verification was NARROW — a single "
+                            "method, a -k filter, or just a reproduction script, not "
+                            "the existing test suite. Run the FULL existing test "
+                            "module/file for each edited file — the whole module, not "
+                            f"just the target test (files edited: {basenames}) — and "
+                            "make ALL of them pass. The sibling tests in that module "
+                            "are what catch regressions your targeted test cannot. "
+                            "Then finish."
+                        )
+                    else:
+                        reason = (
+                            "You edited source files but ran no successful "
+                            "verification afterward. Re-run your reproduction of the "
+                            "issue AND the full existing test module covering each "
+                            f"edited file (files edited: {basenames}); make them "
+                            "pass, then finish."
+                        )
+                    return ("V", reason)
+
+        # Gate E — a VERIFICATION-REVEALED escalation trigger fired but no
+        # unerr-opus/unerr-fable ran (or, in LADDER mode, the trigger persisted
+        # past the first hand-off). Two trigger arms only: a prior R-block (a
+        # regression one rework did not recover) or 2+ prior V-blocks
+        # (verification has capped without a green finish). The old
+        # raw-edit-count arm (a "hot" 3+-edited file) is deliberately GONE:
+        # Phase A showed edit-count escalation fires on hard cases the
+        # sub-agents can't fix either, billing the reasoner/oracle tiers for
+        # zero conversions. Escalate only when verification proves the agent
+        # is stuck, not merely because it edited a file several times. This
+        # gate is reached even when over_cap (see the exemption above), so a
+        # run whose cap was spent on Z/V blocks still receives the
+        # escalation. ESCALATION_PANEL selects the SHAPE (single
+        # spawn-both block vs a two-rung opus-then-fable ladder) — see
+        # _gate_e_panel/_gate_e_ladder.
+        e_result = (
+            _gate_e_panel(tasks, block_counts)
+            if _escalation_panel()
+            else _gate_e_ladder(tasks, blocks, block_counts)
+        )
+        if e_result is not None:
+            return e_result
+
+        return None
+
+    # ── generic profile ──
     edits = [e for e in events if e.get("ev") == "edit"]
-    tests = [e for e in events if e.get("ev") == "test"]
+    cmds = [e for e in events if e.get("ev") == "cmd"]
     tasks = [e for e in events if e.get("ev") == "task"]
     blocks = [e for e in events if e.get("ev") == "block"]
 
     block_counts = Counter(b.get("gate") for b in blocks)
-    # The overall cap stops the "keep working" nudges (Z/R/V) from nagging
-    # forever. Gate E — the one-shot terminal escalation — is EXEMPT from it:
-    # OVERALL_CAP (3) == V_cap (2) + E_cap (1), so a run that spends its cap on
-    # Z/V blocks would otherwise short-circuit here and never deliver the
-    # escalation instruction (the verification-revealed trigger unreachable —
-    # adversarial-review finding 1). E is capped independently at 1, so
-    # exempting it stays bounded. NB: any 3-block combo reaching the cap
-    # necessarily includes an R-block or 2 V-blocks, so hitting the cap
-    # guarantees E's trigger is satisfiable.
     over_cap = len(blocks) >= OVERALL_CAP
+    ledger = _cmd_ledger(cmds)
 
-    # Gate Z — nothing was ever edited.
+    # Gate Z — nothing was ever edited AND no Bash command has ever succeeded
+    # (no evidence any work happened on the environment).
     if not over_cap and block_counts.get("Z", 0) < GATE_CAPS["Z"]:
-        if len(edits) == 0:
+        if len(edits) == 0 and not any(e.get("ok") for e in cmds):
             return (
                 "Z",
-                "You have not modified any repository source files, so there is "
-                "no fix to submit. Edit the source now and implement the most "
-                "reasonable fix for the issue — do not finish with an empty change.",
+                "You have not modified anything and no command you ran has "
+                "succeeded, so there is no evidence any work happened. This "
+                "task requires acting on the environment — make the change it "
+                "requires and run a command that proves it, then finish.",
             )
 
-    # Gate R — a verification command that used to pass now fails.
+    # Gate R — a verify-marked command that used to pass now fails.
     if not over_cap and block_counts.get("R", 0) < GATE_CAPS["R"]:
-        by_key = {}
-        for e in tests:
-            by_key.setdefault(e.get("key", ""), []).append(bool(e.get("ok")))
         regressed_key = None
-        for key, hist in by_key.items():
-            if hist and (not hist[-1]) and (True in hist[:-1]):
+        for key, entry in ledger.items():
+            if entry["verify"] and entry["was_ok"] and not entry["ok"]:
                 regressed_key = key
                 break
         if regressed_key is not None:
             return (
                 "R",
                 "A verification command that previously passed now fails: "
-                f"{regressed_key[:120]}. Your change introduced a regression. "
-                "Rework your fix so the issue behavior AND the previously-passing "
-                "tests are green — do not finish while it is red. If one focused "
-                "rework cannot recover it, escalate per the escalation contract.",
+                f"{regressed_key}. Your change introduced a regression. "
+                "Rework your fix so the task's success condition AND that "
+                "verify-marked command are green — do not finish while it is "
+                "red. If one focused rework cannot recover it, escalate per "
+                "the escalation contract.",
             )
 
-    # Gate V — edited but never re-verified with a BROAD run afterward. A
-    # narrow single-method green does NOT satisfy V: it leaves sibling tests in
-    # the touched module unrun, which is exactly how a fix that passes its
-    # target test still regresses PASS_TO_PASS tests (django-11885, pylint-7277).
-    # Requiring a broad green forces the module suite to run, so Gate R (above)
-    # can then catch any regression it surfaces.
+    # Gate V — no verify-marked command has EVER succeeded, or a file edit
+    # landed after the last green verify-marked run.
     if not over_cap and block_counts.get("V", 0) < GATE_CAPS["V"]:
-        if edits:
-            last_edit_t = max(e.get("t", 0) for e in edits)
-            ok_after = [
-                e for e in tests
-                if e.get("ok") and e.get("t", 0) > last_edit_t
-            ]
-            broad_ok_after = any(is_broad_test(e.get("key", "")) for e in ok_after)
-            if not broad_ok_after:
-                seen = []
-                for e in edits:
-                    f = e.get("file", "?")
-                    if f not in seen:
-                        seen.append(f)
-                basenames = ", ".join(os.path.basename(f) for f in seen[:5])
-                if ok_after:
-                    # verified, but only NARROWLY — demand the full module run.
-                    reason = (
-                        "Your only post-edit verification was NARROW — a single "
-                        "method, a -k filter, or just a reproduction script, not "
-                        "the existing test suite. Run the FULL existing test "
-                        "module/file for each edited file — the whole module, not "
-                        f"just the target test (files edited: {basenames}) — and "
-                        "make ALL of them pass. The sibling tests in that module "
-                        "are what catch regressions your targeted test cannot. "
-                        "Then finish."
-                    )
-                else:
-                    reason = (
-                        "You edited source files but ran no successful "
-                        "verification afterward. Re-run your reproduction of the "
-                        "issue AND the full existing test module covering each "
-                        f"edited file (files edited: {basenames}); make them "
-                        "pass, then finish."
-                    )
-                return ("V", reason)
-
-    # Gate E — a VERIFICATION-REVEALED escalation trigger fired but no
-    # unerr-opus/unerr-fable ran. Two arms only: a prior R-block (a regression
-    # one rework did not recover) or 2+ prior V-blocks (verification has capped
-    # without a green finish). The old raw-edit-count arm (a "hot" 3+-edited
-    # file) is deliberately GONE: Phase A showed edit-count escalation fires on
-    # hard cases the sub-agents can't fix either, billing the reasoner/oracle
-    # tiers for zero conversions. Escalate only when verification proves the
-    # agent is stuck, not merely because it edited a file several times. This
-    # gate is reached even when over_cap (see the exemption above), so a run
-    # whose cap was spent on Z/V blocks still receives the escalation.
-    if block_counts.get("E", 0) < GATE_CAPS["E"]:
-        r_already = block_counts.get("R", 0) >= 1
-        v_capped = block_counts.get("V", 0) >= 2
-        escalated = any(
-            t.get("agent") in ("unerr-opus", "unerr-fable") for t in tasks
+        last_green_ts = _last_green_verify_ts(cmds)
+        edit_after_green = last_green_ts is not None and any(
+            e.get("t", 0) > last_green_ts for e in edits
         )
-        if (r_already or v_capped) and not escalated:
-            trigger = (
-                "a previously-passing test was regressed and one rework did not recover it"
-                if r_already
-                else "the verification gate (V) has blocked twice without a green finish"
-            )
+        if last_green_ts is None or edit_after_green:
             return (
-                "E",
-                f"Escalation trigger hit: {trigger}. Per the escalation contract: "
-                "spawn unerr-opus and unerr-fable in parallel with the same "
-                "evidence brief (issue text, observations, attempts, all "
-                "candidate sites — not your preferred hypothesis), reconcile "
-                "their verdicts, implement the winner, verify, then finish.",
+                "V",
+                "You have not proven this task works: establish the command "
+                "that proves success for this task and run it with `# "
+                "unerr:verify` appended; re-run it after your final change. "
+                "This benchmark has no fixed test layout — the marker is how "
+                "you declare which command IS the proof. Finish only once "
+                "that verify-marked command is green and no edit has landed "
+                "since.",
             )
+
+    # Gate E — same skeleton/messages as the swe profile (shared via
+    # _gate_e_panel/_gate_e_ladder): a VERIFICATION-REVEALED escalation
+    # trigger fired (a prior R-block or 2+ prior V-blocks) but no
+    # unerr-opus/unerr-fable ran (or, in LADDER mode, the trigger persisted
+    # past the first hand-off). Exempt from the overall cap so it still
+    # fires even when the cap was spent on Z/R/V. ESCALATION_PANEL selects
+    # the SHAPE, same as the swe branch above.
+    e_result = (
+        _gate_e_panel(tasks, block_counts)
+        if _escalation_panel()
+        else _gate_e_ladder(tasks, blocks, block_counts)
+    )
+    if e_result is not None:
+        return e_result
 
     return None
 
@@ -330,9 +673,15 @@ def evaluate_gate(events):
 def gate_once():
     """Read current state, evaluate, and (on a block) persist the block
     event. Shared by cmd_gate and the selftest so both exercise the exact
-    same on-disk state path."""
+    same on-disk state path. Resolves the profile itself: hooks off
+    (_profile() is None) is a pure allow, no evaluation, no state write —
+    both callers (cmd_gate, run_selftest) already treat a None return as
+    allow, so this needs no caller-side change."""
+    profile = _profile()
+    if profile is None:
+        return None
     events = read_events()
-    result = evaluate_gate(events)
+    result = evaluate_gate(events, profile)
     if result is not None:
         append_event({"t": time.time(), "ev": "block", "gate": result[0]})
     return result
@@ -394,6 +743,18 @@ def _edits_since_last_good_test(events, file_path):
     return len([e for e in matching if e.get("t", 0) > last_ok_t])
 
 
+def _edits_since_last_green_verify(events, file_path):
+    """Generic-profile counterpart of _edits_since_last_good_test: counts
+    `edit` events for file_path that landed after the last GREEN
+    verify-marked `cmd` event (last_green_verify_ts) in the whole log; with
+    no such event yet, counts every edit ever recorded for that file."""
+    last_ok_t = _last_green_verify_ts([e for e in events if e.get("ev") == "cmd"])
+    matching = [e for e in events if e.get("ev") == "edit" and e.get("file") == file_path]
+    if last_ok_t is None:
+        return len(matching)
+    return len([e for e in matching if e.get("t", 0) > last_ok_t])
+
+
 def rule_b(events, file_path):
     """Rule B: 5+ un-greened edits on the same file with no unerr-opus/
     unerr-fable escalation yet -> force-escalate. Capped at RULE_B_DENY_CAP
@@ -436,6 +797,44 @@ def rule_b(events, file_path):
     )
 
 
+def rule_b_generic(events, file_path):
+    """Generic-profile counterpart of rule_b: identical 5+-edit / prior
+    V-or-R-block / not-escalated / RULE_B_DENY_CAP counters, but "since last
+    green" is rewired from the last good pytest-family run to the last
+    GREEN verify-marked command (last_green_verify_ts, via
+    _edits_since_last_green_verify) — there is no fixed test runner to sense
+    on a generic/Terminal-Bench-style task."""
+    if not file_path:
+        return None
+    if _edits_since_last_green_verify(events, file_path) < RULE_B_EDIT_THRESHOLD:
+        return None
+    verification_revealed = any(
+        e.get("ev") == "block" and e.get("gate") in ("V", "R") for e in events
+    )
+    if not verification_revealed:
+        return None
+    escalated = any(
+        e.get("ev") == "task"
+        and ("unerr-opus" in (e.get("agent") or "") or "unerr-fable" in (e.get("agent") or ""))
+        for e in events
+    )
+    if escalated:
+        return None
+    prior_b = len([e for e in events if e.get("ev") == "deny" and e.get("rule") == "B"])
+    if prior_b >= RULE_B_DENY_CAP:
+        return None
+    basename = os.path.basename(file_path)
+    return (
+        "B",
+        f"You have edited {basename} 5+ times without a green `# unerr:verify` "
+        "run — escalation trigger (b) has fired. STOP editing. In ONE message "
+        "spawn BOTH unerr-opus and unerr-fable via the Task tool with the same "
+        "evidence brief (task text, what you observed, what you tried, all "
+        "candidate sites), reconcile their verdicts, then implement the "
+        "agreed fix once.",
+    )
+
+
 def rule_c(events, file_path, tool_input):
     """Rule C: new_string/content introducing datetime.now(...) into a file
     whose current on-disk contents already use utcnow() diverges from that
@@ -472,24 +871,40 @@ def rule_c(events, file_path, tool_input):
     )
 
 
-def evaluate_deny(events, data):
+def evaluate_deny(events, data, profile="swe"):
     """Pure: state events + hook stdin dict -> None (allow) or (rule_letter,
-    reason) to deny. Evaluated in fixed order T, B, C; first match wins."""
-    tool_name = data.get("tool_name") or ""
+    reason) to deny. Evaluated in fixed order T, B, C; first match wins.
+    profile != "generic" runs the ORIGINAL swe-sensor rules unchanged.
+    profile == "generic": T and C are SWE-world rules and are NO-OPs (allow
+    immediately) — a generic/Terminal-Bench-style task has no fixed
+    test-path convention and no swe-specific time-source convention to
+    check; only B fires, rewired to the verify-marked ledger (rule_b_generic)."""
+    if profile != "generic":
+        tool_name = data.get("tool_name") or ""
+        tool_input = data.get("tool_input") or {}
+        file_path = tool_input.get("file_path") or ""
+
+        if is_test_path(file_path):
+            return ("T", TEST_DENY_MSG)
+
+        result = rule_b(events, file_path)
+        if result is not None:
+            return result
+
+        if EDIT_TOOL_RE.match(tool_name):
+            result = rule_c(events, file_path, tool_input)
+            if result is not None:
+                return result
+
+        return None
+
+    # ── generic profile ── T and C are no-ops; only B (rewired) applies.
     tool_input = data.get("tool_input") or {}
     file_path = tool_input.get("file_path") or ""
 
-    if is_test_path(file_path):
-        return ("T", TEST_DENY_MSG)
-
-    result = rule_b(events, file_path)
+    result = rule_b_generic(events, file_path)
     if result is not None:
         return result
-
-    if EDIT_TOOL_RE.match(tool_name):
-        result = rule_c(events, file_path, tool_input)
-        if result is not None:
-            return result
 
     return None
 
@@ -497,9 +912,16 @@ def evaluate_deny(events, data):
 def deny_once(data):
     """Read current state, evaluate the deny rules for this hook-input dict,
     and (on a deny) persist the deny event. Shared by cmd_deny and the
-    selftest so both exercise the exact same on-disk state path."""
+    selftest so both exercise the exact same on-disk state path. Resolves
+    the profile itself: hooks off (_profile() is None) is a pure allow, no
+    evaluation, no state write — both callers (cmd_deny, run_selftest)
+    already treat a None return as allow, so this needs no caller-side
+    change."""
+    profile = _profile()
+    if profile is None:
+        return None
     events = read_events()
-    result = evaluate_deny(events, data)
+    result = evaluate_deny(events, data, profile)
     if result is not None:
         rule, _reason = result
         tool_input = data.get("tool_input") or {}
@@ -543,6 +965,18 @@ def run_selftest():
 
     tmp_root = tempfile.mkdtemp(prefix="cc-harness-selftest-")
     orig_env = os.environ.get(STATE_ENV)
+    orig_hooks = os.environ.get(HARNESS_HOOKS_ENV)
+    orig_profile = os.environ.get(HARNESS_PROFILE_ENV)
+    orig_panel = os.environ.get(ESCALATION_PANEL_ENV)
+    # This selftest exercises the original swe-sensor gates/rules; force that
+    # profile regardless of the ambient env so gate_once/deny_once's new
+    # profile-off short-circuit doesn't turn every case below into a no-op.
+    # Also isolate ESCALATION_PANEL to its LADDER default — none of the
+    # cases below assert panel-vs-ladder message shape (only gate letters),
+    # so this is belt-and-suspenders determinism, not a behavior req.
+    os.environ[HARNESS_HOOKS_ENV] = "1"
+    os.environ.pop(HARNESS_PROFILE_ENV, None)
+    os.environ.pop(ESCALATION_PANEL_ENV, None)
 
     def fresh_dir(name):
         d = os.path.join(tmp_root, name)
@@ -768,6 +1202,18 @@ def run_selftest():
             os.environ.pop(STATE_ENV, None)
         else:
             os.environ[STATE_ENV] = orig_env
+        if orig_hooks is None:
+            os.environ.pop(HARNESS_HOOKS_ENV, None)
+        else:
+            os.environ[HARNESS_HOOKS_ENV] = orig_hooks
+        if orig_profile is None:
+            os.environ.pop(HARNESS_PROFILE_ENV, None)
+        else:
+            os.environ[HARNESS_PROFILE_ENV] = orig_profile
+        if orig_panel is None:
+            os.environ.pop(ESCALATION_PANEL_ENV, None)
+        else:
+            os.environ[ESCALATION_PANEL_ENV] = orig_panel
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     total = passed + failed

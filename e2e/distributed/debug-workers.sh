@@ -135,7 +135,8 @@ if [ "$FOLLOW" = 1 ]; then
   # follow only makes sense for a single fleet; use the first resolved one.
   app="${apps[0]}"; label="${labels[0]}"
   echo "==> following logs for workers of fleet '$label' (app=$app) — Ctrl-C to stop" >&2
-  wids="$(fc_machines "$app" "$label" worker)"
+  wids="$(fc_machines "$app" "$label" worker)"; rc=$?
+  [ "$rc" -eq 3 ] && { echo "ERROR: fly API unreachable — worker state UNKNOWN (not proof the fleet is gone): $(fc_last_error)" >&2; exit 1; }
   [ -n "$wids" ] || { echo "ERROR: no worker machines for fleet=$label on $app" >&2; exit 1; }
   # flyctl logs streams a whole app; filter to the fleet's workers when multiple.
   set --
@@ -158,7 +159,12 @@ while [ "$i" -lt "${#labels[@]}" ]; do
   echo
   echo "════════ ${combo}   label=$label  app=$app ════════"
   coord="$(fc_coord "$app" "$label")"
-  wids="$(fc_machines "$app" "$label" worker)"
+  wids="$(fc_machines "$app" "$label" worker)"; rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # could not ASK the API — do not claim the fleet is gone (see fleet-common.sh)
+    echo "  UNKNOWN — fly API unreachable ($(fc_last_error))"
+    i=$(( i + 1 )); continue
+  fi
   if [ -z "$wids" ]; then
     echo "  no worker machines (fleet torn down, or never created on $app)"
     i=$(( i + 1 )); continue

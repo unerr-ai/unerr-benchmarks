@@ -27,8 +27,9 @@
 #   TASKS                comma-separated instance_ids to seed the queue with
 #   TASKS_FILE           OR a file of newline/comma-separated instance_ids
 #                        (TASKS wins if both are set)
-#   ARM                  which per-arm predictor the fleet ran (default econ)
-#                        — only used for the preds.json model_name_or_path tag
+#   ARM                  which arm the fleet ran: econ | claude-<mix> | claude-native
+#                        (default econ) — tags preds.json model_name_or_path and picks
+#                        the cost report (gateway claude -> cost_report.py, else report.py)
 #   DATASET / SPLIT      HF dataset (default: SWE-bench Verified, test split)
 #                        — carried through for parity with the single-machine
 #                        path; the queue itself is instance-id agnostic
@@ -62,6 +63,18 @@ export PORT DB_PATH MAX_FAILURE_RERUN
 LABEL="${LABEL:-${RUN_ID:-dist}}"
 RUN_ID="${RUN_ID:-$LABEL}"
 ARM="${ARM:-econ}"
+# Gateway claude arms (claude-<mix> ensembles via LiteLLM: claude-gpt, claude-open, …)
+# bill via cost_report.py; econ + claude-native (real Anthropic, no LiteLLM) use
+# report.py. The launcher normalizes legacy claude->claude-open and
+# claude-real->claude-native before ARM reaches us; a bare "claude" is treated as
+# gateway defensively.
+is_gateway_claude() {
+  case "$1" in
+    claude-native)   return 1 ;;
+    claude|claude-*) return 0 ;;
+    *)               return 1 ;;
+  esac
+}
 DATASET="${DATASET:-princeton-nlp/SWE-bench_Verified}"
 SPLIT="${SPLIT:-test}"
 HOLD="${HOLD:-5400}"
@@ -375,7 +388,7 @@ emit "\"grade_done\",\"run_id\":\"$RUN_ID\",\"resolved\":${RESOLVED:-0},\"total\
 # Reused verbatim, not reimplemented (PLAN.md §1 consolidation guarantee).
 # report.py has no third-party deps (stdlib only) so plain python3 runs it.
 log "aggregating cost report"
-if [ "$ARM" = "claude" ]; then
+if is_gateway_claude "$ARM"; then
   CLAUDE_COST_PY="/work/claude/local-docker/cost_report.py"
   if [ -f "$CLAUDE_COST_PY" ]; then
     if ! "$PY" "$CLAUDE_COST_PY" "$RUNDIR" --mode on --grade "$MERGED_GRADE" \

@@ -105,7 +105,15 @@ fi
 # Render one fleet's status line (or JSON / instance table) from its /status JSON.
 render_one() {  # <combo> <label> <app>
   local combo="$1" label="$2" app="$3"
-  local coord; coord="$(fc_coord "$app" "$label")"
+  local coord rc; coord="$(fc_coord "$app" "$label")"; rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # The fly API call itself failed — we could not ASK. Saying "torn down" here
+    # would be a false statement about a possibly-healthy fleet (seen live during
+    # a fly GraphQL 503 while the run was progressing normally over 6PN).
+    printf '  %-26s %-22s  UNKNOWN — fly API unreachable (%s)\n' \
+      "$combo" "$label" "$(fc_last_error)"
+    return
+  fi
   if [ -z "$coord" ]; then
     printf '  %-26s %-22s  no coordinator (torn down, or not prepared on %s)\n' "$combo" "$label" "$app"
     return
