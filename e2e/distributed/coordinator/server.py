@@ -7,12 +7,15 @@ A single-file, stdlib-only work queue: a ThreadingHTTPServer fronting a SQLite
 completion; a background reaper requeues leases whose heartbeat went stale so a
 crashed worker's instance is retried by a survivor.
 
-Failure-rerun (sibling of the stale-lease reaper, but keyed on MAX_ATTEMPTS
-exhaustion via /fail rather than heartbeat staleness): once the fresh `pending`
-queue is drained, Queue.claim gives a `failed` instance up to MAX_FAILURE_RERUN
-more tries; a rerun's eventual /complete overwrites the earlier failure in
-place. MAX_FAILURE_RERUN=0 disables it (current/original behaviour: exhausted
-attempts dead-letter straight to `dead`).
+Failure-rerun (sibling of the stale-lease reaper): once the fresh `pending`
+queue is drained, Queue.claim gives a rerun-eligible instance up to
+MAX_FAILURE_RERUN more tries — either a `failed` row (MAX_ATTEMPTS exhaustion
+via /fail) or a `done`+`resolved=0` row that harness_terminal.py flagged as a
+silent session death (an unanswered Claude Code nudge, never a genuine
+capability miss — see Queue._is_silent_death_meta). A rerun's eventual
+/complete overwrites the earlier outcome in place. MAX_FAILURE_RERUN=0
+disables both paths (current/original behaviour: exhausted attempts
+dead-letter straight to `dead`; a silent death is never retried).
 
 Stdlib only (http.server + sqlite3 + json + threading) so the coordinator image
 stays minimal and dependency-free. PLAN.md mentions aiohttp aspirationally;
@@ -175,14 +178,19 @@ class Queue:
 
         Returns `{instance_id}` on success. When the fresh queue has nothing
         claimable, and MAX_FAILURE_RERUN>0, it makes ONE attempt to pull a
-        `failed` (attempts-exhausted) instance back for another try — the
-        failure-rerun mechanism, a sibling of the stale-lease reap below but
-        keyed on `fail_reruns` instead of heartbeat staleness, and deliberately
-        gated on `pending==0` so fresh work always drains first (end-of-run
-        only). Failing that too, it distinguishes `{done:true}` (queue truly
-        drained — no pending, no leased, no failed row with rerun budget left)
-        from `{wait:true}` (leased rows still in flight, or armed-but-idle, so
-        the worker should poll again shortly).
+        rerun-eligible instance back for another try — the failure-rerun
+        mechanism, a sibling of the stale-lease reap below but keyed on
+        `fail_reruns` instead of heartbeat staleness, and deliberately gated
+        on `pending==0` so fresh work always drains first (end-of-run only).
+        Eligible rows come in two shapes (see `_eligible_rerun_ids`): a
+        `failed` row (attempts exhausted — an execution failure) or a `done`
+        row with `resolved=0` that harness_terminal.py flagged as a silent
+        session death (an unanswered Claude Code nudge, NOT a genuine
+        capability miss — see `_is_silent_death_meta`). Failing that too, it
+        distinguishes `{done:true}` (queue truly drained — no pending, no
+        leased, no row with rerun budget left) from `{wait:true}` (leased
+        rows still in flight, or armed-but-idle, so the worker should poll
+        again shortly).
         """
         now = int(time.time())
         lease_until = now + self._cfg.lease_ttl
@@ -206,18 +214,19 @@ class Queue:
             if row is None:
                 counts = self._counts()
                 if counts["pending"] == 0 and self._cfg.max_failure_rerun > 0:
-                    frow = self._conn.execute(
-                        "UPDATE tasks SET status='pending', fail_reruns=fail_reruns+1 "
-                        "WHERE instance_id = ("
-                        "  SELECT instance_id FROM tasks "
-                        "  WHERE status='failed' AND fail_reruns < ? "
-                        "  ORDER BY instance_id LIMIT 1) "
-                        "RETURNING instance_id",
-                        (self._cfg.max_failure_rerun,),
-                    ).fetchone()
-                    self._conn.commit()
+                    candidates = self._eligible_rerun_ids()
+                    frow = None
+                    cause = None
+                    if candidates:
+                        pick, cause = candidates[0]
+                        frow = self._conn.execute(
+                            "UPDATE tasks SET status='pending', fail_reruns=fail_reruns+1 "
+                            "WHERE instance_id=? RETURNING instance_id",
+                            (pick,),
+                        ).fetchone()
+                        self._conn.commit()
                     if frow is not None:
-                        log("failure_rerun", worker_id=worker_id, instance_id=frow[0])
+                        log("failure_rerun", worker_id=worker_id, instance_id=frow[0], cause=cause)
                         # Fresh 'pending' row exists now (and only this one, since
                         # counts["pending"] was 0 a moment ago under the same
                         # lock) — the primary lease query picks it up next.
@@ -267,6 +276,8 @@ class Queue:
         trajectory_json: Optional[str] = None,
         sessions_cast: Optional[str] = None,
         harbor_run_log: Optional[str] = None,
+        claude_session_jsonl: Optional[str] = None,
+        claude_sessions_tgz_b64: Optional[str] = None,
     ) -> dict[str, bool]:
         """Idempotent completion upsert: mark `done` and store the results.
 
@@ -285,8 +296,18 @@ class Queue:
         are the harness_run (Terminal) equivalents (Harbor agent trajectory +
         asciinema session); harbor_run_log is Harbor's own captured stdout+stderr
         (the only place a SETUP-phase RuntimeError, raised before the agent ever
-        runs, is captured) — benchmarks the worker never sends any of these leave
-        the columns NULL.
+        runs, is captured); claude_session_jsonl is Claude Code's OWN
+        incrementally-written session transcript (claude-* arms only,
+        synced by cc-harness-hooks.py's _sync_claude_session) — unlike
+        trajectory_json, it is written AS THE AGENT RUNS, so it survives a
+        trial killed mid-run (no trajectory.json, no err.txt); claude_sessions_tgz_b64
+        is EVERY Claude Code session .jsonl for the trial (main + every Task
+        sub-agent sidechain, cc-harness-hooks.py's additive
+        _sync_all_claude_sessions), gzip-tarred and base64-encoded by
+        harness_terminal.py's _collect_traces — claude_session_jsonl only ever
+        holds the main session, so this is the only trace of a sub-agent
+        (escalation: unerr-opus/unerr-fable) misbehaving — benchmarks
+        the worker never sends any of these leave the columns NULL.
         """
         now = int(time.time())
         resolved_int = _as_int_bool(resolved)
@@ -295,7 +316,7 @@ class Queue:
                 "UPDATE tasks SET status='done', patch=?, report_json=?, "
                 "  meta_json=?, resolved=?, events_jsonl=?, err_txt=?, db_b64=?, "
                 "  engine_log=?, trajectory_json=?, sessions_cast=?, "
-                "  harbor_run_log=?, "
+                "  harbor_run_log=?, claude_session_jsonl=?, claude_sessions_tgz_b64=?, "
                 "  completed_by=?, completed_at=? "
                 "WHERE instance_id=?",
                 (
@@ -310,6 +331,8 @@ class Queue:
                     trajectory_json,
                     sessions_cast,
                     harbor_run_log,
+                    claude_session_jsonl,
+                    claude_sessions_tgz_b64,
                     worker_id,
                     now,
                     instance_id,
@@ -366,11 +389,15 @@ class Queue:
         return {"status": status}
 
     def status(self) -> dict[str, Any]:
-        """Full snapshot: counts by status, resolved tally, and per-instance rows."""
+        """Full snapshot: counts by status, resolved tally, per-instance rows,
+        and `pending_reruns` (rows still eligible for a failure-rerun — see
+        `_eligible_rerun_ids` — so `status.sh`'s `up4retry` can reflect a
+        silent-death-eligible `done` row, not just `counts.failed`)."""
         with self._lock:
             armed = self._armed
             workers_seen = sorted(self._workers_seen)
             counts = self._counts()
+            pending_reruns = self._pending_reruns()
             total = self._conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
             resolved = self._conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE resolved=1"
@@ -395,36 +422,86 @@ class Queue:
             "armed": armed,
             "workers_seen": workers_seen,
             "counts": counts,
+            "pending_reruns": pending_reruns,
             "resolved": resolved,
             "total": total,
             "instances": instances,
         }
 
-    def _pending_reruns(self) -> int:
-        """Count of `failed` rows still under the MAX_FAILURE_RERUN budget.
+    def _is_silent_death_meta(self, meta_json: Optional[str]) -> bool:
+        """True only when a `done` row's `meta_json` EXPLICITLY carries
+        `"silent_death": true` — harness_terminal.py's run() sets this after
+        the trial, when the trajectory exists and its LAST step's `source`
+        is `"user"` (an unanswered Claude Code "no visible output" nudge)
+        rather than `"agent"` (see harness_terminal.py's `_is_silent_death`
+        and DEBUG_FAILED_TASK.md Step 3). Any parse failure, missing field,
+        or falsey value reads False, never True — a `done`+`resolved=0` row
+        WITHOUT this flag is the dominant case (the agent ran to completion
+        and was simply graded wrong) and must never be mistaken for a
+        transient death and rerun at real cost (e.g. TB2.1's
+        chess-best-move, which fails reproducibly with a different wrong
+        move every run — rerunning it is pure waste).
+        """
+        if not meta_json:
+            return False
+        try:
+            meta = json.loads(meta_json)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(meta, dict) and meta.get("silent_death") is True
 
-        Read-only helper shared by `drain()` and `claim()`'s done-check — a
-        `failed` row with `fail_reruns < MAX_FAILURE_RERUN` is NOT terminal yet
-        (claim() will still requeue it), so callers must not treat it as done.
-        0 whenever failure-rerun is disabled (MAX_FAILURE_RERUN<=0), matching
-        the original behaviour where `failed` never exists as a status.
+    def _eligible_rerun_ids(self) -> list[tuple[str, str]]:
+        """`(instance_id, cause)` pairs currently eligible for a
+        failure-rerun, in claim order (lowest instance_id first) — the
+        shared selection query for both `claim()`'s end-of-run pull and
+        `_pending_reruns()`'s status/drain count. `cause` is `"failed"`
+        (execution failure, MAX_ATTEMPTS exhausted via /fail) or
+        `"silent_death"` (finished `done` with `resolved=0` but flagged a
+        silent session death in `meta_json` — see `_is_silent_death_meta`).
+        Both bounded by `fail_reruns < MAX_FAILURE_RERUN`. A `done`+
+        `resolved=0` row WITHOUT the silent-death flag (a genuine
+        capability miss) is deliberately excluded — see
+        `_is_silent_death_meta`.
+        """
+        rows = self._conn.execute(
+            "SELECT instance_id, status, meta_json FROM tasks "
+            "WHERE fail_reruns < ? AND (status='failed' OR (status='done' AND resolved=0)) "
+            "ORDER BY instance_id",
+            (self._cfg.max_failure_rerun,),
+        ).fetchall()
+        out: list[tuple[str, str]] = []
+        for iid, status, meta_json in rows:
+            if status == "failed":
+                out.append((iid, "failed"))
+            elif self._is_silent_death_meta(meta_json):
+                out.append((iid, "silent_death"))
+        return out
+
+    def _pending_reruns(self) -> int:
+        """Count of rows still eligible for a failure-rerun (see
+        `_eligible_rerun_ids`) under the MAX_FAILURE_RERUN budget — `failed`
+        rows AND `done`+`resolved=0` rows flagged as a silent session death.
+
+        Read-only helper shared by `drain()`, `status()`, and `claim()`'s
+        done-check — an eligible row is NOT terminal yet (claim() will still
+        requeue it), so callers must not treat it as done. 0 whenever
+        failure-rerun is disabled (MAX_FAILURE_RERUN<=0), matching the
+        original behaviour where `failed` never exists as a status.
         """
         if self._cfg.max_failure_rerun <= 0:
             return 0
-        return self._conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='failed' AND fail_reruns < ?",
-            (self._cfg.max_failure_rerun,),
-        ).fetchone()[0]
+        return len(self._eligible_rerun_ids())
 
     def drain(self) -> dict[str, bool]:
-        """`{drained:true}` once ARMED, no pending/leased rows, and no `failed`
-        row still has failure-rerun budget left.
+        """`{drained:true}` once ARMED, no pending/leased rows, and no row
+        still eligible for a failure-rerun (see `_eligible_rerun_ids` —
+        `failed` OR a silent-death-flagged `done`+`resolved=0` row).
 
         The `armed` guard means an un-released (prepare-phase) queue — seeded but
         not yet armed, or momentarily empty — never reads as drained, so the
         coordinator won't aggregate/bundle before the run is released. The
         failure-rerun guard means the entrypoint's drain-wait won't bundle out
-        from under a `failed` instance that claim() would still retry."""
+        from under an instance that claim() would still retry."""
         with self._lock:
             armed = self._armed
             counts = self._counts()
@@ -546,6 +623,8 @@ class Handler(BaseHTTPRequestHandler):
             body.get("trajectory_json"),
             body.get("sessions_cast"),
             body.get("harbor_run_log"),
+            body.get("claude_session_jsonl"),
+            body.get("claude_sessions_tgz_b64"),
         )
 
     def _post_fail(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -622,6 +701,16 @@ def open_db(cfg: Config) -> sqlite3.Connection:
         conn.execute("ALTER TABLE tasks ADD COLUMN sessions_cast TEXT")
     if "harbor_run_log" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN harbor_run_log TEXT")
+    # Claude Code's own session-transcript sync (claude-* terminal arms only,
+    # cc-harness-hooks.py's _sync_claude_session) — same guarded pattern.
+    if "claude_session_jsonl" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN claude_session_jsonl TEXT")
+    # Every Claude Code session .jsonl for the trial (main + Task sub-agent
+    # sidechains), gzip-tarred + base64-encoded — claude-* terminal arms only,
+    # cc-harness-hooks.py's additive _sync_all_claude_sessions — same guarded
+    # pattern as claude_session_jsonl above.
+    if "claude_sessions_tgz_b64" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN claude_sessions_tgz_b64 TEXT")
     conn.commit()
     return conn
 

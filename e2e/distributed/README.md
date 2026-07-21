@@ -159,6 +159,26 @@ MACHINES=5 ARM=econ LABEL=mini SUITE=mini ./run-distributed.sh
   `Could not resolve "../app/dist/assets/*.js"` — the embedded web UI isn't built, and it's dead weight
   for headless benchmark runs. Build with `bun run --cwd packages/opencode build --skip-embed-web-ui`,
   then run with `SKIP_ECON_BUILD=1` (and no `IMAGE=`) to bake a fresh image from that binary.
+- **`claude-*` arms need a vendored CPython interpreter before the bake.**
+  `tools/harbor_agents.py`'s `ClaudeUnerrAgent._resolve_pybin()` uploads a self-contained
+  python-build-standalone interpreter into any terminal-bench task image that ships no system
+  python3 (~30% of base images) — never `apt-get install python3` inside the task's own
+  environment — and raises a hard `RuntimeError` mid-task when neither exists. That tarball
+  (`context/cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz`) is a **gitignored build
+  artifact**, so a fresh checkout lacks it until someone vendors it, and a bake from that checkout
+  used to fail silently — the image built fine, then every python3-less task died minutes into a
+  paid fly run. `run-distributed.sh` now hard-gates on the tarball's presence, in the exact dir
+  `Dockerfile.dist` COPYs from, before baking any `claude-*` combo (skipped for `ARM=econ` and for
+  `TERMINAL_STOCK_AGENT=1`, which never calls `install()`) — a missing tarball now fails loud at
+  preflight instead. Fetch it with:
+  ```bash
+  VENDOR_ONLY=1 e2e/reference/claude/local-docker/build-toolbox.sh   # ~65MB, pinned, idempotent
+  ```
+  This is the **vendor-only** path — it fetches ONLY that tarball and skips both the unerr
+  rebuild/repack and the `docker build`. Running the full `build-toolbox.sh` (no `VENDOR_ONLY=1`)
+  also vendors this tarball as one of its steps, but it additionally repacks unerr from whatever
+  your sibling `unerr-cli` checkout currently holds — the wrong side effect for "I'm just missing a
+  file". `--vendor-only` is accepted as an equivalent flag.
 - `run-distributed.sh` does the build → seed → create coordinator + N workers (paced ≤1/s, 429/
   MANIFEST_UNKNOWN retried) → poll → pull → teardown, all in one run. It is safe to `Ctrl-C` — nothing
   about the fleet depends on the launcher process staying alive; fall back to the out-of-band commands
@@ -245,9 +265,38 @@ the launcher died, or you `Ctrl-C`'d it — use the two read-only monitor script
 ./debug-workers.sh smk-e-econ --instance django__django-11999   # only the worker holding that instance
 ```
 
+**App resolution for a bare `<LABEL>` (no APP arg): explicit APP > `$ARM` env > label inference.**
+Both scripts infer a fleet's app (`swebench-dist-<arm>-<slug>`) from the LABEL when APP is omitted, by
+matching the arm token as a trailing component of the label (e.g. `claude-gpt` out of
+`mtx-abc-claude-gpt-terminal`). If the label was chosen WITHOUT embedding a recognized arm token — e.g.
+an operator-picked label like `cgpt-tb21-val10` (using the short form `cgpt`) — the inference silently
+fell through to the `econ` app and reported a healthy, live `claude-gpt` fleet as
+`no coordinator (torn down, or not prepared on swebench-dist-econ-terminal)`, which reads as "the fleet
+is dead" about a live, paid run. Fix: pass `$ARM` explicitly (normalized the same way as everywhere
+else: `claude`→`claude-open`, `claude-real`→`claude-native`) — it now wins over the label guess:
+```bash
+ARM=claude-gpt ./status.sh cgpt-tb21-val10-terminal          # resolves swebench-dist-claude-gpt-terminal
+ARM=claude-gpt ./debug-workers.sh cgpt-tb21-val10-terminal
+```
+Passing `APP` explicitly as the 2nd arg still wins over everything, same as before. When the resolver
+DOES fall through to a blind guess (no `ARM`, no arm token in the label) and that guess turns up no
+coordinator / no worker machines, both scripts now print a `hint: arm inferred as 'econ' from LABEL (no
+arm token found). Pass ARM=<arm> ... or the APP as the 2nd arg.` line to stderr instead of failing
+silent — the resolver (`fc_resolve_arm` in `tools/fleet-common.sh`) tags every resolution as
+`env`/`label`/`guess` so the fall-through case is never indistinguishable from a real "torn down".
+A label that DOES embed a trailing arm token still infers correctly with no `ARM` needed (unchanged).
+The inverse case is also guarded: if `$ARM` is set (commonly leaked from an earlier claude-arm command
+left exported in the shell) AND it disagrees with a trailing arm token the LABEL itself embeds, `$ARM`
+still wins (precedence unchanged) but both scripts now print a
+`warn: using ARM=<resolved> from env, but LABEL '<label>' looks like arm '<label_arm>' ...` line to
+stderr — unconditionally, not just on a miss, since a stale `$ARM` can just as easily resolve a
+healthy-but-wrong fleet that would otherwise read as correct.
+
 `status.sh` reads each fleet's coordinator `/status`; the default line now carries the **grade %**
-(`resolved/total (NN%)`) and **retries** (`reatt`=re-attempts so far, `up4retry`=failed rows the fleet
-reruns at drain, `dead`=permanently failed). `--cost` adds a **cost + per-tier breakdown** — total `$`,
+(`resolved/total (NN%)`) and **retries** (`reatt`=re-attempts so far, `up4retry`=rows the fleet reruns
+at drain — `failed` rows PLUS any `done`+`resolved=0` row the coordinator flagged as a **silent session
+death** (an unanswered agent nudge, never a genuine capability miss — see §8.1's Failure-rerun entry),
+`dead`=permanently failed). `--cost` adds a **cost + per-tier breakdown** — total `$`,
 `turns`, tokens, and a conductor/oracle/reasoner/executor split (`$`, %-share, in/out tokens, calls,
 instance-count). **Cost source differs by arm:** econ and every `claude-<mix>` report real LiteLLM gateway spend
 (from `litellm_spend_logs`); `claude-native` (Anthropic real models, no gateway) reports **claude-native cost**
@@ -304,6 +353,27 @@ flyctl ssh console -a swebench-dist-econ-verif --machine <COORD_ID> -C "curl -s 
 what `status.sh --cost` reads over ssh (no rebake, no LiteLLM query). The lookup/token/`/status`/queue.db
 plumbing is single-sourced in [`tools/fleet-common.sh`](./tools/fleet-common.sh) (sourced by both scripts).
 
+**One instance resolved=0 (or `dead`/`failed`) and you need to know why:**
+[`DEBUG_FAILED_TASK.md`](./DEBUG_FAILED_TASK.md) — the step-by-step procedure (classify
+execution-failure vs grader-miss from `queue.db`, which `tasks` column holds the real agent
+transcript vs the setup log, live gate-ledger inspection, post-drain `debug_instance.py`). Reach for
+it the moment `status.sh --instances` shows a 0/dead/failed row you can't explain from the counts
+alone.
+
+**Need one instance's actual trace while the run is still live** (not just its status)?
+`tools/pull_traces.sh <LABEL> [APP] [--failed-only] [--ids a,b,c] [--out DIR]` pulls per-instance
+agent traces straight out of the coordinator's *live* `queue.db` — the only supported way to get
+them before drain, since `pull_results.sh`/`collect-failed.py`/`debug_instance.py` (§4, below) all
+require the post-drain bundle (`/data/bundle.tgz`, written only at end-of-run). That's possible
+because traces are durable the moment a worker POSTs `/complete` — it reads its artifacts into
+memory *before* deleting its scratch dir (see [`DEBUG_FAILED_TASK.md`](./DEBUG_FAILED_TASK.md)).
+`--failed-only` limits the pull to instances that didn't resolve, `--ids a,b,c` names specific ones
+(overrides `--failed-only`), `--out DIR` overrides the default `out/dist-<LABEL>/traces-live`.
+Read-only and non-destructive — it never tears the fleet down — and benchmark-agnostic (filenames
+come from the `traces` map in `tools/benchmarks.py`, with a fallback for columns it doesn't know
+about). Besides Harbor's `trajectory.json` it also emits `trajectory.jsonl` — one step per line —
+for a trace reader/differ to consume directly.
+
 > The old `tools/bench-ctl.sh distributed-*` control surface was **removed** in the public-release
 > reorg. There is no `bench-ctl.sh`; use the §3–§5 commands here.
 
@@ -320,6 +390,10 @@ once it sees the `bundle_ready` beacon in the coordinator's logs — this is the
 when you want the bundle before teardown (e.g. a `KEEP=1` debug run) or the host process died first.
 The bundle only exists after the coordinator aggregates (post-drain), so a mid-run pull before any
 instance completes finds no `bundle.tgz` yet.
+
+Need a trace **before** drain? `pull_results.sh` can't help yet — use
+`tools/pull_traces.sh <LABEL> [APP] --failed-only` (or `--ids <iid>`) instead, which reads the
+coordinator's live `queue.db` directly rather than waiting on `bundle.tgz` — see §3.
 
 ## 5. Teardown
 ```bash
@@ -423,12 +497,30 @@ Set `BENCHMARK` on any `run-distributed.sh` invocation (default `verified`). It 
   `MAXWAIT` (10-day host poll ceiling) + `NO_PROGRESS_GIVEUP` (wedge detection), and the per-task
   ceiling + idle watchdog above.
 - **Failure-rerun (`MAX_FAILURE_RERUN`, default 1).** When the fresh queue drains, the coordinator
-  gives each `failed` instance up to this many extra tries; a rerun's success overwrites the earlier
-  failure in place (the bundle shows the rerun outcome). Set `0` to disable (exhausted attempts
-  dead-letter straight to `dead`), or higher to retry more. Applies to every benchmark. Watch it live
-  via `status.sh`'s `reatt`/`up4retry`/`dead` counters (§3). The invariant (rerun outcome persists over
-  the initial failure) has a deterministic offline test: `python3 coordinator/test_failure_rerun.py`
-  (drives the real `Queue` through fail→failed→rerun→complete-overwrite; no fly/docker).
+  gives each rerun-eligible instance up to this many extra tries; a rerun's success overwrites the
+  earlier outcome in place (the bundle shows the rerun outcome). Two shapes are eligible, both gated
+  on `pending==0` so fresh work always drains first: a `failed` instance (execution failure —
+  `MAX_ATTEMPTS` exhausted via `/fail`), and — since 2026-07-21 — a `done`+`resolved=0` instance the
+  Terminal harness flagged as a **silent session death**: `harness_terminal.py` inspects the
+  trajectory it already collects and sets `meta_json.silent_death=true` only when the trajectory's
+  LAST step is an unanswered agent nudge (`steps[-1].source == "user"`, Claude Code's own "no visible
+  output" retry landing on a dead session) rather than an agent turn. This is deliberately narrow: a
+  `done`+`resolved=0` row WITHOUT that flag is a genuine capability miss (the agent finished and was
+  simply graded wrong — e.g. TB2.1's `chess-best-move`, which fails reproducibly with a different
+  wrong answer every run) and is NEVER rerun, so the budget never burns real money re-running a task
+  the agent will just fail again. Root-caused live on `cgpt-tb21-val10-terminal`: two Terminal
+  instances (`build-pmars`, `build-cython-ext`) died silently (rc=0, no error, graded 0) and a manual
+  rerun with zero code change flipped both to pass — but neither had ever been eligible for a rerun
+  before this fix, since `status='failed'` never matches a clean exit. Set `MAX_FAILURE_RERUN=0` to
+  disable both paths (exhausted attempts dead-letter straight to `dead`; a silent death is never
+  retried), or higher to retry more. Applies to every benchmark, though only the Terminal harness
+  currently ever sets `silent_death` (SWE-bench's `resolve_then_grade` flow has no equivalent
+  unanswered-nudge failure mode). Watch it live via `status.sh`'s `reatt`/`up4retry`/`dead` counters
+  (§3) — `up4retry` now counts BOTH eligible shapes (`/status`'s `pending_reruns` field). The invariant
+  (rerun outcome persists over the initial failure, and a clean-but-wrong completion is never rerun)
+  has a deterministic offline test: `python3 coordinator/test_failure_rerun.py` (drives the real
+  `Queue` through fail→failed→rerun→complete-overwrite AND silent-death→rerun / clean-wrong→no-rerun;
+  no fly/docker).
 - **Traces.** Every completed instance's transcript rides `/complete` and lands under
   `results/<label>/artifacts/<iid>/`: `events.jsonl` + `err.txt` for all; `engine.log` + `opencode.db`
   for the econ resolve path; `trajectory.json` + `sessions.cast` (Harbor agent trajectory + asciinema
@@ -503,6 +595,22 @@ Ids are the vendored `terminal-bench/tasks/` directory names. Each task's image 
 from its own Dockerfile inside the worker's DinD — nothing to mirror. `tools/harness_terminal.py`
 shells `harbor run --model <m> --env docker` and grades on the pytest end-state; the result rides
 `/complete` as `{resolved, harbor_result}` (no patch → no `preds.json`, no submission).
+
+**`SUITE=terminal-coverage`** — a second, DELIBERATE 10-id smoke (addresses
+[`HARNESS_UNIVERSAL.md` §13](HARNESS_UNIVERSAL.md)'s coverage-gap: `terminal-mini`/`SUITE=smoke` is the
+first 5 TB2.1 ids *alphabetically*, which contains zero image/media tasks and no shape spread). This
+suite instead hand-picks ids FROM the real vendored task files to span all three task shapes (§2 Layer
+0 of the harness doc — REPAIR/PRODUCE/OPERATE), the media-input rule (>=2 image/video tasks), and the
+timeout-budget distribution (§4, including the rare 7200s/12000s outliers so short-only sampling can't
+hide a timeout bug). Explicit passthrough — not a `-mini` suffix, so it isn't the mechanical head-N
+smoke:
+```bash
+MACHINES=2 ARM=claude-open LABEL=tb-coverage BENCHMARK=terminal SUITE=terminal-coverage ./run-distributed.sh run
+```
+The id list (with each one's shape/media/timeout) lives as `benchmarks._TERMINAL_COVERAGE_SAMPLE`,
+inline-commented per id so the sample stays human-auditable — extend it there, not by scanning
+`out/tb21-tasks/` at run time, so an id can't silently drop out of the sample. As of 2026-07-21 this
+suite is defined but has not yet been RUN.
 
 **Agent selection.** The `econ` arm shells the opencode agent as before (no change). Every `claude-<mix>`
 arm and `claude-native` run a **custom Harbor agent** (`harbor run --agent-import-path harbor_agents:ClaudeUnerrAgent`,

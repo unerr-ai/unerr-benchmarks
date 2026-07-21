@@ -34,6 +34,10 @@ S3 KEY LAYOUT (bucket + prefix from flags/env):
         traces/<iid>/opencode.db          (econ)
         traces/<iid>/trajectory.json      (terminal)
         traces/<iid>/sessions.cast        (terminal)
+        traces/<iid>/claude-session.jsonl (terminal, claude-* arms — survives a
+                                            trial killed mid-run, unlike
+                                            trajectory.json which Harbor only
+                                            writes on completion)
         results/{preds.json,meta.jsonl,dead.jsonl,cost-report.md}
         logs/<file>                       coordinator/server/merge/report logs
         db/queue.db                       the work-queue sqlite (durable audit)

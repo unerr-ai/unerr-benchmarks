@@ -585,6 +585,27 @@ if [ "$CLAUDE_ARM_KIND" = "native" ]; then
   echo "==> CLAUDE_CODE_OAUTH_TOKEN: set (len ${#CLAUDE_CODE_OAUTH_TOKEN})"
 fi
 
+# ── preflight: vendored CPython interpreter (claude-* arms, bake path only) ────
+# harbor_agents.py's ClaudeUnerrAgent._resolve_pybin() uploads a self-contained
+# python-build-standalone interpreter into any task image with no system
+# python3/python (~30% of terminal-bench base images) and raises a HARD
+# RuntimeError mid-task when it finds neither a system interpreter NOR this
+# vendored tarball. That tarball is a GITIGNORED build artifact — it only
+# exists once someone has vendored it — so a fresh checkout silently produces
+# an image that fails every such task minutes into a paid fly run. Catch it
+# HERE, before the ~10min remote bake. Checked in the SAME dir Dockerfile.dist
+# actually COPYs from (`COPY reference/claude/local-docker /work/claude/local-
+# docker`, build context = e2e/). Skipped for: econ (CLAUDE_ARM_KIND unset —
+# never stages this harness), IMAGE= reuse (no bake happens this run),
+# TERMINAL_STOCK_AGENT=1 (bare Harbor claude-code agent, never calls
+# install() so it needs no interpreter).
+if [ -n "$CLAUDE_ARM_KIND" ] && [ -z "$IMAGE" ] && [ "${TERMINAL_STOCK_AGENT:-}" != "1" ]; then
+  CLAUDE_CTX="$E2E_DIR/reference/claude/local-docker/context"
+  ls "$CLAUDE_CTX"/cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz >/dev/null 2>&1 \
+    || { echo "no vendored python-build-standalone tarball under $CLAUDE_CTX (expected cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz) — run: VENDOR_ONLY=1 e2e/reference/claude/local-docker/build-toolbox.sh (or rerun with TERMINAL_STOCK_AGENT=1 for the bare-baseline control)"; exit 1; }
+  echo "==> vendored python-build-standalone: $(basename "$(ls "$CLAUDE_CTX"/cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz | head -1)")"
+fi
+
 # EXA web-search key — the econ agent now ships Exa web search DEFAULT-ON across all
 # tiers/personas (econ-coding-agent: "default-on Exa web search across all tiers +
 # personas"), so the ECON arm enables Exa BY DEFAULT for EVERY benchmark; the claude

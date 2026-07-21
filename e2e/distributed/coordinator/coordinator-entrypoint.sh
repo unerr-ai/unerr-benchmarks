@@ -301,6 +301,12 @@ for row in rows:
     # S7b/S7c: write back the per-instance transcript synced over /complete,
     # mirroring the single-machine fullresolve layout (results/<label>/
     # artifacts/<iid>/) so a distributed near-miss stays reconstructable.
+    # claude_session_jsonl (see below) rides the SAME /complete row as the
+    # others — it only reaches here for a `done` row, same as every other
+    # trace field; its value is a written-incrementally transcript rather
+    # than a write-on-completion one, so within a `done` row it is the
+    # field most likely to still be populated when trajectory_json/err_txt
+    # are thin or empty (a trial that barely scraped past its timeout).
     events_jsonl = row["events_jsonl"] if "events_jsonl" in row_keys else None
     err_txt = row["err_txt"] if "err_txt" in row_keys else None
     db_b64 = row["db_b64"] if "db_b64" in row_keys else None
@@ -312,8 +318,22 @@ for row in rows:
     # RuntimeError (before the agent ever runs, so trial_dir/events_jsonl/
     # err_txt don't exist yet) is ever captured.
     harbor_run_log = row["harbor_run_log"] if "harbor_run_log" in row_keys else None
+    # Claude Code's OWN session .jsonl (claude-* arms only) — written
+    # incrementally as the agent runs, so unlike trajectory_json it survives
+    # a trial killed mid-run (no trajectory.json/err.txt at all).
+    claude_session_jsonl = row["claude_session_jsonl"] if "claude_session_jsonl" in row_keys else None
+    # EVERY Claude Code session .jsonl for the trial (main + Task sub-agent
+    # sidechains, cc-harness-hooks.py's additive _sync_all_claude_sessions),
+    # gzip-tarred + base64-encoded by harness_terminal.py's _collect_traces —
+    # claude_session_jsonl above only ever holds the main session, so this is
+    # the only trace of a sub-agent (escalation: unerr-opus/unerr-fable)
+    # misbehaving. Decoded back to a real .tgz below, same idiom as db_b64.
+    claude_sessions_tgz_b64 = (
+        row["claude_sessions_tgz_b64"] if "claude_sessions_tgz_b64" in row_keys else None
+    )
     if (events_jsonl or err_txt or db_b64 or engine_log or trajectory_json
-            or sessions_cast or harbor_run_log):
+            or sessions_cast or harbor_run_log or claude_session_jsonl
+            or claude_sessions_tgz_b64):
         art_dir = rundir / "artifacts" / iid
         art_dir.mkdir(parents=True, exist_ok=True)
         if events_jsonl:
@@ -328,6 +348,13 @@ for row in rows:
             (art_dir / "sessions.cast").write_text(sessions_cast, encoding="utf-8")
         if harbor_run_log:
             (art_dir / "harbor-run.log").write_text(harbor_run_log, encoding="utf-8")
+        if claude_session_jsonl:
+            (art_dir / "claude-session.jsonl").write_text(claude_session_jsonl, encoding="utf-8")
+        if claude_sessions_tgz_b64:
+            try:
+                (art_dir / "claude-sessions.tgz").write_bytes(base64.b64decode(claude_sessions_tgz_b64))
+            except (ValueError, TypeError):
+                pass
         if db_b64:
             try:
                 (art_dir / "opencode.db").write_bytes(base64.b64decode(db_b64))

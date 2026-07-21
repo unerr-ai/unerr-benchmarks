@@ -120,6 +120,31 @@ _LIVE_VERIFIED_MINI5 = [
 _PRO_MINI_FALLBACK = []      # populated by resolve_ids('pro-mini') from the jsonl head
 _TERMINAL_MINI_FALLBACK = []  # populated from the vendored tb task list
 
+# Terminal-Bench 2.1 coverage-gap sample (HARNESS_UNIVERSAL.md §13) — `terminal-mini`
+# is the first 5 ids ALPHABETICALLY, which happens to contain zero image/media
+# tasks and no deliberate shape spread. This 10-id set is hand-picked FROM the
+# real vendored task files (out/tb21-tasks/, read individually — task.toml +
+# instruction.md — on 2026-07-21) to exercise every branch the harness now has:
+# all three task shapes (§2 Layer 0 — REPAIR/PRODUCE/OPERATE), the media-input
+# rule (>=2 image/video tasks), and a spread of the timeout-budget distribution
+# (§4: 48@900s/17@1800s/13@3600s core, plus the rare 7200s/12000s outliers, so
+# short-only sampling can't hide a timeout bug). Each entry's comment names its
+# shape + media property + timeout so the sample stays human-auditable instead
+# of silently drifting; keep this list in `resolve_ids`, never a directory scan,
+# so an id can't disappear from the sample just because tb21-tasks/ changes.
+_TERMINAL_COVERAGE_SAMPLE = [
+    "code-from-image",              # PRODUCE + MEDIA(image) — OCR a pseudocode screenshot, compute+write the exact printed value; 1200s
+    "financial-document-processor", # PRODUCE + MEDIA(jpg+pdf) — classify/OCR mixed documents, emit an exact-schema CSV; 1200s
+    "sam-cell-seg",                 # PRODUCE + MEDIA(image) — MobileSAM cell-mask segmentation pipeline; 7200s (long-budget outlier)
+    "video-processing",             # PRODUCE + MEDIA(video) — analyze an MP4, emit exact TOML field names; 3600s
+    "qemu-alpine-ssh",              # OPERATE — boot a QEMU VM and make sshd actually reachable (verified by exercising it, not config); 900s
+    "install-windows-3.11",         # OPERATE — boot QEMU to a live desktop with VNC + programmatic keyboard control; 3600s
+    "fix-git",                      # REPAIR — recover lost commits from a detached HEAD, merge into master; 900s
+    "fix-code-vulnerability",       # REPAIR — find+fix a CRLF-injection CWE in an existing repo, tests must go green; 900s
+    "cobol-modernization",          # PRODUCE — reimplement a COBOL program's exact I/O behavior in Python, byte-identical outputs; 900s
+    "build-pov-ray",                # PRODUCE, REPAIR-flavored (legacy 1990s source likely needs patching to compile) — build+install to spec, verified by a render match; 12000s (the single longest budget in the whole set)
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Descriptors. One dict per benchmark; the fields below are the CONTRACT every
@@ -272,6 +297,26 @@ _TERMINAL = {
         # only place a SETUP-phase RuntimeError (before the agent ever starts,
         # so trial.log/err.txt don't exist) is ever captured.
         ("harbor-run.log", "harbor_run_log"),
+        # Claude Code's OWN session .jsonl (cc-harness-hooks.py's
+        # _sync_claude_session, PostToolUse-synced into Harbor's persisted
+        # /logs/agent/sessions/ dir), claude-* arms only — NULL for
+        # non-Claude terminal agents. Unlike trajectory.json (written only
+        # when a trial COMPLETES), this file is appended to incrementally,
+        # so it survives a trial killed mid-run (root cause: `caffe-cifar-10`
+        # exhausted its [agent] timeout_sec budget, 2026-07-21, leaving no
+        # trajectory.json/err.txt at all).
+        ("claude-session.jsonl", "claude_session_jsonl"),
+        # Every Claude Code session .jsonl for this trial, including every
+        # Task sub-agent sidechain (cc-harness-hooks.py's additive
+        # _sync_all_claude_sessions), packaged as one gzip tar by
+        # harness_terminal.py's _collect_traces and base64-encoded so it
+        # rides this same descriptor-driven TEXT pipeline unmodified — claude-*
+        # arms only, NULL otherwise. WHY: escalation (unerr-opus/unerr-fable)
+        # runs in a Task sub-agent, so claude_session_jsonl (main session
+        # only) never captures it — this is the only trace of escalation
+        # behavior. coordinator-entrypoint.sh base64-decodes it back into a
+        # real claude-sessions.tgz at drain (same idiom as db_b64/opencode.db).
+        ("claude-sessions.tgz.b64", "claude_sessions_tgz_b64"),
     ),
 }
 
@@ -352,6 +397,12 @@ def resolve_ids(suite=None, dataset=None, split=None):
         return _hf_ids(dataset or _LITE["dataset"], split or _LITE["split"])
     if s == "mini":  # historical alias for the Verified Mini-10
         return list(_VERIFIED_MINI10)
+
+    # terminal-coverage -> the hand-picked shape+media smoke sample (see
+    # _TERMINAL_COVERAGE_SAMPLE). Distinct from `terminal-mini` (first-N
+    # alphabetical) — a deliberate curated set, not a mechanical head slice.
+    if s == "terminal-coverage":
+        return list(_TERMINAL_COVERAGE_SAMPLE)
 
     # <benchmark>-mini  -> the N-id smoke set for that benchmark.
     if s.endswith("-mini"):

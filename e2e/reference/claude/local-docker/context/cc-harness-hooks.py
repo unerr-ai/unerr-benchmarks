@@ -23,6 +23,25 @@ this script degrades to a no-op gate/deny, never a stuck or crashed agent turn.
 Subcommands (each reads one hook-event JSON object from stdin):
   record   PostToolUse recorder. Silent. Appends one compact JSON line per
            edit/cmd/task event to the state log. Never prints, never blocks.
+           ALSO best-effort-syncs Claude Code's OWN session transcript
+           ($CLAUDE_CONFIG_DIR/projects/**/*.jsonl, default ~/.claude/...)
+           into /logs/agent/sessions/claude-session.jsonl — Harbor's
+           persisted per-trial log directory — on every invocation (see
+           _sync_claude_session). WHY: Harbor only writes trajectory.json
+           when a trial COMPLETES; a task killed mid-run after exhausting
+           its timeout budget leaves NO trajectory and NO err.txt (root
+           cause: terminal-bench task `caffe-cifar-10`, 2026-07-21, killed
+           at the [agent] timeout_sec=3600 budget). Claude Code appends to
+           its session .jsonl incrementally as it runs, so that file
+           survives a killed trial and closes the blind spot. Copying it
+           on every PostToolUse call (not just at Stop) keeps it current to
+           within one tool call of a kill. ALSO (additive, see
+           _sync_all_claude_sessions) syncs EVERY session .jsonl candidate —
+           including every Task sub-agent's own file, which the main-session
+           copy above deliberately filters out — into the same directory
+           under a distinct per-session filename, so escalation
+           (unerr-opus/unerr-fable, which runs in a sub-agent) leaves a
+           transcript too.
   gate     Stop hook. Reads the state log, evaluates the finish gates in a
            fixed order (Z, R, V, E — first hit wins), and on a hit prints
            {"decision":"block","reason":"..."} so Claude Code returns the
@@ -40,18 +59,24 @@ Subcommands (each reads one hook-event JSON object from stdin):
            trigger persists past opus; "1" -> PANEL: the original
            spawn-both-in-parallel single block.
   deny     PreToolUse hook. Reads the state log, evaluates the deny rules in
-           a fixed order (T, B — first match wins), and on a match prints a
+           a fixed order (T, B, N — first match wins), and on a match prints a
            hookSpecificOutput permissionDecision:"deny" object so Claude Code
            refuses the tool call before it runs. T (an edit into a
            test-shaped path fires a one-time nudge — the grader runs its own
            copy of the checks, so editing a test usually only fakes progress;
            an identical re-issue on the same file is treated as an
-           evidence-cited override and allowed through) and B (5+ un-greened
+           evidence-cited override and allowed through), B (5+ un-greened
            edits on one file AND verification has already blocked -> forced
-           escalation, reads the same state log gate uses) are the only two
-           rules — the old python/django-specific time-source convention
-           check (Rule C) has been removed, it does not belong in a universal
-           harness. Every deny also appends a "deny" event to the state log.
+           escalation, reads the same state log gate uses), and N (a
+           `# unerr:verify`-marked Bash command whose whole body only compares
+           a file the agent itself wrote this session against a string
+           literal -> a one-time, capped nudge — that proves the write
+           happened, not that the value is correct; a re-issue of the SAME
+           command is an evidence-cited override and allowed through; see
+           rule_n()) are the three rules — the old python/django-specific
+           time-source convention check (Rule C) has been removed, it does
+           not belong in a universal harness. Every deny also appends a
+           "deny" event to the state log.
 
 PROFILE: HARNESS_HOOKS unset/""/"0" turns every subcommand into a no-op; ANY
 other value ("1", "generic", "swe", "universal", ...) turns hooks on with the
@@ -76,6 +101,7 @@ dir and prints PASS/FAIL per case; exits non-zero on any FAIL. Useful as a
 pre-flight check that the gate logic still does what the docstring says.
 """
 
+import glob
 import hashlib
 import json
 import os
@@ -88,6 +114,16 @@ from collections import Counter
 
 STATE_ENV = "CC_HARNESS_STATE"
 DEFAULT_STATE_DIR = "/tmp/cc-harness"
+
+# ── Claude Code session-transcript sync (destination side) ─────────────────
+# Overridable for test isolation, same pattern as STATE_ENV/DEFAULT_STATE_DIR.
+# Default is Harbor's own PERSISTED per-trial agent-log directory (Harbor's
+# claude_code.py tees claude-code.txt there — proven to survive to trial_dir
+# on the worker host even when a trial is killed mid-run), so anything
+# written under it rides the same durability guarantee as that file.
+CLAUDE_SESSIONS_DEST_ENV = "CC_HARNESS_SESSIONS_DEST"
+DEFAULT_SESSIONS_DEST_DIR = "/logs/agent/sessions"
+CLAUDE_SESSION_DEST_NAME = "claude-session.jsonl"
 
 # ── profile resolution ───────────────────────────────────────────────────
 # HARNESS_HOOKS: unset/""/"0" -> hooks off, every subcommand a no-op. ANY
@@ -140,6 +176,12 @@ STUCK_FAIL_THRESHOLD = 4
 TEST_PATH_SEGMENTS = {"tests", "testing"}
 RULE_B_EDIT_THRESHOLD = 5
 RULE_B_DENY_CAP = 2
+# Rule N (anti-tautology): capped at 1 denial per run, same soft/override-able
+# shape as Rule T — deciding tautology in general is undecidable, and a
+# literal comparison is LEGITIMATE whenever the expected value comes from the
+# task statement (common on PRODUCE-shaped tasks), so this stays a one-shot
+# nudge, never a repeated or hard block. See rule_n().
+TAUTOLOGY_DENY_CAP = 1
 
 
 # ── profile ───────────────────────────────────────────────────────────────
@@ -269,6 +311,182 @@ def read_events():
     return events
 
 
+# ── Claude Code session-transcript sync (source side) ──────────────────────
+
+def _claude_config_dir():
+    """Root Claude Code itself writes sessions under — CLAUDE_CONFIG_DIR if
+    the CLI process has it set, else Claude Code's own built-in default
+    ~/.claude. Read from the SAME env var the CLI reads (never invented),
+    so this always looks under the same tree the CLI is actually writing
+    to, regardless of whether CLAUDE_CONFIG_DIR is ever set in this repo."""
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def _sessions_dest_dir():
+    return os.environ.get(CLAUDE_SESSIONS_DEST_ENV) or DEFAULT_SESSIONS_DEST_DIR
+
+
+def _session_head_info(path):
+    """Peek at the first few lines of a Claude Code session .jsonl and
+    return (is_sidechain, first_timestamp, session_id) in ONE pass — a
+    single head-read per candidate, not two or three:
+      - is_sidechain: True iff any peeked record carries "isSidechain":
+        true (a Task sub-agent session) rather than the main agent loop.
+      - first_timestamp: the "timestamp" field (an ISO-8601 string, same
+        format across records) of the file's FIRST parseable record, or
+        None if absent/unparseable — this is the session's own start time.
+      - session_id: the "sessionId" field (present on every real Claude
+        Code record, verified live 2026-07-21) of the first record that
+        carries one, or None if absent — used ONLY to name the per-session
+        sync copy in _sync_all_claude_sessions; the main-session SELECTION
+        in _sync_claude_session never reads this field, so adding it here
+        cannot affect that logic.
+    Reads only a handful of lines — these files can run hundreds of KB —
+    and is best-effort: any read/parse failure (OSError, malformed JSON
+    line) is swallowed and degrades to (False, None, None), never raised."""
+    is_sidechain = False
+    first_timestamp = None
+    session_id = None
+    seen_first_record = False
+    try:
+        with open(path, "r") as f:
+            for _ in range(20):
+                line = f.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if not seen_first_record:
+                    seen_first_record = True
+                    ts = record.get("timestamp")
+                    if isinstance(ts, str) and ts:
+                        first_timestamp = ts
+                if session_id is None:
+                    sid = record.get("sessionId")
+                    if isinstance(sid, str) and sid:
+                        session_id = sid
+                if record.get("isSidechain") is True:
+                    is_sidechain = True
+    except OSError:
+        pass
+    return is_sidechain, first_timestamp, session_id
+
+
+def _sync_claude_session():
+    """Best-effort copy of Claude Code's OWN incrementally-written session
+    transcript ($CLAUDE_CONFIG_DIR/projects/<escaped-cwd>/<uuid>.jsonl) into
+    a single stable destination file under Harbor's persisted agent-log dir
+    (see CLAUDE_SESSIONS_DEST_ENV/DEFAULT_SESSIONS_DEST_DIR) — the file
+    trajectory.json can't be: Harbor only writes trajectory.json when a
+    trial COMPLETES, but Claude Code appends to its session .jsonl as it
+    runs, so it survives a killed/timed-out trial.
+
+    Claude Code writes a SEPARATE session .jsonl for each Task sub-agent, in
+    addition to the main agent loop's own file. Picking by most-recently-
+    modified (the original approach) flips the destination between the main
+    session and whichever sub-agent last touched its file, producing a
+    transcript that is not a coherent record of any single session (observed
+    live 2026-07-21: synced tool-call count went 41 -> 38 while total record
+    count rose 112 -> 182 mid-run). This prefers the candidate whose records
+    are NOT marked "isSidechain": true (see _session_head_info) — that is
+    the main agent loop. Among the remaining candidates, it picks the one
+    whose FIRST record has the earliest "timestamp" (the session's own
+    start time) — NOT filesystem ctime: ctime is inode CHANGE time, and
+    Claude Code appends to the main session file continuously all run long,
+    so every append bumps its ctime forward, making ctime-min pick whichever
+    session was written LEAST recently and reproducing the exact flip-flop
+    this fix exists to prevent. Only if NO candidate yields a usable
+    "timestamp" at all (no records, or an older Claude Code without the
+    field) does this fall back to oldest-ctime — a poor last resort, kept
+    only because it is strictly better than no tie-break at all. OVERWRITES
+    the same destination filename every call, so there is never more than
+    one candidate for harness_terminal.py's _collect_traces to glob for on
+    the host side. Never raises: a copy failure must not affect the tool
+    call this piggybacks on (same fail-open contract as append_event).
+
+    ADDITIVE: after the main-session copy above (selection logic UNCHANGED),
+    also hands the same candidates/heads to _sync_all_claude_sessions, which
+    syncs EVERY candidate (main + every Task sub-agent sidechain) into the
+    same dest dir under its own distinct filename — see that function's
+    docstring for why (escalation runs in a sub-agent, so its transcript is
+    otherwise never collected)."""
+    candidates = []
+    heads = {}
+    try:
+        pattern = os.path.join(_claude_config_dir(), "projects", "**", "*.jsonl")
+        candidates = [p for p in glob.glob(pattern, recursive=True) if os.path.isfile(p)]
+        if candidates:
+            heads = {p: _session_head_info(p) for p in candidates}
+            non_sidechain = [p for p in candidates if not heads[p][0]]
+            pool = non_sidechain or candidates
+            timestamped = [p for p in pool if heads[p][1]]
+            if timestamped:
+                src = min(timestamped, key=lambda p: heads[p][1])
+            else:
+                src = min(pool, key=lambda p: os.stat(p).st_ctime)
+            dest_dir = _sessions_dest_dir()
+            os.makedirs(dest_dir, exist_ok=True)
+            shutil.copyfile(src, os.path.join(dest_dir, CLAUDE_SESSION_DEST_NAME))
+    except OSError:
+        pass
+    if candidates:
+        _sync_all_claude_sessions(candidates, heads)
+
+
+def _sync_all_claude_sessions(candidates, heads):
+    """Best-effort copy of EVERY Claude Code session .jsonl candidate — the
+    main agent loop AND every Task sub-agent sidechain alike — into the
+    sessions dest dir (_sessions_dest_dir()), each under its own distinct,
+    stable filename: "<sessionId>.jsonl" using the "sessionId" record field
+    _session_head_info already read (present on every real Claude Code
+    record, verified live 2026-07-21), or the source file's own basename
+    when no sessionId was found — still collision-free, since Claude Code
+    already guarantees one .jsonl per session on disk.
+
+    ADDITIVE to _sync_claude_session's single claude-session.jsonl
+    main-session copy, and does not touch that selection logic — it only
+    reuses the candidates/heads that copy already computed (one head-read
+    per candidate, not two). WHY: escalation (the unerr-opus/unerr-fable
+    ladder, HARNESS_UNIVERSAL.md §5) — and all routine Task delegation —
+    runs in a sub-agent, whose OWN session .jsonl was previously filtered
+    out by the main-session SELECTION and silently discarded, leaving
+    escalation misbehavior unobservable (the gap this closes).
+
+    Skips a candidate whose destination copy already has the SAME size AND
+    mtime as the current source (shutil.copy2 preserves mtime on copy) —
+    this runs on EVERY PostToolUse call, so re-copying every session's
+    multi-hundred-KB file on every call, most of which are unchanged, would
+    be real wasted IO on a hot path. Never raises: any OSError/malformed
+    input degrades to a silent skip of that one candidate, same fail-open
+    contract as _sync_claude_session."""
+    try:
+        dest_dir = _sessions_dest_dir()
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError:
+        return
+    for p in candidates:
+        try:
+            session_id = heads.get(p, (False, None, None))[2]
+            name = f"{session_id}.jsonl" if session_id else os.path.basename(p)
+            dest = os.path.join(dest_dir, name)
+            src_stat = os.stat(p)
+            if os.path.isfile(dest):
+                dest_stat = os.stat(dest)
+                if (dest_stat.st_size == src_stat.st_size
+                        and dest_stat.st_mtime == src_stat.st_mtime):
+                    continue
+            shutil.copy2(p, dest)
+        except OSError:
+            continue
+
+
 # ── record ────────────────────────────────────────────────────────────────
 
 def build_record_event(data, profile="universal"):
@@ -317,6 +535,7 @@ def cmd_record():
     profile = _profile()
     if profile is None:
         return
+    _sync_claude_session()
     ev = build_record_event(data, profile)
     if ev is not None:
         append_event(ev)
@@ -355,7 +574,7 @@ def _gate_e_panel(tasks, block_counts, repeated_failure):
     if not ((r_already or v_capped or repeated_failure) and not escalated):
         return None
     if r_already:
-        trigger = "a previously-passing test was regressed and one rework did not recover it"
+        trigger = "a previously-green verification regressed and one rework did not recover it"
     elif v_capped:
         trigger = "the verification gate (V) has blocked twice without a green finish"
     else:
@@ -364,7 +583,7 @@ def _gate_e_panel(tasks, block_counts, repeated_failure):
         "E",
         f"Escalation trigger hit: {trigger}. Per the escalation contract: "
         "spawn unerr-opus and unerr-fable in parallel with the same "
-        "evidence brief (issue text, observations, attempts, all "
+        "evidence brief (task text, observations, attempts, all "
         "candidate sites — not your preferred hypothesis), reconcile "
         "their verdicts, implement the winner, verify, then finish.",
     )
@@ -400,7 +619,7 @@ def _gate_e_ladder(tasks, blocks, block_counts, repeated_failure):
         if not (r_already or v_capped or repeated_failure):
             return None
         if r_already:
-            trigger = "a previously-passing test was regressed and one rework did not recover it"
+            trigger = "a previously-green verification regressed and one rework did not recover it"
         elif v_capped:
             trigger = "the verification gate (V) has blocked twice without a green finish"
         else:
@@ -498,11 +717,11 @@ def evaluate_gate(events, profile="universal"):
             return (
                 "R",
                 "A verification command that previously passed now fails: "
-                f"{regressed_key}. Your change introduced a regression. "
-                "Rework your fix so the task's success condition AND that "
-                "verify-marked command are green — do not finish while it is "
-                "red. If one focused rework cannot recover it, escalate per "
-                "the escalation contract.",
+                f"{regressed_key}. Something that used to work no longer "
+                "does. Rework your change so the task's success condition "
+                "AND that verify-marked command are green again — do not "
+                "finish while it is red. If one focused rework cannot "
+                "recover it, escalate per the escalation contract.",
             )
 
     # Gate V — no verify-marked command has EVER succeeded, or a file edit
@@ -518,8 +737,8 @@ def evaluate_gate(events, profile="universal"):
                 "You have not proven this task works: establish the command "
                 "that proves success for this task and run it with `# "
                 "unerr:verify` appended; re-run it after your final change. "
-                "This benchmark has no fixed test layout — the marker is how "
-                "you declare which command IS the proof. Finish only once "
+                "This benchmark has no fixed check layout — the marker is "
+                "how you declare which command IS the proof. Finish only once "
                 "that verify-marked command is green and no edit has landed "
                 "since.",
             )
@@ -676,21 +895,94 @@ def rule_b(events, file_path):
         "spawn BOTH unerr-opus and unerr-fable via the Task tool with the same "
         "evidence brief (task text, what you observed, what you tried, all "
         "candidate sites), reconcile their verdicts, then implement the "
-        "agreed fix once.",
+        "agreed change once.",
     )
+
+
+TAUTOLOGY_DENY_MSG = (
+    "This verify command only compares a file's contents against a string "
+    "literal you chose — that proves the file was written, not that the "
+    "value is correct. If the expected value comes from the task "
+    "statement, cite it in a comment and re-issue the same command (it "
+    "will be allowed); otherwise verify by recomputing the answer "
+    "independently — never by comparing your own output back to itself."
+)
+
+# Deliberately narrow — deciding tautology in general is undecidable, and a
+# literal comparison IS legitimate whenever the expected value comes from the
+# task statement (common on PRODUCE-shaped tasks). This matches ONLY the
+# mechanically-detectable shape: the command's ENTIRE body (verify marker +
+# surrounding whitespace stripped) is nothing but a file-contents-vs-literal
+# comparison — never a broader semantic judgment call.
+_TAUTOLOGY_CAT_RE = re.compile(
+    r'^(?:test|\[)\s+"?\$\(\s*cat\s+([^\s")]+)\s*\)"?\s*=+\s*'
+    r'[\'"][^\'"]*[\'"]\s*\]?\s*;?\s*$'
+)
+_TAUTOLOGY_GREP_RE = re.compile(
+    r'^grep\s+(?:-\w+\s+)*[\'"][^\'"]*[\'"]\s+([^\s;|&]+)\s*$'
+)
+
+
+def _tautology_target(cmd):
+    """If `cmd`'s whole body (verify marker + whitespace stripped) is one of
+    the narrow comparison shapes above — `test "$(cat X)" = 'lit'`, `[
+    "$(cat X)" = "lit" ]`, `grep -q 'lit' X` — return X, the file path token
+    being compared; else None."""
+    body = " ".join(_strip_verify_marker(cmd).split())
+    m = _TAUTOLOGY_CAT_RE.match(body) or _TAUTOLOGY_GREP_RE.match(body)
+    return m.group(1) if m else None
+
+
+def rule_n(events, cmd):
+    """Rule N (anti-tautology): a soft, one-time, capped nudge on Gate V's
+    marker — same override-able shape as rule_t, never a hard block. Fires
+    when a `# unerr:verify`-marked Bash command's whole body is
+    _tautology_target's narrow file-vs-literal comparison AND the file was
+    itself EDITED earlier this session (the ledger's own `edit` events — no
+    new state invented): the agent wrote the answer, then "verified" it by
+    reading its own write back, which proves the write happened, not that
+    the value is right — the chess-best-move false-green (`test "$(cat
+    move.txt)" = 'g2g4'  # unerr:verify` against the agent's own guess).
+    Capped at TAUTOLOGY_DENY_CAP denials per run: deciding tautology in
+    general is undecidable, and a literal comparison is LEGITIMATE when the
+    expected value comes from the task statement, so a hard or repeated
+    block would false-positive on correct PRODUCE-shaped verification. A
+    re-issue of the SAME command (by _cmd_key) after its own denial is an
+    evidence-cited override and is allowed through, exactly like rule_t."""
+    if not cmd.strip() or not _verify_marker_present(cmd):
+        return None
+    target = _tautology_target(cmd)
+    if target is None:
+        return None
+    target_base = os.path.basename(target)
+    written_this_session = any(
+        e.get("ev") == "edit" and os.path.basename(e.get("file") or "") == target_base
+        for e in events
+    )
+    if not written_this_session:
+        return None
+    key = _cmd_key(cmd)
+    prior_n = [e for e in events if e.get("ev") == "deny" and e.get("rule") == "N"]
+    if any(e.get("key") == key for e in prior_n):
+        return None
+    if len(prior_n) >= TAUTOLOGY_DENY_CAP:
+        return None
+    return ("N", TAUTOLOGY_DENY_MSG)
 
 
 def evaluate_deny(events, data, profile="universal"):
     """Pure: state events + hook stdin dict -> None (allow) or (rule_letter,
-    reason) to deny. Evaluated in fixed order T, B; first match wins.
+    reason) to deny. Evaluated in fixed order T, B, N; first match wins.
     Universal profile: T is a one-time, override-able nudge on test-shaped
     paths (rule_t); B force-escalates on 5+ un-greened edits on one file
     once verification has already revealed a gap (rule_b, rewired off the
-    `# unerr:verify`-marked cmd ledger). The old Rule C (a
-    datetime.now()-vs-utcnow() time-source convention check) is GONE — it
-    was python/django-specific and does not belong in a universal harness.
-    profile is accepted for API compat; there is only one profile now so it
-    is otherwise unused."""
+    `# unerr:verify`-marked cmd ledger); N is a one-time, capped nudge on a
+    marked Bash command that only compares a file the agent wrote this
+    session against a string literal (rule_n) — the chess-best-move
+    anti-tautology case. The old Rule C (a datetime.now()-vs-utcnow()
+    time-source convention check) is GONE — it was python/django-specific
+    and does not belong in a universal harness. profile is accepted for API
+    compat; there is only one profile now so it is otherwise unused."""
     tool_input = data.get("tool_input") or {}
     file_path = tool_input.get("file_path") or ""
 
@@ -699,6 +991,10 @@ def evaluate_deny(events, data, profile="universal"):
         return result
 
     result = rule_b(events, file_path)
+    if result is not None:
+        return result
+
+    result = rule_n(events, tool_input.get("command") or "")
     if result is not None:
         return result
 
@@ -712,7 +1008,9 @@ def deny_once(data):
     the profile itself: hooks off (_profile() is None) is a pure allow, no
     evaluation, no state write — both callers (cmd_deny, run_selftest)
     already treat a None return as allow, so this needs no caller-side
-    change."""
+    change. Rule N denies are Bash calls (no file_path in tool_input), so
+    the persisted event also carries the command's own `key` (_cmd_key) —
+    rule_n's override check matches on that, not on `file`."""
     profile = _profile()
     if profile is None:
         return None
@@ -722,7 +1020,10 @@ def deny_once(data):
         rule, _reason = result
         tool_input = data.get("tool_input") or {}
         file_path = tool_input.get("file_path") or "?"
-        append_event({"t": time.time(), "ev": "deny", "rule": rule, "file": file_path})
+        event = {"t": time.time(), "ev": "deny", "rule": rule, "file": file_path}
+        if rule == "N":
+            event["key"] = _cmd_key(tool_input.get("command") or "")
+        append_event(event)
     return result
 
 
@@ -988,6 +1289,30 @@ def run_selftest():
             "Gate E fires via the stuck trigger",
             r is not None and r[0] == "E",
         )
+
+        # Case 16: Rule N (anti-tautology) — a marked verify command whose
+        # whole body compares a file the agent wrote THIS session against a
+        # string literal is denied once with a soft nudge; a re-issue of the
+        # SAME command is allowed through (evidence-cited override); a
+        # build/run verify command never matches; the same comparison shape
+        # against a file never edited this session never fires either.
+        fresh_dir("case16-rule-n-anti-tautology")
+        append_event({"t": 1.0, "ev": "edit", "file": "move.txt"})
+        cmd_n = "test \"$(cat move.txt)\" = 'g2g4'  # unerr:verify"
+        rn1 = deny_once({"tool_name": "Bash", "tool_input": {"command": cmd_n}})
+        rn2 = deny_once({"tool_name": "Bash", "tool_input": {"command": cmd_n}})
+        check("rule N denies (once) a tautological verify of a self-written file",
+              rn1 is not None and rn1[0] == "N")
+        check("rule N allows the identical re-issue (override)", rn2 is None)
+
+        fresh_dir("case16b-rule-n-legit-verify-allowed")
+        append_event({"t": 1.0, "ev": "edit", "file": "move.txt"})
+        rn3 = deny_once({"tool_name": "Bash", "tool_input": {"command": "npm run build && npm test  # unerr:verify"}})
+        check("rule N never fires on a build/run verify command", rn3 is None)
+
+        fresh_dir("case16c-rule-n-not-self-written")
+        rn4 = deny_once({"tool_name": "Bash", "tool_input": {"command": cmd_n}})
+        check("rule N does not fire when the file was never edited this session", rn4 is None)
     finally:
         if orig_env is None:
             os.environ.pop(STATE_ENV, None)

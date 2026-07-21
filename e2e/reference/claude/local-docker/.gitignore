@@ -1,5 +1,7 @@
 # Staged at build time by build-toolbox.sh (packed from your unerr-cli checkout)
 context/unerr-ai-unerr-*.tgz
+# Vendored python-build-standalone tarball (fetched by build-toolbox.sh)
+context/cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz
 # Run outputs
 results/
 logs/

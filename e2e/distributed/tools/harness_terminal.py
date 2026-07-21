@@ -103,7 +103,9 @@ scratch, abandon)`).
 """
 from __future__ import annotations
 
+import base64
 import glob
+import io
 import json
 import os
 import re
@@ -111,6 +113,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import time
 
 # ── litellm_cost import (real LiteLLM spend capture) ────────────────────────
@@ -429,6 +432,30 @@ def _find_result_json(jobs_dir: str) -> str | None:
     return max(matches, key=lambda p: (p.count(os.sep), os.path.getmtime(p)))
 
 
+def _find_trial_dir(jobs_dir: str, result_path: str | None) -> str | None:
+    """The trial dir _collect_traces should read from — NOT simply
+    os.path.dirname(result_path). Harbor 0.20.0 writes result.json at TWO
+    depths: a job-level one at <jobs_dir>/<task>/result.json (always) and a
+    trial-level one at <jobs_dir>/<task>/<task>__<hash>/result.json (ONLY
+    once the trial COMPLETES). A trial killed mid-run (timeout/SIGKILL)
+    never gets the trial-level result.json, so deriving trial_dir from
+    result_path silently resolves to the job dir and every nested glob in
+    _collect_traces (trial.log, agent/**/trajectory.json,
+    agent/**/claude-session.jsonl) misses — even though claude-session.jsonl
+    is written INCREMENTALLY specifically so a killed trial is still
+    debuggable. Anchor on trial.log instead: Harbor writes it incrementally
+    from trial start, so it exists for killed trials too. Same selection
+    rule as _find_result_json (deepest match, newest mtime on ties —
+    retries create sibling trial dirs). Falls back to
+    os.path.dirname(result_path) when no trial.log is found, so behaviour
+    is unchanged where it already worked."""
+    matches = glob.glob(os.path.join(jobs_dir, "**", "trial.log"), recursive=True)
+    if matches:
+        deepest = max(matches, key=lambda p: (p.count(os.sep), os.path.getmtime(p)))
+        return os.path.dirname(deepest)
+    return os.path.dirname(result_path) if result_path else None
+
+
 def _copy_first(patterns: list[str], dest: str) -> bool:
     for pat in patterns:
         for src in glob.glob(pat, recursive=True):
@@ -439,6 +466,26 @@ def _copy_first(patterns: list[str], dest: str) -> bool:
                 except OSError:
                     continue
     return False
+
+
+def _find_sessions_dir(trial_dir: str) -> str | None:
+    """Locate the sessions dir cc-harness-hooks.py's _sync_claude_session /
+    _sync_all_claude_sessions write into (container-side
+    DEFAULT_SESSIONS_DEST_DIR = /logs/agent/sessions) under trial_dir on the
+    host — same **-glob indirection as the claude-session.jsonl copy just
+    below (agent/** for the newer Harbor layout, steps/** for older), so this
+    stays correct across the same layout variants _find_trial_dir already
+    handles. Sorted so a stable candidate wins on the rare case of more than
+    one match. None when absent — non-Claude terminal agents never write
+    one, and that must stay a no-op, not an error."""
+    for pat in (
+        os.path.join(trial_dir, "agent", "**", "sessions"),
+        os.path.join(trial_dir, "steps", "**", "sessions"),
+    ):
+        for cand in sorted(glob.glob(pat, recursive=True)):
+            if os.path.isdir(cand):
+                return cand
+    return None
 
 
 def _collect_traces(trial_dir: str | None, art_dir: str, resolved: bool,
@@ -452,11 +499,27 @@ def _collect_traces(trial_dir: str | None, art_dir: str, resolved: bool,
     one-line summary rather than copied. trajectory.json / sessions.cast ARE
     plausible Harbor filenames (agent-written trajectory/asciinema cast) —
     copied when present, skipped otherwise (never fatal; not confirmed
-    live for every agent). `harbor_log` (run()'s captured combined
+    live for every agent). claude-session.jsonl is Claude Code's OWN
+    incrementally-written session transcript, synced into Harbor's
+    persisted /logs/agent/sessions/ dir by cc-harness-hooks.py's
+    _sync_claude_session (claude-* arms only) — it survives a trial killed
+    mid-run, unlike trajectory.json which Harbor only writes on completion.
+    `harbor_log` (run()'s captured combined
     stdout+stderr of the `harbor run` subprocess) is copied whole as
     harbor-run.log — the ONLY place a SETUP-phase RuntimeError (raised before
     the agent ever starts, so trial_dir/trial.log don't exist yet) is ever
-    captured, so it must land here even when trial_dir is absent."""
+    captured, so it must land here even when trial_dir is absent.
+    claude-sessions.tgz.b64 packages the WHOLE sessions dir cc-harness-
+    hooks.py's additive _sync_all_claude_sessions synced (main session PLUS
+    every Task sub-agent sidechain — escalation runs in a sub-agent, so this
+    is the only place its transcript survives) into one gzip-compressed
+    archive, base64-encoded as TEXT so it rides worker-loop.py's existing
+    descriptor-driven text pipeline (_read_artifacts/_post_complete)
+    unmodified, same as every other traces entry — see benchmarks.py
+    `_TERMINAL["traces"]`. coordinator-entrypoint.sh decodes it back to a
+    real .tgz at drain (same base64 idiom that pipeline already uses for
+    opencode.db). Best-effort, never fatal; skipped when the sessions dir is
+    absent (non-Claude terminal agents have none)."""
     os.makedirs(art_dir, exist_ok=True)
 
     try:
@@ -483,6 +546,34 @@ def _collect_traces(trial_dir: str | None, art_dir: str, resolved: bool,
         os.path.join(trial_dir, "agent", "**", "*.cast"),
         os.path.join(trial_dir, "steps", "**", "*.cast"),
     ], os.path.join(art_dir, "sessions.cast"))
+    # claude-* arms only: cc-harness-hooks.py's _sync_claude_session
+    # PostToolUse-copies Claude Code's OWN incrementally-written session
+    # .jsonl into Harbor's persisted /logs/agent/sessions/ dir (container
+    # side), which lands under trial_dir/agent/ on the host — same
+    # durability guarantee as claude-code.txt. Unlike trajectory.json
+    # (Harbor writes it only when a trial COMPLETES), this file is written
+    # incrementally, so it survives a trial killed mid-run. Skipped, never
+    # fatal, for non-Claude terminal agents (no such file exists).
+    _copy_first([
+        os.path.join(trial_dir, "agent", "**", "claude-session.jsonl"),
+        os.path.join(trial_dir, "steps", "**", "claude-session.jsonl"),
+    ], os.path.join(art_dir, "claude-session.jsonl"))
+    # claude-* arms only: package the WHOLE sessions dir (main + every Task
+    # sub-agent sidechain _sync_all_claude_sessions synced) into one gzip
+    # archive, base64-encoded as text — see docstring above for why base64.
+    # Best-effort, never fatal; no-op when the sessions dir is absent.
+    sessions_dir = _find_sessions_dir(trial_dir)
+    if sessions_dir:
+        try:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                tar.add(sessions_dir, arcname="sessions")
+            b64_text = base64.b64encode(buf.getvalue()).decode("ascii")
+            with open(os.path.join(art_dir, "claude-sessions.tgz.b64"), "w",
+                      encoding="utf-8") as f:
+                f.write(b64_text)
+        except (OSError, tarfile.TarError):
+            pass
 
 
 def _extract_reward(obj: dict) -> float | None:
@@ -511,6 +602,37 @@ def _extract_reward(obj: dict) -> float | None:
     return best
 
 
+def _is_silent_death(art_dir: str) -> bool:
+    """Conservative silent-session-death check off the copied trajectory.json
+    in art_dir (see _collect_traces): true ONLY when the file exists, parses,
+    has a non-empty `steps` list, and the LAST step's `source` is `"user"` —
+    Claude Code's own "[Your previous response had no visible output...]"
+    nudge left unanswered, ending the session with rc=0 and no error (see
+    DEBUG_FAILED_TASK.md Step 3 and the trajectory_json schema documented
+    there: {agent, session_id, schema_version, steps[], final_metrics}).
+    False on ANY ambiguity — missing/unparseable file, empty steps, or a last
+    step from the agent — so a task that finished cleanly and was simply
+    graded WRONG (e.g. TB2.1's chess-best-move, which fails reproducibly with
+    a different wrong move every run) is never mistaken for a transient death
+    and rerun at real cost; only Queue.claim (coordinator/server.py) acts on
+    this flag, and only after its own conservative read
+    (Queue._is_silent_death_meta) confirms it.
+    """
+    path = os.path.join(art_dir, "trajectory.json")
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            traj = json.load(f)
+    except (OSError, ValueError):
+        return False
+    steps = traj.get("steps") if isinstance(traj, dict) else None
+    if not isinstance(steps, list) or not steps:
+        return False
+    last = steps[-1]
+    return isinstance(last, dict) and last.get("source") == "user"
+
+
 def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     """Run + grade ONE Terminal-Bench task via Harbor and report back to
     Worker._run_harness (worker-loop.py) in the harness_run contract:
@@ -537,6 +659,11 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     path (recovers a transient OAuth 429 burst) and 0 for econ/stock-agent,
     overridable for any arm via TERMINAL_MAX_RETRIES — this function only
     reads that env var, the launcher forwards it as a knob only when set.
+    meta_text also carries `silent_death` (bool, see `_is_silent_death`) —
+    true only when the trajectory's LAST step is an unanswered Claude Code
+    nudge (`source=='user'`), the discriminator coordinator/server.py's
+    failure-rerun reads to retry a silently-dead session without also
+    retrying a genuinely wrong-but-clean completion.
     @sem domain=benchmark-harness role=orchestration
     """
     task_dir = _task_dir(worker, iid)
@@ -710,7 +837,7 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
         worker.log(f"{iid}: harbor {stall_reason}")
 
     result_path = _find_result_json(jobs_dir)
-    trial_dir = os.path.dirname(result_path) if result_path else None
+    trial_dir = _find_trial_dir(jobs_dir, result_path)
 
     resolved = False
     result_obj: dict = {}
@@ -816,8 +943,15 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
                 "out_tokens": cost.get("out_tokens"),
                 "by_tier": cost.get("by_tier"),
             }
-    meta_text = json.dumps(meta)
-
     _collect_traces(trial_dir, art_dir, resolved, harbor_log=logpath)
+
+    # Silent-session-death discriminator (coordinator/server.py's
+    # Queue._is_silent_death_meta reads this to decide failure-rerun
+    # eligibility for a 'done'+resolved=0 row — see that function's
+    # docstring). Computed off the just-copied art_dir trajectory.json (see
+    # _collect_traces above) so it reads the exact bytes the coordinator
+    # will also receive, not a possibly-stale trial_dir glob.
+    meta["silent_death"] = _is_silent_death(art_dir)
+    meta_text = json.dumps(meta)
 
     return resolved, report_text, "", meta_text

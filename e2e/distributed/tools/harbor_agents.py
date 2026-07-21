@@ -63,20 +63,29 @@ by this module.
    uploaded into the task container, Node is nvm-installed, `npm install -g`
    stages the unerr binary, `dev-entitlement.mjs mint pro` mints an offline-Pro
    entitlement (parsed from its stdout — each exec() below is its own process,
-   so there is no shared shell to `eval` into, unlike run-instance.sh), then a
-   git repo is bootstrapped (git installed as root if missing + `git init` +
-   baseline commit as the agent user, since an arbitrary terminal-bench
-   workdir — unlike a SWE-bench checkout — often starts with no `.git` at
-   all and `unerr index` hard-requires one), then `unerr index --force` +
-   `unerr pm start` + `unerr install claude-code` wire the graph + daemon +
+   so there is no shared shell to `eval` into, unlike run-instance.sh), then
+   PYBIN is resolved (_resolve_pybin: prefer an already-present system
+   python3/python — cheap, no upload; only when the task image has neither,
+   upload + extract the vendored, self-contained python-build-standalone
+   CPython into {UNERR_REMOTE_DIR}/py/ — no apt/apk/yum, no network from
+   inside the task container), then `unerr index --force` + `unerr pm start`
+   + `unerr install claude-code` wire the graph + daemon +
    .mcp.json/.claude/settings.json/CLAUDE.md, and finally the shipped
    `.claude/agents/unerr-*.md` sub-agent defs are copied over whatever
    `unerr install` just wrote — same order, same artifacts, run-instance.sh's
-   ON path. Only getting `unerr` onto PATH is a hard gate (raises, matching
-   the "unerr binary not on PATH" fatal check in run-instance.sh); the git
-   bootstrap / graph index / daemon start / `unerr install claude-code` steps
-   are BEST-EFFORT past that gate, exactly as lenient there too (a cold index
-   or slow daemon boot degrades the run, it does not abort it).
+   ON path. We deliberately do NOT fabricate a git repo in the task workdir
+   (no `apt-get install git`, no `git init`/`commit`) — that would mutate the
+   benchmark's own environment with a repo the task never shipped, so `unerr
+   index` (which hard-requires one) DEGRADES BY DESIGN on a bare-fixture
+   terminal-bench task with no `.git` at all; it runs through _lenient_exec
+   (log-and-continue) like every other best-effort step below. Getting
+   `unerr` onto PATH and resolving PYBIN are the two hard gates (both raise
+   on failure — the "unerr binary not on PATH" fatal check in run-instance.sh,
+   and a missing interpreter meaning a task without gates, which would
+   produce invalid benchmark data); the graph index / daemon start / `unerr
+   install claude-code` steps past those gates stay BEST-EFFORT, exactly as
+   lenient there too (a cold index or slow daemon boot degrades the run, it
+   does not abort it).
 
 ── cc-harness-hooks.py determination (read live: e2e/reference/claude/
    local-docker/context/cc-harness-hooks.py): a single UNIVERSAL mode now —
@@ -133,15 +142,20 @@ _ON_OPERATOR_POLICY = (
 
 def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> str:
     """The ON operator policy appended via --append-system-prompt — same base
-    autonomy directive + shortest-path/delegation policy + TRACK/ONBOARD/
-    FIX-DISCIPLINE/DELEGATION/ESCALATION/FINISH-CONTRACT prompt run-instance.
-    sh's HARNESS_ON block uses (kept verbatim; not re-authored), collapsed to
-    a SINGLE universal profile: discover the project's own build/test/run
-    check while onboarding, reproduce the issue first, fix real source rather
-    than the check, and verify against the agent-marked `# unerr:verify`
-    command. The FINISH CONTRACT paragraph (the machine-checked stop gate) is
-    appended ONLY when `hooks_on`; the FIX-DISCIPLINE "fix real source, not
-    the checks" bullet is always present regardless of hooks. `escalation_panel`
+    autonomy directive + shortest-path/delegation policy + TRACK/SHAPE/
+    ONBOARD/FIX-DISCIPLINE/DELEGATION/ESCALATION/FINISH-CONTRACT prompt
+    run-instance.sh's HARNESS_ON block uses (kept verbatim; not re-authored),
+    collapsed to a SINGLE universal profile: classify the task's SHAPE
+    (REPAIR/PRODUCE/OPERATE, §2 Layer 0 of HARNESS_UNIVERSAL.md) before
+    onboarding, since what replaces reproduce-first and what the done-signal
+    must exercise both depend on it; discover the project's own build/test/
+    run check while onboarding (REPAIR); fix real source rather than the
+    check; and verify against the agent-marked `# unerr:verify` command
+    (including a line against restating your own written output as its own
+    proof — the chess-best-move false-green). The FINISH CONTRACT paragraph
+    (the machine-checked stop gate) is appended ONLY when `hooks_on`; the
+    FIX-DISCIPLINE "fix real source, not the checks" bullet and the SHAPE
+    paragraph are always present regardless of hooks. `escalation_panel`
     picks the ESCALATION paragraph's shape: False (default) is a mechanical
     two-rung LADDER (unerr-opus alone first, unerr-fable only if still
     unresolved) — the default because on the gateway arms both agents map to
@@ -188,7 +202,12 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
             "verification has succeeded since your last change; a marked "
             "command that once passed and now fails is a regression — fix "
             "it before finishing. Mark only the check you would stake the "
-            "task on, never exploratory commands."
+            "task on, never exploratory commands. A verify command that "
+            "merely reads back a value you wrote yourself proves the write "
+            "happened, not that the value is correct — when the expected "
+            "value isn't taken directly from the task statement, prove it "
+            "by recomputing the answer independently, never by comparing "
+            "your own output to itself."
         ) if hooks_on else ""
     )
     # ESCALATION_PANEL frozen contract: True is the ORIGINAL parallel-panel
@@ -235,6 +254,28 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
         "TaskUpdate each to completed as it lands; treat the tracker as your "
         "working memory across a long run, not bookkeeping, and clear it "
         "when the task is done.\n\n"
+        "SHAPE — classify the task before ONBOARD, into one of three "
+        "shapes (this decides what onboarding and verification mean for "
+        "THIS task): REPAIR — something exists and is broken (a repo, a "
+        "failing test) — keeps the steps below as written: onboard, "
+        "reproduce the failure first, fix, re-verify. PRODUCE — create an "
+        "artifact to an exact spec (write a file, render an image, emit a "
+        "report), no project to onboard and nothing failing at t=0 — "
+        "reproduce-first is replaced by spec extraction: read the task "
+        "statement and write down the exact output path, filename, format, "
+        "field names, value constraints, and tolerances; those become what "
+        "you verify against. OPERATE — make a system actually work (boot "
+        "it, serve it, make it reachable) — probe the current state first, "
+        "then verify by EXERCISING the running thing (curl the endpoint, "
+        "ssh in, connect the client), never by inspecting config. Two "
+        "rules apply regardless of shape: any non-text input (image, "
+        "video, audio, binary) must be processed programmatically (PIL / "
+        "cv2 / numpy / ffmpeg / objdump — install the tool if it is "
+        "absent); looking at it may inform a hypothesis but is never the "
+        "basis of an answer. And the exact output path, filename, and "
+        "format are part of correctness, not presentation — re-read the "
+        "task statement for them before finishing and confirm the "
+        "artifact exists exactly where specified.\n\n"
         "ONBOARD — before your first edit, learn how THIS project builds, "
         "tests, and runs itself: read its CI workflows (.github/workflows, "
         ".gitlab-ci.yml — the richest source, they list the exact commands "
@@ -309,8 +350,20 @@ def _find_unerr_tgz(context_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def _find_python_standalone_tarball(context_dir: Path) -> Path | None:
+    """The vendored python-build-standalone CPython tarball (glob, not a
+    pinned filename — build-toolbox.sh's own fetch step names it by release
+    tag + python version, so a version bump never needs a code change here).
+    Only staged/used when the task image has no system python3/python at
+    all — see ClaudeUnerrAgent._resolve_pybin."""
+    matches = sorted(context_dir.glob(
+        "cpython-*-x86_64-unknown-linux-gnu-install_only.tar.gz"))
+    return matches[0] if matches else None
+
+
 def _hooks_settings_command(remote_dir: str, hooks_on: bool,
-                             hooks_value: str, escalation_panel: bool) -> str:
+                             hooks_value: str, escalation_panel: bool,
+                             pybin: str) -> str:
     """Shell command writing .claude/settings.local.json + the PreToolUse
     auto-approve helper script (`allow-all.sh`).
 
@@ -347,7 +400,15 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
     session-env propagation to know whether hooks are on (or the escalation
     shape) to apply; the inline prefix pins it deterministically on every
     invocation. The PreToolUse allow-all hook above is hooks-agnostic and
-    stays unprefixed."""
+    stays unprefixed.
+
+    `pybin` is the interpreter path install() already resolved via
+    _resolve_pybin (an already-present system python3/python, or the shipped
+    python-build-standalone interpreter when the task image had neither). It
+    is baked in as a LITERAL path — both in the hook "command" strings below
+    and in the json.tool validator — rather than re-resolved with `command -v`
+    at hook-invocation time, since a Claude Code hook subprocess isn't
+    guaranteed to inherit this session's env or PATH."""
     # matcher "*" => fire on EVERY tool call; allow-all.sh prints the decision.
     pretooluse = (
         '      { "matcher": "*",\n'
@@ -367,9 +428,9 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
         )
         pretooluse += (
             ",\n"
-            '      { "matcher": "Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
+            '      { "matcher": "Bash|Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
             '        "hooks": [ { "type": "command", "command": "'
-            + hook_env_prefix + '$PYBIN '
+            + hook_env_prefix + pybin + ' '
             + remote_dir + '/cc-harness-hooks.py deny" } ] }'
         )
         posttooluse = (
@@ -377,7 +438,7 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
             '    "PostToolUse": [\n'
             '      { "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",\n'
             '        "hooks": [ { "type": "command", "command": "'
-            + hook_env_prefix + '$PYBIN '
+            + hook_env_prefix + pybin + ' '
             + remote_dir + '/cc-harness-hooks.py record" } ] }\n'
             "    ]"
         )
@@ -385,7 +446,7 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
             ',\n'
             '    "Stop": [\n'
             '      { "hooks": [ { "type": "command", "command": "'
-            + hook_env_prefix + '$PYBIN '
+            + hook_env_prefix + pybin + ' '
             + remote_dir + '/cc-harness-hooks.py gate" } ] }\n'
             "    ]"
         )
@@ -399,8 +460,10 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
         "  }\n"
         "}\n"
     )
-    # Quoted heredoc keeps the JSON literal; settings.local.json uses an
-    # unquoted heredoc so $PYBIN expands (only referenced on the hooks_on path).
+    # Quoted heredoc keeps the JSON literal; settings.local.json's own heredoc
+    # stays unquoted for parity with the rest of this command, though nothing
+    # in settings_json needs shell expansion any more — pybin is baked in as
+    # a Python-side literal above, not a shell variable.
     approve_sh = (
         "#!/bin/bash\n"
         "cat <<'JSON'\n"
@@ -437,12 +500,11 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
         for path in verify_targets
     )
     json_checks = "; ".join(
-        f'"$PYBIN" -m json.tool {path} > /dev/null || '
+        f'{shlex.quote(pybin)} -m json.tool {path} > /dev/null || '
         f'{{ echo "FATAL: {path} is not valid JSON" >&2; exit 1; }}'
         for path in (".claude/settings.local.json", "$HOME/.claude/settings.local.json")
     )
     return (
-        'PYBIN="$(command -v python3 || command -v python || echo python3)"; '
         "cat > " + remote_dir + "/allow-all.sh <<'SH'\n" + approve_sh + "SH\n"
         "chmod +x " + remote_dir + "/allow-all.sh; "
         "mkdir -p .claude $HOME/.claude && cat > .claude/settings.local.json <<EOF\n"
@@ -627,6 +689,59 @@ class ClaudeUnerrAgent(ClaudeCode):
                 self._truncate_output(result.stderr))
         return result
 
+    async def _resolve_pybin(self, environment: BaseEnvironment,
+                              context_dir: Path) -> str:
+        """The ONE place that decides which python3 interpreter
+        cc-harness-hooks.py (at runtime) and the settings-JSON validator
+        (_hooks_settings_command) use. Prefers an already-present system
+        python3/python in the task image — cheap, no upload. Only when
+        neither exists does it upload + extract the vendored, self-contained
+        python-build-standalone CPython into `{UNERR_REMOTE_DIR}/py/` — no
+        apt/apk/yum, no network from inside the task container, no writes
+        outside UNERR_REMOTE_DIR. ~30% of terminal-bench base images ship no
+        python3 at all, so this can't be skipped, but provisioning one via a
+        package manager mutates the task's own environment — the exact thing
+        this install() step stopped doing for git — hence the shipped
+        interpreter instead. Raises loudly (mirroring the unerr-tgz missing
+        check above) when neither a system interpreter nor the vendored
+        tarball is available: a task with no working PYBIN produces invalid
+        gate data, worse than a loud failure.
+        @sem domain=benchmark-harness role=interpreter-provisioning
+        """
+        probe = await environment.exec(
+            command="command -v python3 || command -v python")
+        system_pybin = (probe.stdout or "").strip() if probe.return_code == 0 else ""
+        if system_pybin:
+            return system_pybin
+
+        tarball = _find_python_standalone_tarball(context_dir)
+        if tarball is None:
+            raise RuntimeError(
+                "no system python3/python in the task image AND no vendored "
+                f"python-build-standalone tarball found under {context_dir} "
+                "(expected cpython-*-x86_64-unknown-linux-gnu-install_only."
+                "tar.gz) — run e2e/reference/claude/local-docker/"
+                "build-toolbox.sh (or set CLAUDE_LOCALDOCKER_DIR to a context "
+                "dir that has one) to vendor it, or rerun with "
+                "TERMINAL_STOCK_AGENT=1 for the bare-baseline control instead "
+                "of a broken ON arm"
+            )
+
+        remote_py_dir = f"{self.UNERR_REMOTE_DIR}/py"
+        pybin = f"{remote_py_dir}/python/bin/python3"
+        await self.exec_as_agent(environment, command=f"mkdir -p {remote_py_dir}")
+        await environment.upload_file(
+            source_path=tarball, target_path=f"{remote_py_dir}/{tarball.name}")
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"tar -xzf {remote_py_dir}/{tarball.name} -C {remote_py_dir} && "
+                f"[ -x {pybin} ] || {{ echo \"FATAL: {pybin} missing after "
+                f"extracting {tarball.name}\" >&2; exit 1; }}"
+            ),
+        )
+        return pybin
+
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         # 1. Claude Code CLI — Harbor's own installer, byte-for-byte unmodified.
@@ -705,45 +820,25 @@ class ClaudeUnerrAgent(ClaudeCode):
         # --is-inside-work-tree`) — true by construction for a SWE-bench
         # workdir (always a git checkout) but NOT for an arbitrary
         # terminal-bench task workdir, which is often a bare fixture with no
-        # `.git` at all. Bootstrap one so the index step below can actually
-        # succeed instead of failing "not inside a git repository": install
-        # git as root if the base image doesn't already have it (ClaudeCode's
-        # own root-install step above only pulls in curl/procps, never git),
-        # then init + a single baseline commit as the agent user, with the
-        # identity inlined via `-c` so the commit can never prompt/fail on
-        # missing user.email/user.name. Both steps are best-effort/
-        # log-and-continue like every other step past the PATH gate.
-        await self._lenient_exec(
-            environment,
-            "command -v git >/dev/null 2>&1 || "
-            "(apt-get update -qq && apt-get install -y -qq git)",
-            user="root",
-        )
-        await self._lenient_exec(
-            environment,
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || "
-            "(git init -q && git add -A && "
-            "git -c user.email=agent@unerr-bench.local "
-            "-c user.name='unerr bench agent' "
-            "commit -q -m baseline --allow-empty)",
-        )
+        # `.git` at all. We deliberately do NOT fabricate one here (no
+        # `apt-get install git`, no `git init`/`add`/`commit`) — that would
+        # mutate the benchmark's own environment with a repo the task never
+        # shipped. `unerr index` therefore DEGRADES BY DESIGN on a bare-
+        # fixture task: the call below runs through _lenient_exec
+        # (log-and-continue), same as every other step past the PATH gate,
+        # so losing the graph index there does not abort the run.
 
-        # python3/python provisioning — the settings/hook-install step below
-        # (and every cc-harness-hooks.py invocation at runtime) shells out via
-        # $PYBIN, but heterogeneous terminal-bench base images sometimes lack
-        # python3 entirely, hard-failing hook install at the validator's own
-        # json.tool check (root-caused: ~30% of terminal tasks fail this
-        # way). Idempotent across apt/apk/yum; best-effort like every other
-        # step past the PATH gate above.
-        await self._lenient_exec(
-            environment,
-            "command -v python3 >/dev/null 2>&1 || "
-            "command -v python >/dev/null 2>&1 || "
-            "(apt-get update -qq && apt-get install -y -qq python3) || "
-            "(apk add --no-cache python3) || "
-            "(yum install -y python3) || true",
-            user="root",
-        )
+        # PYBIN — the interpreter cc-harness-hooks.py (at runtime) and the
+        # settings-JSON validator below shell out through. Resolved once, in
+        # ONE place (_resolve_pybin): prefer an already-present system
+        # python3/python; only when the task image has neither, upload +
+        # extract the vendored, self-contained python-build-standalone
+        # interpreter (no apt/apk/yum, no network from inside the task
+        # container) — heterogeneous terminal-bench base images sometimes
+        # lack python3 entirely (root-caused: ~30% of terminal tasks used to
+        # fail hook install this way). Unlike the git bootstrap above, a
+        # missing PYBIN is NOT best-effort — it raises (see _resolve_pybin).
+        pybin = await self._resolve_pybin(environment, context_dir)
 
         # Best-effort past the PATH gate above — graph index, daemon start,
         # and `unerr install claude-code` are ALL log-and-continue in
@@ -783,4 +878,4 @@ class ClaudeUnerrAgent(ClaudeCode):
             environment,
             command=_hooks_settings_command(
                 remote, self._hooks_on,
-                self._hooks_env_value, self._escalation_panel))
+                self._hooks_env_value, self._escalation_panel, pybin))

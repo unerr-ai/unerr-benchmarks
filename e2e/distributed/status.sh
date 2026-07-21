@@ -9,11 +9,16 @@
 #   (no args)            the newest out/bench-*/manifest.tsv (last bench.sh matrix)
 #   --matrix <id>        that matrix's fleets (out/bench-<id>/manifest.tsv)
 #   --manifest <path>    an explicit manifest.tsv
-#   <LABEL> [APP]        one fleet by label (APP inferred: arm from the label's
-#                        arm token — econ/claude-native/claude-gpt/claude-open/
-#                        legacy claude(-real) — benchmark from $BENCHMARK else
-#                        the label's -pro/-terminal/-live_verified/-lite suffix,
-#                        else verified)
+#   <LABEL> [APP]        one fleet by label (APP inferred when omitted: highest
+#                        precedence first — $ARM env (normalized: claude->claude-open,
+#                        claude-real->claude-native) else the arm token embedded in the
+#                        LABEL itself — econ/claude-native/claude-gpt/claude-open/legacy
+#                        claude(-real). If the label carries NO recognized arm token, the
+#                        resolver falls back to econ as a GUESS and — if that guess turns
+#                        up no coordinator — prints a "hint: arm inferred as ... (guess)"
+#                        line to stderr naming the fix (ARM=<arm> or pass APP explicitly).
+#                        Benchmark from $BENCHMARK else the label's
+#                        -pro/-terminal/-live_verified/-lite suffix, else verified)
 #
 # Options:
 #   --watch [secs]   re-print every <secs> (default 15) until Ctrl-C — the monitor
@@ -54,6 +59,7 @@
 #   ./status.sh smk-e-econ --instances --cost    # per-instance rows enriched w/ per-task
 #                                                 # $/turns/tokens/tier, plus the fleet total
 #   ./status.sh mini-claude swebench-dist-claude-verif   # explicit APP overrides inference
+#   ARM=claude-gpt ./status.sh cgpt-tb21-val10-terminal  # LABEL has no arm token — ARM wins over the guess
 #   BENCHMARK=pro ./status.sh <LABEL>            # non-verified fleet whose label lacks the suffix
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,22 +100,40 @@ _bench_from_label() {  # <label>
   esac
 }
 
-# Resolve the fleet set into parallel arrays labels[]/apps[]/combos[].
-labels=(); apps=(); combos=()
+# Resolve the fleet set into parallel arrays labels[]/apps[]/combos[]/arms[]/inferred[].
+# Precedence for app resolution (highest first): explicit APP arg > $ARM env >
+# label inference. arms[]/inferred[] stay empty ("") whenever APP was given
+# explicitly or came from a manifest row — no arm was inferred, so no guess to warn on.
+labels=(); apps=(); combos=(); arms=(); inferred=()
 [ -n "$MATRIX" ] && [ -z "$MANIFEST" ] && MANIFEST="$HERE/out/bench-$MATRIX/manifest.tsv"
 if [ "${#POS[@]}" -ge 1 ]; then
-  # explicit LABEL [APP] — infer app from the label's arm token (fc_arm_from_label:
-  # strips the benchmark/graderr suffix then matches the known arm set
-  # most-specific-first, so claude-gpt/claude-open/claude-native each resolve to
-  # their OWN app instead of collapsing into a shared "claude" fallback) +
-  # benchmark suffix if not given.
+  # explicit LABEL [APP] — app arg wins outright; else fc_resolve_arm: $ARM env
+  # (normalized) wins over label inference (fc_arm_from_label: strips the
+  # benchmark/graderr suffix then matches the known arm set most-specific-first,
+  # so claude-gpt/claude-open/claude-native each resolve to their OWN app instead
+  # of collapsing into a shared "claude" fallback) + benchmark suffix if not given.
+  # FC_ARM_INFERRED tells render_one whether the label really matched an arm
+  # token ("label"/"env") or fell through to the default guess ("guess"), so a
+  # "no coordinator" miss can carry a hint instead of asserting the fleet is gone.
   lbl="${POS[0]}"; app="${POS[1]:-}"
+  arm=""; arm_inferred=""
   if [ -z "$app" ]; then
     bench="$(_bench_from_label "$lbl")"
-    arm="$(fc_arm_from_label "$lbl" "$bench")"
+    # called directly (NOT via $(...)) — fc_resolve_arm sets globals, a command
+    # substitution would run it in a subshell and lose FC_ARM_INFERRED.
+    fc_resolve_arm "$lbl" "$bench"
+    arm="$FC_RESOLVED_ARM"; arm_inferred="$FC_ARM_INFERRED"
     app="$(fc_default_app "$arm" "$bench")"
+    # $ARM still wins (precedence unchanged) but the LABEL itself disagrees —
+    # warn unconditionally, not just on a later miss: a stale/leaked $ARM can
+    # just as easily resolve a HEALTHY-but-wrong fleet, which the operator
+    # would otherwise read as correct.
+    if [ -n "$FC_ARM_CONFLICT" ]; then
+      printf "warn: using ARM=%s from env, but LABEL '%s' looks like arm '%s'. Unset ARM or pass the APP as the 2nd arg if this is wrong.\n" \
+        "$arm" "$lbl" "$FC_ARM_CONFLICT" >&2
+    fi
   fi
-  labels+=("$lbl"); apps+=("$app"); combos+=("$lbl")
+  labels+=("$lbl"); apps+=("$app"); combos+=("$lbl"); arms+=("$arm"); inferred+=("$arm_inferred")
 else
   [ -n "$MANIFEST" ] || MANIFEST="$(fc_newest_manifest)"
   [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ] || {
@@ -118,14 +142,14 @@ else
     exit 1; }
   echo "==> fleets from $MANIFEST" >&2
   while IFS=$'\t' read -r a b l ap; do
-    labels+=("$l"); apps+=("$ap"); combos+=("${a}:${b}")
+    labels+=("$l"); apps+=("$ap"); combos+=("${a}:${b}"); arms+=(""); inferred+=("")
   done < <(fc_read_manifest "$MANIFEST")
 fi
 [ "${#labels[@]}" -gt 0 ] || { echo "ERROR: no fleets to query" >&2; exit 1; }
 
 # Render one fleet's status line (or JSON / instance table) from its /status JSON.
-render_one() {  # <combo> <label> <app>
-  local combo="$1" label="$2" app="$3"
+render_one() {  # <combo> <label> <app> [arm] [arm_inferred]
+  local combo="$1" label="$2" app="$3" arm="${4:-}" arm_inferred="${5:-}"
   local coord rc; coord="$(fc_coord "$app" "$label")"; rc=$?
   if [ "$rc" -eq 3 ]; then
     # The fly API call itself failed — we could not ASK. Saying "torn down" here
@@ -137,6 +161,12 @@ render_one() {  # <combo> <label> <app>
   fi
   if [ -z "$coord" ]; then
     printf '  %-26s %-22s  no coordinator (torn down, or not prepared on %s)\n' "$combo" "$label" "$app"
+    # arm was a blind fallthrough guess (no ARM env, no arm token in the label) —
+    # this is exactly the silent-wrong-app failure mode: warn instead of letting
+    # the operator conclude a live, paid fleet is dead.
+    if [ "$arm_inferred" = "guess" ]; then
+      printf "hint: arm inferred as '%s' from LABEL (no arm token found). Pass ARM=<arm> (e.g. claude-gpt) or the APP as the 2nd arg.\n" "$arm" >&2
+    fi
     return
   fi
   local js; js="$(fc_status "$app" "$coord")"
@@ -172,14 +202,20 @@ armed = "armed" if d.get("armed") else "WARM "   # WARM = prepared, not yet arme
 ws = len(d.get("workers_seen") or [])
 res, tot = d.get("resolved") or 0, d.get("total") or 0
 insts = d.get("instances") or []
-# retries: reatt = total re-attempts so far (attempt_count>1); f=failed rows are
-# "up for retry" at end-of-run (fail-rerun budget), x=dead = permanently failed.
+# retries: reatt = total re-attempts so far (attempt_count>1); up4retry = rows
+# the fleet will still rerun at drain (fail-rerun budget) — failed rows PLUS any
+# 'done'+resolved=0 row the coordinator flagged as a silent session death (an
+# unanswered agent nudge, never a genuine capability miss — see
+# coordinator/server.py Queue._eligible_rerun_ids). d.get('pending_reruns', ...)
+# falls back to counts.failed alone against an older coordinator that predates
+# the 'pending_reruns' /status field. x=dead = permanently failed.
 reatt = sum(max(0, (it.get("attempt_count") or 0) - 1) for it in insts)
 pct = f"{(100 * res // tot)}%" if tot else "?"
 q = "p{p} l{l} d{d} x{x} f{f}".format(
     p=c.get("pending", 0), l=c.get("leased", 0), d=c.get("done", 0),
     x=c.get("dead", 0), f=c.get("failed", 0))
-retry = f"reatt={reatt} up4retry={c.get('failed', 0)} dead={c.get('dead', 0)}"
+up4retry = d.get("pending_reruns", c.get("failed", 0))
+retry = f"reatt={reatt} up4retry={up4retry} dead={c.get('dead', 0)}"
 print(f"  {combo:<26} {label:<22}  {armed}  w={ws}  {q:<22}  {retry:<28}  resolved={res}/{tot} ({pct})")
 # ── per-instance meta, keyed by instance_id — loaded ONCE from the metaf dump
 # fc_meta_rows already fetched (no second coordinator round-trip). Feeds BOTH the
@@ -397,7 +433,7 @@ if want_cost and metapath:
             print(f"        {tier:<10} ${a['usd']:.4f} ({share:4.0f}%)  in={_kfmt(a['tin'])} out={_kfmt(a['tout'])}  calls={a['calls']}  ×{a['insts']}")
 
 # machine-readable tail for the matrix roll-up (grade % + total cost), filtered out in snapshot().
-print(f"__ROLLUP__\t{res}\t{tot}\t{reatt}\t{c.get('failed',0)}\t{c.get('dead',0)}\t{fleet_usd:.6f}")
+print(f"__ROLLUP__\t{res}\t{tot}\t{reatt}\t{up4retry}\t{c.get('dead',0)}\t{fleet_usd:.6f}")
 PY
   [ -n "$metaf" ] && rm -f "$metaf"
   return 0
@@ -405,13 +441,13 @@ PY
 
 snapshot() {
   echo "──────── run status  ($(date '+%H:%M:%S'))  ${#labels[@]} fleet(s) ────────"
-  echo "  legend: armed|WARM  w=workers_seen  p/l/d/x/f=pending/leased/done/dead/failed  up4retry=failed(reruns at drain)  (NN%)=grade"
+  echo "  legend: armed|WARM  w=workers_seen  p/l/d/x/f=pending/leased/done/dead/failed  up4retry=failed+silent-death-eligible(reruns at drain)  (NN%)=grade"
   # Pipe every fleet's render through a filter that strips the __ROLLUP__ sentinel
   # lines and folds them into one MATRIX TOTAL (grade % across all fleets in view).
   {
     local i=0
     while [ "$i" -lt "${#labels[@]}" ]; do
-      render_one "${combos[$i]}" "${labels[$i]}" "${apps[$i]}"
+      render_one "${combos[$i]}" "${labels[$i]}" "${apps[$i]}" "${arms[$i]}" "${inferred[$i]}"
       i=$(( i + 1 ))
     done
   } | "$PY_HOST" -c '

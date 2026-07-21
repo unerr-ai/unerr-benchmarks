@@ -7,8 +7,10 @@ the single "universal" profile (HARNESS_HOOKS unset/""/"0" -> hooks off;
 ANY other value, including the legacy "generic"/"1"/"swe" strings, resolves
 to the same universal behavior): Gate Z/R/V/E driven purely by the
 agent-declared `# unerr:verify` Bash marker (there is no fixed
-test-runner sensor), and Rule T's one-time, override-able deny on
-test-shaped edit paths.
+test-runner sensor), Rule T's one-time, override-able deny on
+test-shaped edit paths, and Rule N's one-time, capped, fail-open
+anti-tautology nudge on a marked verify command that only compares a
+file the agent wrote this session against a string literal.
 
 Run: python3 -m pytest e2e/reference/claude/local-docker/tests/test_cc_harness_hooks.py -q
 """
@@ -101,6 +103,10 @@ def deny(env, tool_name, file_path, tool_input_extra=None):
     if tool_input_extra:
         tool_input.update(tool_input_extra)
     return run_hook("deny", {"tool_name": tool_name, "tool_input": tool_input}, env)
+
+
+def deny_bash(env, command):
+    return run_hook("deny", {"tool_name": "Bash", "tool_input": {"command": command}}, env)
 
 
 def block_reason(result):
@@ -197,6 +203,85 @@ def test_t_denies_test_edit_once_then_allows_same_edit_as_override(tmp_path):
 
     result2 = deny(env, "Edit", "tests/test_x.py")  # same file, re-issued
     assert result2 is None
+
+
+# ── Rule N (anti-tautology nudge) ────────────────────────────────────────
+
+
+def test_n_denies_tautological_verify_once_then_allows_same_command_as_override(tmp_path):
+    """The chess-best-move false-green: the agent writes its answer to a
+    file, then "verifies" by reading that SAME file's contents back and
+    comparing to a literal it chose — that proves the write happened, not
+    that the value is right. Fires once with a soft nudge; re-issuing the
+    identical command a second time is an evidence-cited override."""
+    env = _env(tmp_path, "generic")
+    record_edit(env, file_path="move.txt")
+    cmd = "test \"$(cat move.txt)\" = 'g2g4'  # unerr:verify"
+    result = deny_bash(env, cmd)
+    reason = deny_reason(result)
+    assert "proves the file was written" in reason
+    assert "not that the value is correct" in reason
+
+    result2 = deny_bash(env, cmd)  # same command, re-issued
+    assert result2 is None
+
+
+def test_n_matches_bracket_test_and_grep_shapes_too(tmp_path):
+    """The narrow detector covers all three documented shapes, not just
+    `test "$(cat X)" = 'lit'`. Two SEPARATE state dirs (Rule N is capped at
+    one denial per run — see the cap test below)."""
+    env = _env(tmp_path / "bracket", "generic")
+    record_edit(env, file_path="answer.txt")
+    result = deny_bash(env, '[ "$(cat answer.txt)" = "42" ]  # unerr:verify')
+    assert deny_reason(result)
+
+    env2 = _env(tmp_path / "grep", "generic")
+    record_edit(env2, file_path="answer2.txt")
+    result2 = deny_bash(env2, "grep -q 'ok' answer2.txt  # unerr:verify")
+    assert deny_reason(result2)
+
+
+def test_n_does_not_fire_on_legitimate_build_or_curl_verify(tmp_path):
+    """A real build/run/curl proof command — never a restatement of the
+    agent's own output — must never be flagged, even against a file the
+    agent wrote this session."""
+    env = _env(tmp_path, "generic")
+    record_edit(env, file_path="move.txt")
+    assert deny_bash(env, "npm run build && npm test  # unerr:verify") is None
+    assert deny_bash(env, "curl -sf http://localhost:8080/health  # unerr:verify") is None
+    assert deny_bash(env, "cat move.txt  # unerr:verify") is None  # no comparison at all
+
+
+def test_n_does_not_fire_when_file_was_not_written_this_session(tmp_path):
+    """A literal comparison against a file the agent never edited this
+    session (e.g. a fixture pre-seeded by the task) is not flagged — the
+    detector only reads the ledger's existing edit events, never a new
+    filesystem check."""
+    env = _env(tmp_path, "generic")
+    cmd = "test \"$(cat move.txt)\" = 'g2g4'  # unerr:verify"
+    assert deny_bash(env, cmd) is None
+
+
+def test_n_is_capped_at_one_denial_per_run_even_across_different_commands(tmp_path):
+    """CAPPED: once Rule N has denied once this run, a DIFFERENT tautological
+    command (different file, different literal) is no longer denied either —
+    a hard-block-forever posture would false-positive on PRODUCE tasks where
+    a literal comparison is legitimate."""
+    env = _env(tmp_path, "generic")
+    record_edit(env, file_path="a.txt")
+    record_edit(env, file_path="b.txt")
+    first = deny_bash(env, "test \"$(cat a.txt)\" = 'x'  # unerr:verify")
+    assert deny_reason(first)
+
+    second = deny_bash(env, "test \"$(cat b.txt)\" = 'y'  # unerr:verify")
+    assert second is None
+
+
+def test_n_fails_open_when_hooks_off(tmp_path):
+    env = _env(tmp_path, None)  # HARNESS_HOOKS unset -> hooks off
+    record_edit(env, file_path="move.txt")
+    cmd = "test \"$(cat move.txt)\" = 'g2g4'  # unerr:verify"
+    assert deny_bash(env, cmd) is None
 
 
 def test_rule_c_removed_does_not_deny_datetime_now(tmp_path, tmp_path_factory):
@@ -373,3 +458,215 @@ def test_v_then_r_canned_sequence(tmp_path):
     result_r = gate(env)
     reason_r = block_reason(result_r)
     assert "previously passed now fails" in reason_r
+
+
+# ── claude session-transcript sync (record hook, piggybacked) ───────────────
+
+
+def _write_session(config_dir, subdir, name, content, mtime=None):
+    d = config_dir / "projects" / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(content)
+    if mtime is not None:
+        os.utime(p, (mtime, mtime))
+    return p
+
+
+def test_record_syncs_claude_session_when_hooks_on(tmp_path):
+    """The PostToolUse record hook also best-effort-copies Claude Code's OWN
+    session .jsonl into CC_HARNESS_SESSIONS_DEST on every call — this is
+    what lets a killed/timed-out trial (no trajectory.json, no err.txt)
+    still leave a transcript behind (see module docstring)."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    src = _write_session(config_dir, "-app", "session-uuid.jsonl",
+                          '{"type":"user","message":"hi"}\n')
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    dest = dest_dir / "claude-session.jsonl"
+    assert dest.is_file()
+    assert dest.read_text() == src.read_text()
+
+
+def test_record_does_not_sync_claude_session_when_hooks_off(tmp_path):
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    _write_session(config_dir, "-app", "session-uuid.jsonl", '{"type":"user"}\n')
+
+    env = _env(tmp_path / "state", None)  # HARNESS_HOOKS unset -> hooks off
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    assert not (dest_dir / "claude-session.jsonl").exists()
+
+
+def test_record_syncs_oldest_session_when_no_isSidechain_field(tmp_path):
+    """If more than one session .jsonl exists under projects/ and none of
+    them carries an isSidechain field (older Claude Code, or no Task
+    sub-agent spawned yet), the sync picks the candidate whose FIRST
+    record has the earliest "timestamp" — the session's own start time.
+    This must stay correct even after the main session file has been
+    APPENDED to (Claude Code writes it incrementally all run long): a
+    selection keyed on filesystem ctime would be wrong here, since ctime
+    is bumped by every append and would make the actively-growing main
+    session look "newer" than a short-lived, untouched-since sub-agent
+    file — reproducing the exact flip-flop this fix exists to prevent."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    older = _write_session(
+        config_dir, "-app", "old.jsonl",
+        '{"type":"user","message":"hi","timestamp":"2026-07-21T00:00:00.000Z"}\n',
+    )
+    time.sleep(0.05)
+    _write_session(
+        config_dir, "-app", "new.jsonl",
+        '{"type":"user","message":"bye","timestamp":"2026-07-21T00:00:05.000Z"}\n',
+    )
+    time.sleep(0.05)
+    with open(older, "a") as f:  # bump old.jsonl's ctime past new.jsonl's
+        f.write('{"type":"assistant","message":"more"}\n')
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    dest = dest_dir / "claude-session.jsonl"
+    assert dest.read_text() == older.read_text()
+
+
+def test_record_prefers_non_sidechain_session_over_newer_sidechain(tmp_path):
+    """A Task sub-agent's session .jsonl marks its records
+    "isSidechain": true; the sync must pick the non-sidechain (main-agent)
+    session even when the sidechain file is the more-recently-created one
+    — this is the exact defect fixed here (mtime picked whichever session
+    was touched last, silently flipping mid-run to a sub-agent transcript,
+    observed live 2026-07-21)."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    main = _write_session(config_dir, "-app", "main.jsonl", '{"type":"user","message":"hi"}\n')
+    time.sleep(0.05)
+    _write_session(
+        config_dir, "-app", "sidechain.jsonl",
+        '{"type":"assistant","isSidechain":true,"message":"sub-agent turn"}\n',
+    )
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    dest = dest_dir / "claude-session.jsonl"
+    assert dest.read_text() == main.read_text()
+
+
+# ── additive sync: EVERY session (main + Task sub-agent sidechains) ─────────
+
+
+def test_sub_agent_sessions_synced_under_distinct_names(tmp_path):
+    """Additive to the single claude-session.jsonl main-session copy: EVERY
+    candidate session .jsonl — main AND every Task sub-agent sidechain —
+    must ALSO be synced into the sessions dest dir under its own
+    "<sessionId>.jsonl" filename, so escalation (which runs in a Task
+    sub-agent) leaves its own transcript behind too — the gap this closes."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    main = _write_session(
+        config_dir, "-app", "main.jsonl",
+        '{"type":"user","message":"hi","sessionId":"main-uuid-1"}\n',
+    )
+    time.sleep(0.05)
+    sub = _write_session(
+        config_dir, "-app", "sidechain.jsonl",
+        '{"type":"assistant","isSidechain":true,"message":"sub-agent turn",'
+        '"sessionId":"sub-uuid-2"}\n',
+    )
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    assert (dest_dir / "main-uuid-1.jsonl").read_text() == main.read_text()
+    assert (dest_dir / "sub-uuid-2.jsonl").read_text() == sub.read_text()
+
+
+def test_additive_sync_does_not_change_main_session_selection(tmp_path):
+    """Guard against regressing the just-landed main-session SELECTION fix:
+    adding the per-session sync must not change WHICH file claude-
+    session.jsonl is a copy of — the sidechain must still be excluded from
+    that one selection, even though it now ALSO gets its own per-session
+    copy alongside it."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    main = _write_session(
+        config_dir, "-app", "main.jsonl",
+        '{"type":"user","message":"hi","sessionId":"main-uuid-3"}\n',
+    )
+    time.sleep(0.05)
+    _write_session(
+        config_dir, "-app", "sidechain.jsonl",
+        '{"type":"assistant","isSidechain":true,"message":"sub-agent turn",'
+        '"sessionId":"sub-uuid-4"}\n',
+    )
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    dest = dest_dir / "claude-session.jsonl"
+    assert dest.read_text() == main.read_text(), (
+        "main-session SELECTION regressed — must still prefer the "
+        "non-sidechain candidate, unaffected by the additive per-session sync"
+    )
+    assert (dest_dir / "main-uuid-3.jsonl").is_file()
+    assert (dest_dir / "sub-uuid-4.jsonl").is_file()
+
+
+def test_unchanged_session_is_not_recopied(tmp_path):
+    """A candidate whose per-session destination copy already has the SAME
+    size+mtime as the current source must be SKIPPED, not re-copied — this
+    hook runs on EVERY PostToolUse call, so re-copying an unchanged
+    multi-hundred-KB session file every call would be real, wasted IO.
+    Proven by planting a STALE destination file with a matching size+mtime
+    but WRONG content: if the sync genuinely skips (rather than always
+    overwriting), the stale content survives the hook call untouched."""
+    config_dir = tmp_path / "claude-config"
+    dest_dir = tmp_path / "sessions-dest"
+    dest_dir.mkdir(parents=True)
+    src = _write_session(
+        config_dir, "-app", "main.jsonl",
+        '{"type":"user","message":"hi","sessionId":"stable-uuid-5"}\n',
+    )
+    src_stat = os.stat(src)
+
+    stale = dest_dir / "stable-uuid-5.jsonl"
+    stale_content = '{"type":"user","message":"STALE-DO-NOT-OVERWRITE"}\n'
+    pad = len(src.read_text()) - len(stale_content)
+    assert pad >= 0, "test fixture: stale content must not be longer than src"
+    stale.write_text(stale_content + (" " * pad))
+    os.utime(stale, (src_stat.st_mtime, src_stat.st_mtime))
+
+    env = _env(tmp_path / "state", "1")
+    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
+
+    record_edit(env)
+
+    assert stale.read_text() == stale_content + (" " * pad), (
+        "destination was re-copied even though size+mtime matched the "
+        "unchanged source — the skip check is not working"
+    )

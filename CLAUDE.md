@@ -171,7 +171,9 @@ server-side (kept for audit, excluded from queries).
   `--cost` = total $ + per-tier conductor/oracle/reasoner/executor token·turn·cost read live from the
   coordinator queue.db meta — econ telemetry/tier_cost_db, claude litellm_spend_logs, always real LiteLLM
   spend) and `debug-workers.sh` (per worker:
-  what it holds + a `»»`-flagged `flyctl logs` tail; `--follow` streams, `--grep`/`--lines`/`--instance`).
+  what it holds + a `»»`-flagged `flyctl logs` tail; `--follow` streams, `--grep`/`--lines`/`--instance`),
+  and `tools/pull_traces.sh` (pull one instance's agent trace off the live coordinator's `queue.db`
+  mid-run, before drain — `--failed-only`/`--ids`).
   See distributed README §3. Per-benchmark contract lives in `tools/benchmarks.py` (dataset/images/grade/grade-cap/traces/flow).
 - **Claude arm on SWE-bench (unerr ON + open-weight ensemble, distributed on fly):**
   [`e2e/reference/claude/fly-remote/README.md`](e2e/reference/claude/fly-remote/README.md)
@@ -257,6 +259,15 @@ server-side (kept for audit, excluded from queries).
   not literal names) and reads the map from env, so no other code changes. All `claude-*` arms share
   one toolbox image (`unerr-claude-toolbox`); each gets its own fly app + Tigris path. Detail:
   distributed README §0 "Arm naming scheme".
+- **Debug a failed distributed-benchmark task (`resolved=0` / `dead` / `failed`):**
+  [`e2e/distributed/DEBUG_FAILED_TASK.md`](e2e/distributed/DEBUG_FAILED_TASK.md) — the operator
+  procedure: classify execution-failure vs grader-miss from the coordinator `queue.db` `tasks`
+  table (`status`/`failure_reason`), the exact `tasks` column that holds the real agent transcript
+  (`trajectory_json`) vs the setup-only log (`err_txt` = Harbor's `trial.log` — grepping it for
+  harness strings is a FALSE POSITIVE, it ends with the `--append-system-prompt` text), live
+  gate-ledger inspection (`/tmp/cc-harness/state.jsonl` inside the task container, only while
+  leased), and post-drain single-instance triage via `tools/debug_instance.py`. See distributed
+  README §3.
 - **Rule:** when you change the distributed run flow, the model map, or the result scripts,
   update that README in the SAME change. The result scripts live in
   `e2e/distributed/tools/` (+ `e2e/reference/claude/local-docker/cost_report.py`) — extend

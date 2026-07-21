@@ -11,6 +11,13 @@
 #   fc_fly_token            -> exports FLY_API_TOKEN (env first, else ~/.fly/config.yml). Never prints it.
 #   fc_default_app <arm> [benchmark] -> the app for a combo (swebench-dist-<arm>-<slug>; slug = benchmark with '_'->'-' and 'verified'->'verif' — fly blocks names containing "verified")
 #   fc_arm_from_label <label> [bench] -> the arm token embedded in a fleet LABEL (e.g. "claude-gpt" out of "mtx-abc-claude-gpt-terminal")
+#   fc_resolve_arm <label> [bench]     -> explicit-wins arm resolution: $ARM env (normalized) if set,
+#                                          else fc_arm_from_label. Sets GLOBALS (not stdout — call it
+#                                          directly, never via $(...), see the function's own comment):
+#                                          FC_RESOLVED_ARM (the arm) and FC_ARM_INFERRED, how it was
+#                                          resolved — "env" | "label" (a real arm token matched) |
+#                                          "guess" (fell through to the default, nothing to go on) — so
+#                                          a caller can warn instead of silently trusting a blind guess.
 #   fc_machines <app> <label> [role]   -> machine ids, one per line (role optional: coordinator|worker)
 #   fc_coord <app> <label>             -> the coordinator machine id (first match), or empty
 #   fc_status <app> <coord_mid>        -> raw /status JSON (curl'd inside the coordinator via ssh)
@@ -75,6 +82,62 @@ fc_arm_from_label() {  # <label> [bench]
     *-claude-*)      echo "claude-${tmp##*-claude-}" ;;
     *)               echo econ ;;
   esac
+}
+
+# ── explicit ARM wins over label inference (the bug this fixes: an operator's
+# LABEL that doesn't embed a recognized arm token — e.g. "cgpt-tb21-val10" using
+# "cgpt" — used to silently fall through fc_arm_from_label's `*) echo econ`
+# default with NO signal it was a guess, so a live claude-gpt fleet got reported
+# as "no coordinator (torn down...)" against the wrong (econ) app). This wraps
+# fc_arm_from_label without touching it: $ARM env (normalized via the SAME
+# legacy-alias mapping as fc_default_app: claude->claude-open,
+# claude-real->claude-native) takes highest precedence when set; otherwise it
+# falls back to fc_arm_from_label, and ALSO records whether the label actually
+# contained a recognized arm token ("label") or the result is a blind
+# fallthrough guess ("guess"), so a caller can warn on a guess instead of
+# asserting the fleet is gone.
+#
+# Sets FC_RESOLVED_ARM + FC_ARM_INFERRED + FC_ARM_CONFLICT as GLOBALS rather
+# than echoing — call it directly (`fc_resolve_arm "$lbl" "$bench"`), NOT via
+# `$(...)`: a command substitution runs in a subshell, so a global set inside
+# it (the whole point of FC_ARM_INFERRED/FC_ARM_CONFLICT) would silently
+# vanish once the subshell exits. ──
+FC_RESOLVED_ARM=""
+FC_ARM_INFERRED=""
+FC_ARM_CONFLICT=""
+fc_resolve_arm() {  # <label> [bench] -> sets FC_RESOLVED_ARM, FC_ARM_INFERRED, FC_ARM_CONFLICT
+  local lbl="$1" bench="${2:-verified}"
+  FC_ARM_CONFLICT=""
+  # Same label-stripping fc_arm_from_label does internally — used on BOTH
+  # branches below: to tell whether a real arm token matched the label vs the
+  # catch-all default fired (as before), and — when $ARM ALSO wins outright —
+  # whether the label disagrees with it. A stale/leaked $ARM (commonly left
+  # exported from an earlier claude-arm command) silently targeting the wrong
+  # app is the same bug class this resolver exists to catch, so surface the
+  # disagreement even though $ARM still wins (precedence unchanged).
+  local tmp="$lbl"
+  if [ "$bench" != "verified" ]; then
+    tmp="${tmp%-graderr-*}"
+    tmp="${tmp%-$bench}"
+  fi
+  local label_kind
+  case "$tmp" in
+    *-econ|*-claude|*-claude-*) label_kind="label" ;;
+    *)                          label_kind="guess" ;;
+  esac
+  if [ -n "${ARM:-}" ]; then
+    local arm="$ARM"
+    case "$arm" in claude) arm="claude-open" ;; claude-real) arm="claude-native" ;; esac
+    FC_ARM_INFERRED="env"
+    FC_RESOLVED_ARM="$arm"
+    if [ "$label_kind" = "label" ]; then
+      local label_arm; label_arm="$(fc_arm_from_label "$lbl" "$bench")"
+      [ "$label_arm" != "$arm" ] && FC_ARM_CONFLICT="$label_arm"
+    fi
+    return
+  fi
+  FC_ARM_INFERRED="$label_kind"
+  FC_RESOLVED_ARM="$(fc_arm_from_label "$lbl" "$bench")"
 }
 
 # ── machine ids for a fleet, optionally role-scoped (same query as run-distributed.sh fleet_ids) ──
