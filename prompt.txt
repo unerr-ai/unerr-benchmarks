@@ -19,16 +19,77 @@ INPUTS  (ask me for any not given, then echo them back before doing anything)
                <mix> suffix is provided by the operator; every claude-<mix> shares one
                toolbox image and gets its own fly app + Tigris path.
   BENCHMARK  = verified | pro | terminal | live_verified | lite   (required)
+               NORMALIZE aliases before use (tools/benchmarks.py registry): terminal-bench /
+               tb / terminalbench / tbench -> terminal. "terminal2.1" / "TB2.1" are NOT keys —
+               TB2.1 IS the terminal benchmark (Harbor terminal-bench-2-1, 89 tasks). An
+               unknown key fail-louds exit(2); when an input doesn't match a key, map it to
+               the obvious canonical key and SAY SO rather than passing it through verbatim.
   WORKERS    = <integer>   worker machines — DEFAULT 8 for a full run; use 8 unless I
                explicitly give a different number
+  HARNESS_HOOKS = auto (do not hardcode)   — run-distributed.sh DEFAULTS this to 1 for
+               EVERY claude-<mix>/claude-native arm x BENCHMARK (no env needed): the
+               single UNIVERSAL harness. The old swe/generic profile split is RETIRED —
+               any non-0 value (legacy "1"/"generic" included) selects the same
+               universal behavior (e2e/distributed/HARNESS_UNIVERSAL.md). Pass
+               HARNESS_HOOKS=0 for a baseline-control run with hooks OFF (no finish
+               gates, no escalation ladder) — see HARD RULE 10. Leave ESCALATION_PANEL
+               unset (two-rung ladder default; =1 selects the parallel panel — consider
+               only on claude-open, where opus/fable are distinct model families).
+               Not applicable to econ (never defaulted).
   CPU_KIND   = performance — the run-distributed.sh default since 2026-07-19 (dedicated
                cores on every arm×benchmark combo). Do NOT pass CPU_KIND=shared for a
                real full run; it exists only as the cheap-smoke override.
-  IMAGE      = <registry ref>  (optional) reuse a prebuilt image to skip the bake;
-               OMIT to bake fresh from live source (uses the latest coordinator +
-               agent code — recommended for a real full run)
+  IMAGE      = <full registry ref>  (optional) reuse a prebuilt image to skip the bake;
+               MUST be the FULL ref `registry.fly.io/swebench-dist-<arm>-<slug>:<tag>` — a
+               bare tag resolves to docker.io/library/<tag> and fails the image lookup.
+               OMIT to bake fresh from live source (recommended for a real full run). For
+               claude-* arms the ref must postdate the 2026-07-20 hook-install fix
+               (settings.local.json fail-fast in harbor_agents.py) or gates run inert.
   GRADE_RERUN       = 1   (default) rerun budget for GRADED failures (resolved=0)
   MAX_FAILURE_RERUN = 1   (default) coordinator rerun budget for EXECUTION failures
+
+--------------------------------------------------------------------------------
+DERIVED CONFIG  (resolve from the INPUTS automatically — never ask, never skip)
+--------------------------------------------------------------------------------
+Resolve ALL of these BEFORE STEP 1 and echo the resolved block back alongside the
+inputs. Every past run mishap traced to one of these being skipped.
+
+1. BENCHMARK key — normalize aliases to the canonical registry key
+   (tools/benchmarks.py _REGISTRY): terminal-bench / tb / terminalbench / tbench /
+   "terminal2.1" / "TB2.1" → terminal. Valid keys ONLY: verified | lite | pro |
+   terminal | live_verified. Anything else → stop and ask, never pass through.
+2. APP = swebench-dist-<ARM>-<slug>   (slug = BENCHMARK with '_'→'-' and
+   'verified'→'verif'; e.g. claude-gpt × terminal → swebench-dist-claude-gpt-terminal,
+   econ × live_verified → swebench-dist-econ-live-verif).
+3. LOOKUP LABEL (status.sh / debug-workers.sh / tigris-archive.sh) =
+   "<LABEL>" for verified, "<LABEL>-<BENCHMARK>" for every other benchmark
+   (run_id suffix). Monitoring with the unsuffixed label on a non-verified
+   benchmark finds nothing.
+4. Per-BENCHMARK extra env — add to BOTH the prepare AND the run command lines:
+     terminal      → TB_TASKS_DIR="$PWD/out/tb21-tasks"   REQUIRED: task ids
+                     resolve HOST-side; without it resolution finds 0 ids and the
+                     launcher exits 1. Verify the seed first (must hold 89 task
+                     dirs): `ls out/tb21-tasks | wc -l` → 89; if missing, re-seed
+                     via harbor dataset download + task.toml filter (CLAUDE.md
+                     "terminal full host-seed gap"). Exception: TASKS=/TASKS_FILE=
+                     bypass suite resolution, so a rerun fleet with explicit ids
+                     does not need it (harmless to keep).
+     live_verified → nothing extra (ROOTFS_GB=50 is a launcher default since
+                     2026-07-19; pylint exclusions are a STEP 4 concern, HARD RULE 7).
+     verified | lite | pro → nothing extra (pro's private image mirror is automatic).
+5. Per-ARM extra env:
+     econ                    → nothing (HARNESS_HOOKS never applies to econ).
+     claude-gpt | claude-open → nothing (model map + gateway resolve from ARM in
+                                run-distributed.sh; HARNESS_HOOKS auto per HARD RULE 10).
+     claude-native           → CLAUDE_CODE_OAUTH_TOKEN must exist in env/.env.local
+                                (verify presence by LENGTH only, never print it).
+6. HARNESS_HOOKS — leave UNSET (auto-resolved per HARD RULE 10). Confirm the
+   launcher's startup echo `HARNESS_HOOKS=<v>` in the prepare log and report the
+   effective value at the STEP 2 gate — confirm, don't assume.
+7. IMAGE — omit for a full run (fresh bake). If reusing: MUST be the full ref
+   `registry.fly.io/<APP>:<tag>` (bare tag → docker.io lookup failure), and for
+   claude-* arms must postdate the 2026-07-20 hook-install fix.
+8. WORKERS → MACHINES=<WORKERS>; GRADE_RERUN / MAX_FAILURE_RERUN pass through as-is.
 
 --------------------------------------------------------------------------------
 HARD RULES  (do not violate)
@@ -42,6 +103,8 @@ HARD RULES  (do not violate)
        §8 matrix, §8.2 live_verified, §9 Tigris archive.
      - e2e/distributed/tools/benchmarks.py — the per-benchmark contract
        (dataset / images / grade module / grade-cap / traces / flow).
+     - e2e/distributed/HARNESS_UNIVERSAL.md — the claude-* universal harness (gates,
+       escalation ladder/panel, HARNESS_HOOKS/ESCALATION_PANEL, agent integration).
      - e2e/reference/claude/fly-remote/README.md — the claude-arm runbook (model map,
        §11 result scripts: pull_results / cost_report / make_submission; ROOTFS_GB=50 +
        CPU_KIND=performance are launcher defaults since 2026-07-19, no longer knobs to set).
@@ -80,6 +143,23 @@ HARD RULES  (do not violate)
    the guard (debug-workers.sh), not as a reason to resize. These live in the baked
    image: a full run should OMIT IMAGE= (fresh bake) unless the reused ref is known to
    postdate 2026-07-19.
+10. claude-* arms: HARNESS_HOOKS now DEFAULTS to 1 in run-distributed.sh for EVERY
+    claude-* arm x BENCHMARK (no env needed) — one UNIVERSAL harness, no per-family
+    split: the old swe/generic profiles are RETIRED, and any non-0 value (legacy
+    "1"/"generic" included) selects the same universal behavior
+    (e2e/distributed/HARNESS_UNIVERSAL.md is the authoritative doc; HARNESS_PROFILE
+    is retired — accepted for compat, never read). Leave it UNSET to take the
+    default, or — only if you want to override it — pass the SAME explicit value on
+    BOTH the `prepare` AND the `run` invocation to be certain (belt-and-braces):
+    HARNESS_HOOKS=0 on both if you deliberately want the no-gates baseline for this
+    run. It is a RUNTIME env resolved/forwarded at worker-machine creation, so a
+    change needs a re-prepare (workers recreated) but NO image rebake. Leave
+    ESCALATION_PANEL unset (the two-rung ladder default — proven to fire;
+    ESCALATION_PANEL=1 selects the parallel panel, recommended only on claude-open
+    where opus/fable are genuinely different model families — HARNESS_UNIVERSAL.md
+    §5). Measured on claude-gpt x terminal-mini (same 5 ids): hooks off
+    (HARNESS_HOOKS=0) = 4/5 resolved $8.27 0 escalation vs hooks on (ladder) = 5/5
+    resolved $9.60 with escalation firing correctly on the one hard task.
 
 --------------------------------------------------------------------------------
 STEP 1 — PREPARE  (build the fleet, hold it idle; NO work runs yet)
@@ -93,8 +173,16 @@ STEP 1 — PREPARE  (build the fleet, hold it idle; NO work runs yet)
     SUITE=full \
     MAX_FAILURE_RERUN=<MAX_FAILURE_RERUN> \
     ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive \
-    [IMAGE=<ref> only if reusing a prebuilt image — else omit to bake fresh] \
+    [BENCHMARK=terminal only: TB_TASKS_DIR="$PWD/out/tb21-tasks" — DERIVED CONFIG #4] \
+    [per-ARM extras — DERIVED CONFIG #5] \
+    [IMAGE=<full registry.fly.io ref> only if reusing a prebuilt image — else omit to bake fresh] \
     ./run-distributed.sh prepare > out/$LABEL.prepare.log 2>&1 & disown
+
+  HARNESS_HOOKS is left UNSET here on purpose — it defaults to 1 (the single
+  UNIVERSAL harness) for every claude-* arm x BENCHMARK automatically (HARD RULE 10).
+  Only pass it explicitly if you want to OVERRIDE that default (e.g. HARNESS_HOOKS=0
+  for a baseline-control run) — and if you do, pass the SAME value on both `prepare`
+  and `run`. Leave ESCALATION_PANEL unset. Harmless no-op for econ.
 
   `prepare` builds/pulls the image, creates the coordinator (COORD_ARMED=0 → /claim
   holds at {wait}) and <WORKERS> warm-idle workers, and SEEDS all tasks. It does NOT
@@ -126,8 +214,17 @@ STEP 2 — PROCEED GATE  (mandatory human go-ahead)
 STEP 3 — RUN  (on my go-ahead: arm, process ALL tasks to completion, archive)
 --------------------------------------------------------------------------------
   cd e2e/distributed
-  nohup env FLY_ORG=vamsee-k-933 LABEL=$LABEL \
+  nohup env FLY_ORG=vamsee-k-933 \
+    ARM=<ARM> BENCHMARK=<BENCHMARK> LABEL=$LABEL SUITE=full \
+    ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive \
+    [SAME per-BENCHMARK / per-ARM extras as STEP 1 — TB_TASKS_DIR for terminal, etc.] \
+    [IMAGE=<same ref> if one was passed at prepare] \
     ./run-distributed.sh run > out/$LABEL.run.log 2>&1 & disown
+
+  `run` RE-RESOLVES the benchmark and task ids on the host — it is NOT a bare attach.
+  Passing only LABEL silently defaults BENCHMARK back to verified (wrong app) and,
+  for terminal, dies at id resolution (0 ids). Mirror the STEP 1 env (MACHINES may
+  be omitted; if HARNESS_HOOKS was overridden at prepare, pass the same value here).
 
   `run` attaches to the prepared fleet, POSTs /arm (workers begin claiming), raises a
   dedicated GPU only if DEDICATED_CONDUCTOR=1, then polls until the queue drains,
@@ -158,6 +255,8 @@ STEP 4 — GRADE-FAILURE RERUN  (GRADE_RERUN=1; explicit pass — NOT a coordina
          ARCHIVE_TIGRIS=1 TIGRIS_BUCKET=swebench-dist-archive \
          [IMAGE=<same ref> if reused] \
          ./run-distributed.sh > out/$LABEL-graderr.log 2>&1 & disown   # all-in-one
+     (terminal: TASKS_FILE bypasses suite id-resolution, so TB_TASKS_DIR is not
+     required on a rerun fleet — harmless to include.)
      A resolved=1 on rerun supersedes the earlier resolved=0 for that id.
   3. Archive the rerun and VERIFY object count > 0 in Tigris.
 
@@ -194,10 +293,12 @@ OPTIONAL — make grade-rerun a first-class coordinator knob
 
 
 --------------------------------------------------------------------------------
-INPUTS  (ask me for any not given, then echo them back before doing anything)
+INPUTS  (fill in per run; then resolve DERIVED CONFIG and echo BOTH blocks back
+         before doing anything)
 --------------------------------------------------------------------------------
-  ARM        = econ
-  BENCHMARK  = verified
-  WORKERS    = 8
+  ARM        = <econ | claude-gpt | claude-open | claude-native>
+  BENCHMARK  = <verified | lite | pro | terminal | live_verified — aliases are
+                normalized per DERIVED CONFIG #1, e.g. terminal2.1 → terminal>
+  WORKERS    = <default 8>
   GRADE_RERUN       = 1   (default) rerun budget for GRADED failures (resolved=0)
   MAX_FAILURE_RERUN = 1   (default) coordinator rerun budget for EXECUTION failures

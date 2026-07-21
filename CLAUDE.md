@@ -220,19 +220,32 @@ server-side (kept for audit, excluded from queries).
   `./tools/tigris-archive.sh list|overview <label>|get <label> [--only traces|grading|submission|bundle]`
   (creds from env or `.env.tigris`; never prints secrets). Wiring lives in `coordinator-entrypoint.sh`
   §6.9+§8, `Dockerfile.dist` (`boto3`), `run-distributed.sh` (env passthrough — never AWS_*).
-- **Harbor + Claude Code custom agents (the `claude-<mix>` / `claude-native` terminal arms):**
-  [`e2e/distributed/HARBOR_CLAUDE_CODE.md`](e2e/distributed/HARBOR_CLAUDE_CODE.md) — the
-  agent-integration deep-dive for driving Claude Code as a *custom Harbor agent* (`ClaudeUnerrAgent`,
-  subclassing Harbor's `ClaudeCode` and reusing its `run()`). Covers the FOUR root-caused fixes
-  (root permission bypass → `--dangerously-skip-permissions` + `IS_SANDBOX=1`; tier flatten →
-  **empty `--model`**; missing alias forwarding → `ENV_VARS` → the `claude-opus-4-8` 400; and the
-  **sub-agent permission gap** → a **PreToolUse auto-approve hook** in `.claude/settings.local.json`,
-  since `--dangerously-skip-permissions` does NOT reach Task sub-agents — proven version-independent),
-  the GPT-5.6 gateway tier map, the local `harbor run` repro loop, and the main-vs-subagent
-  denial-split debug playbook. `unerr install claude-code` sets up the unerr MCP + active-cognition
-  hooks only — NOT tool permissions, which is why the harness owns the bypass. Reusable for wiring
-  Claude Code into ANY other Harbor benchmark. Update it in the SAME change as any
-  agent-integration/fix edit.
+- **The universal harness (all `claude-*` arms — `claude-gpt` / `claude-open` / `claude-native`):**
+  [`e2e/distributed/HARNESS_UNIVERSAL.md`](e2e/distributed/HARNESS_UNIVERSAL.md) is THE single
+  authoritative harness doc — it REPLACED the retired `HARNESS_PROFILES.md` + `HARBOR_CLAUDE_CODE.md`
+  on 2026-07-21. ONE `universal` profile drives every benchmark — the swe-vs-generic split is gone:
+  discover the project's own build/test/run check (**ONBOARD**) → **reproduce-first** → verify against
+  the agent-marked `# unerr:verify` command → escalate when stuck/unverified. Covers the mechanical
+  gates (Z/V/R/E + deny B/T), the outcome-ledger + verify-marker sensor, the escalation ladder/panel +
+  per-arm table, the complete env-toggle inventory, the `ClaudeUnerrAgent` integration (the six
+  root-caused fixes: root bypass `--dangerously-skip-permissions`+`IS_SANDBOX=1`; tier flatten →
+  **empty `--model`**; alias forwarding → `ENV_VARS`; the **sub-agent permission gap** → the
+  **PreToolUse auto-approve hook** in `.claude/settings.local.json`, since
+  `--dangerously-skip-permissions` does NOT reach Task sub-agents — proven version-independent; silent
+  hooks-install failure; `--append-system-prompt` shlex-quoting), the GPT-5.6 gateway tier map, the
+  two-flow install map, the local `harbor run` repro loop, and the denial-split debug playbook.
+  `HARNESS_HOOKS` is DEFAULTED to `1` (universal ON) for every `claude-*` arm × benchmark by
+  `run-distributed.sh` (`CLAUDE_ARM_KIND` non-empty); opt out with `HARNESS_HOOKS=0` for a bare-agent
+  baseline; `ARM=econ` is never defaulted. Legacy `HARNESS_HOOKS=generic`/`1` both still mean ON;
+  **`HARNESS_PROFILE` is RETIRED (accepted for compat, never read).** `ESCALATION_PANEL=1` selects the
+  parallel panel (recommend only on `claude-open`, where opus/fable are distinct families); unset = the
+  two-rung ladder (default). `HARNESS_HOOKS`/`ESCALATION_PANEL` are RUNTIME env resolved at
+  worker-machine creation — a change needs a re-prepare, no rebake; a change to
+  `harbor_agents.py`/`cc-harness-hooks.py`/`run-instance.sh` needs a rebake. `unerr install claude-code`
+  sets up the unerr MCP + active-cognition hooks only — NOT tool permissions, which is why the harness
+  owns the bypass. **Rule:** the two prompt sites (`harbor_agents.py:_build_autonomy_prompt` +
+  `run-instance.sh`) must stay byte-identical; update `HARNESS_UNIVERSAL.md` in the SAME change as any
+  harness/agent/gate/prompt edit.
 - **Arm naming scheme (`claude-<mix>`, 2026-07-20):** `ARM` = `econ` | `claude-<mix>` (gateway
   ensemble via the econ-litellm gateway; `<mix>` names the models — `claude-gpt` = GPT-5.6,
   `claude-open` = open-weight) | `claude-native` (real Anthropic, OAuth, no gateway). Legacy

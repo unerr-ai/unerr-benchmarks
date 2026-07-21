@@ -278,6 +278,29 @@ if [ "$MODE" = "on" ]; then
 }
 EOF
     log "harness: wrote $REPO_DIR/.claude/settings.local.json (mechanical finish-gate + edit-deny hooks)"
+
+    # 3.16 FAIL-LOUD VALIDATION (mirrors harbor_agents.py's
+    #      _hooks_settings_command on the terminal flow, root-caused
+    #      2026-07-20: a settings write that silently mislands, or a gate
+    #      script that isn't actually staged, leaves every hook inert with
+    #      zero trace — the exact failure class HARNESS_UNIVERSAL.md §7
+    #      "fix 5" exists for). Existence-check the settings file AND the
+    #      cc-harness-hooks.py gate script the settings JSON points at, then
+    #      JSON-parse the settings file — any miss is an unmistakable FATAL +
+    #      non-zero exit instead of a quiet no-op gate.
+    [ -f "$REPO_DIR/.claude/settings.local.json" ] || {
+      log "FATAL: $REPO_DIR/.claude/settings.local.json missing after harness hooks install"
+      exit 1
+    }
+    [ -f "$TOOLBOX/cc-harness-hooks.py" ] || {
+      log "FATAL: $TOOLBOX/cc-harness-hooks.py missing — settings.local.json points at a gate script that isn't staged"
+      exit 1
+    }
+    "$PYBIN" -m json.tool "$REPO_DIR/.claude/settings.local.json" >/dev/null 2>&1 || {
+      log "FATAL: $REPO_DIR/.claude/settings.local.json is not valid JSON"
+      exit 1
+    }
+    log "harness: validated settings.local.json + cc-harness-hooks.py (existence + JSON)"
   fi
 
   # 3.5 HEALTH GATE: confirm unerrd + the process manager actually registered THIS
@@ -378,24 +401,13 @@ if [ "$MODE" = "on" ]; then
   # claude-real) only, since a hook gate is not prompt prose and can't
   # double-harness (it fires once, at Stop, never mid-turn).
   if [ "$HARNESS_ON" = "1" ]; then
-    # Profile-specific fragments (see PROFILE above): swe (default) is this
-    # harness's existing text, unchanged; generic swaps the two SWE-only pieces
-    # — the test-files-read-only bullet and the whole FINISH CONTRACT paragraph
-    # — for a checkable-outcome contract that fits any task shape (build/run/
-    # curl/diff), not just a SWE-bench repo checkout.
-    if [ "$PROFILE" = "generic" ]; then
-      TEST_FILES_BULLET=""
-      ESCALATION_TRIGGER_D="your fix turned a previously-passing marked verification red and one rework did not recover it"
-      FINISH_CONTRACT="FINISH CONTRACT: every task has a checkable outcome. Before your first change, decide the command that proves success for THIS task (build + run it, a script you write, curl the endpoint, diff output against expected) and run it via Bash with the marker comment \`# unerr:verify\` appended — the harness tracks marked commands only. After your final change, re-run the marked check and confirm it exits 0. The stop gate blocks finishing when no marked verification has succeeded since your last change; a marked command that once passed and now fails is a regression — fix it before finishing. Mark only the check you would stake the task on, never exploratory commands."
-    else
-      TEST_FILES_BULLET="
-- Test files are read-only in this benchmark — the harness mechanically denies test edits; never attempt them, and never count a test edit as part of a fix."
-      ESCALATION_TRIGGER_D="your fix turned a previously-passing test red and one rework did not recover it"
-      FINISH_CONTRACT="FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions):
-- After your final edit, re-run your reproduction of the issue AND the narrowest existing test module covering each edited file; a finish without a green post-edit verification run is blocked.
-- A test that passed before your change and fails after it is a regression caused by your fix — rework it until green; finishing while it is red is blocked.
-- If the stop gate blocks you, do exactly what its message names, then finish. Do not fight the gate; it releases after its condition is met."
-    fi
+    # Universal profile fragments (single form, no PROFILE branching):
+    # discover the project's own check while onboarding, reproduce the
+    # failure first, then verify against the command marked `# unerr:verify`.
+    TEST_FILES_BULLET="
+- Fix real source, not the checks. A grader runs its own copy of the tests/checks, so editing a test or the verification itself to make it pass usually only fakes progress — fix the code the check exercises. Change a test only when the task itself is to change tests."
+    ESCALATION_TRIGGER_D="your change turned your verification red and one rework did not recover it"
+    FINISH_CONTRACT="FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions): every task has a checkable outcome. Before your first change, decide the command that proves success for THIS task — prefer the project's own test/build/run check you found while onboarding; otherwise a script you write, curl the endpoint, or diff output against expected. Run it BEFORE you edit to confirm it fails the way the task describes (a reproduced failure is your grounded before/after), appending the marker comment \`# unerr:verify\` — the harness tracks marked commands only. After your final change, re-run the marked check and confirm it exits 0. The stop gate blocks finishing when no marked verification has succeeded since your last change; a marked command that once passed and now fails is a regression — fix it before finishing. Mark only the check you would stake the task on, never exploratory commands."
     # ESCALATION_PANEL fragment (see PANEL above, orthogonal to PROFILE): PANEL=1
     # keeps the original judge-panel text byte-identical (both tiers spawned
     # together, one escalation round — worth it only when the tiers are
@@ -410,18 +422,21 @@ if [ "$MODE" = "on" ]; then
     fi
     AUTONOMY_PROMPT="$AUTONOMY_PROMPT
 
-TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to write the plan down (one task per slice) and TaskUpdate each to completed as it lands; treat the tracker as your working memory across a long run, not bookkeeping, and clear it when the fix is done.
+TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to write the plan down (one task per slice) and TaskUpdate each to completed as it lands; treat the tracker as your working memory across a long run, not bookkeeping, and clear it when the task is done.
+
+ONBOARD — before your first edit, learn how THIS project builds, tests, and runs itself: read its CI workflows (.github/workflows, .gitlab-ci.yml — the richest source, they list the exact commands maintainers run), its config/manifests (Makefile, package.json, pyproject.toml, Cargo.toml, go.mod, pom.xml, CMakeLists.txt), lockfiles, and README. If a runtime or tool the task needs is missing, install it yourself (uv/pip/npm/apt/apk) — never assume the environment is complete. Note the build / test / run / lint commands you find; you will verify against them.
 
 FIX DISCIPLINE (applies to every edit you make):
-- Fix at the definition. Change the entity whose behavior the issue calls wrong at the site where it is DEFINED; a fix that coerces or special-cases at a downstream site where the value merely flows through is almost always the wrong layer.
+- Fix at the definition. Change the entity whose behavior is wrong at the site where it is DEFINED; a fix that coerces or special-cases at a downstream site where the value merely flows through is almost always the wrong layer.
 - Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.$TEST_FILES_BULLET
 
 DELEGATION — use your agents when they pay, not by reflex:
 - unerr-junior (fast, cheap): parallel recon across many files, running test suites or repro scripts (it reports exact output), web lookups. Do a single quick lookup yourself.
 - unerr-worker (executor): scoped multi-file mechanical changes; run independent slices in parallel. Do a small single-file edit yourself.
 
-ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard instances are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct fix attempts the issue's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate defect sites and the evidence does not decide between them; (d) $ESCALATION_TRIGGER_D.
+ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard tasks are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct attempts the problem's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate approaches and the evidence does not decide between them; (d) $ESCALATION_TRIGGER_D.
 $ESCALATION_SPAWN Triggers (b) and (d) are machine-checked at stop: if they have fired and you try to finish without having escalated, the stop gate blocks you and returns you to work.
+
 $FINISH_CONTRACT"
   fi
 fi

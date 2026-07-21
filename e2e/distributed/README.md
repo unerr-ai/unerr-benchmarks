@@ -234,6 +234,8 @@ the launcher died, or you `Ctrl-C`'d it — use the two read-only monitor script
 ./status.sh --matrix smk-e --watch   # live monitor (re-print every 15s) for a whole matrix
 ./status.sh smk-e-econ --instances   # one fleet + its per-instance table (id, status, resolved, which worker)
 ./status.sh --matrix smk-e --cost    # + total $ and per-tier (conductor/oracle/reasoner/executor) token·turn·cost
+./status.sh smk-e-econ --instances --cost   # per-instance rows ALSO get that task's own
+                                             # $/turns/tokens + per-tier attribution, plus the fleet total below
 ./status.sh <LABEL> --json           # raw /status JSON for a fleet
 
 ./debug-workers.sh                   # for every worker: what it holds (per /status) + a flagged log tail
@@ -251,7 +253,23 @@ instance-count). **Cost source differs by arm:** econ and every `claude-<mix>` r
 (from `litellm_spend_logs`); `claude-native` (Anthropic real models, no gateway) reports **claude-native cost**
 (from Claude Code's own `total_cost_usd`) with source tag `"claude-native"` and is displayed as a separate line
 ("claude-native (Anthropic $, NOT litellm spend)") in the multi-fleet view — never LiteLLM, always Anthropic billing.
-A multi-fleet view folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs). `debug-workers.sh`
+A multi-fleet view folds every fleet into one `MATRIX TOTAL` (grade % + cost across all runs).
+When a fleet's cost record ALSO carries a `by_model` dict (any `claude-<mix>` gateway arm — see
+`litellm_cost.py::summarize_rows`), `--cost` renders a **per-model breakdown instead of** the per-tier
+one, e.g. `gpt-5.6-terra[conductor] $1.0495 ( 42%)  in=117k out=31k  calls=77  ×12  cache=91%` — real
+model name (tagged `[tier]` only when `TIER_BY_MODEL` actually knows it), `$`, in/out tokens, request
+count, and a **cache-hit-rate** note whenever `cache_hit_rate`/`cached_in` is present. This is
+per-model = per-sub-agent attribution on gateway arms: on a run where cached input dwarfs fresh input
+(seen live on claude-gpt at ~10x), the per-tier view alone would still be accurate, but a model
+`TIER_BY_MODEL` hasn't mapped yet collapses onto one misleading `other` bucket — per-model survives
+that gap and surfaces the cache economics besides. econ (no `by_model`) keeps the per-tier rendering,
+byte-identical to before. `--instances --cost` together enrich EACH per-instance row with that task's
+OWN cost/turns/tokens and the SAME per-tier-or-per-model attribution (which model/sub-agent tier spent
+what on THAT instance) — reused from the same `--cost` queue.db dump, no second coordinator
+round-trip — so you can see per-task spend live while a run is in flight, not just after it resolves;
+the fleet-wide total still prints underneath, unchanged. A task with no cost record yet (still
+running) prints `cost=-`; an unbilled `claude-native` row prints `cost=n/a` (same "never a fake $0"
+rule as the fleet total). `--instances` alone and `--cost` alone are unaffected. `debug-workers.sh`
 additionally pulls each worker machine's `flyctl logs` and flags (`»»`) the boot/work state lines
 (dockerd up, toolbox build, `claimed`, `resolve (ceiling=… tier=…)`, `Instances resolved`, `dead`,
 `ERROR`). Reach for `status.sh` first ("where is every combo, and what's it costing?"), then
@@ -499,14 +517,18 @@ are bare-Claude baselines.
 
 **Control knobs** (read by `harness_terminal.py`; `run-distributed.sh` forwards only when set):
 `TERMINAL_STOCK_AGENT=1` reverts every claude arm to the bare first-party agent (the no-harness baseline
-control). `HARNESS_HOOKS` enables the finish-gate on terminal combos (unset/"0" = OFF — the terminal default; "1" =
-ON with profile from `HARNESS_PROFILE`, default "swe"; "generic" = ON with the generic profile). SWE-bench
-combos are unaffected by this knob — their flow (`run-instance.sh`) hard-enables the hooks with profile
-"swe" (byte-identical legacy behavior). Terminal combos require `HARNESS_HOOKS=generic` to enable
-terminal-shaped gates (records Bash outcomes + agent-declared verification via `# unerr:verify` marker,
-gates on marked-check success/regression/thrash, never on non-existent test files). See [HARBOR_CLAUDE_CODE.md
-§3.5](./HARBOR_CLAUDE_CODE.md) for gate semantics and the verification marker protocol, and
-[HARNESS_PROFILES.md](./HARNESS_PROFILES.md) for the plain-language rationale + generic-vs-swe policy.
+control). `HARNESS_HOOKS` enables the universal harness on terminal combos ("0"/unset = OFF; any
+non-empty, non-"0" value = ON — legacy "1" and "generic" both resolve to the single `universal` profile).
+`run-distributed.sh` now **defaults `HARNESS_HOOKS=1` for every claude-\* arm × benchmark** (`CLAUDE_ARM_KIND`
+non-empty — covers `claude-<mix>` and `claude-native`): the universal harness is ON by default regardless of
+benchmark family — there is no more per-benchmark-family "1"-vs-"generic" branch. Echoed at startup as
+`==> arm=$ARM: HARNESS_HOOKS=...`. An operator-supplied value (including an
+explicitly empty `HARNESS_HOOKS= ...`) always wins over the default; the opt-out for a baseline-control
+run is **`HARNESS_HOOKS=0`**. `ARM=econ` is never defaulted — its own flow is unaffected. SWE-bench
+combos are also unaffected by this knob — their flow (`run-instance.sh`) hard-enables the universal harness
+(byte-identical legacy behavior), independent of what `HARNESS_HOOKS` resolves to for the launcher.
+See [HARNESS_UNIVERSAL.md](./HARNESS_UNIVERSAL.md) for gate semantics, the verification marker protocol,
+and the harness rationale behind the single universal profile.
 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL` — forwarded into each `claude-<mix>` arm's task
 containers when set (tier aliases for gateway ensembles — this is how the `claude-gpt`/`claude-open`
 model maps in [Arm naming scheme](#arm-naming-scheme-claude-mix) get applied). **Cost** on terminal for

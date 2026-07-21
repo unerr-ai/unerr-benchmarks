@@ -3,10 +3,12 @@
 Drives the hooks script exactly as Claude Code would: one hook-event JSON
 object piped to stdin per subcommand invocation (record/gate/deny), state
 isolated per test via CC_HARNESS_STATE pointed at a pytest tmp_path. Covers
-both the profile-driven "generic" sensor (agent-declared `# unerr:verify`
-Bash commands) and a regression-lock for the original "swe" sensor
-(TEST_CMD_RE-gated pytest/manage.py-test/tox/bin-test/repro*), so a future
-edit that accidentally changes swe behavior fails loudly here.
+the single "universal" profile (HARNESS_HOOKS unset/""/"0" -> hooks off;
+ANY other value, including the legacy "generic"/"1"/"swe" strings, resolves
+to the same universal behavior): Gate Z/R/V/E driven purely by the
+agent-declared `# unerr:verify` Bash marker (there is no fixed
+test-runner sensor), and Rule T's one-time, override-able deny on
+test-shaped edit paths.
 
 Run: python3 -m pytest e2e/reference/claude/local-docker/tests/test_cc_harness_hooks.py -q
 """
@@ -112,17 +114,17 @@ def deny_reason(result):
     return hso["permissionDecisionReason"]
 
 
-# ── generic profile ──────────────────────────────────────────────────────
+# ── universal gate (Z/R/V/E) + rule T/B deny ─────────────────────────────
 
 
-def test_generic_z_blocks_idle_finish(tmp_path):
+def test_z_blocks_idle_finish(tmp_path):
     env = _env(tmp_path, "generic")
     result = gate(env)
     reason = block_reason(result)
     assert "not modified" in reason or "no evidence any work happened" in reason
 
 
-def test_generic_v_blocks_unverified_finish_message_contains_marker(tmp_path):
+def test_v_blocks_unverified_finish_message_contains_marker(tmp_path):
     env = _env(tmp_path, "generic")
     record_edit(env)  # keeps Gate Z from firing (edits > 0)
     result = gate(env)
@@ -130,7 +132,7 @@ def test_generic_v_blocks_unverified_finish_message_contains_marker(tmp_path):
     assert "# unerr:verify" in reason
 
 
-def test_generic_marker_success_then_finish_allowed(tmp_path):
+def test_marker_success_then_finish_allowed(tmp_path):
     env = _env(tmp_path, "generic")
     record_edit(env)
     time.sleep(0.02)
@@ -139,7 +141,7 @@ def test_generic_marker_success_then_finish_allowed(tmp_path):
     assert result is None
 
 
-def test_generic_edit_after_green_verify_blocks_v_again(tmp_path):
+def test_edit_after_green_verify_blocks_v_again(tmp_path):
     env = _env(tmp_path, "generic")
     record_edit(env)
     time.sleep(0.02)
@@ -153,7 +155,7 @@ def test_generic_edit_after_green_verify_blocks_v_again(tmp_path):
     assert "# unerr:verify" in reason
 
 
-def test_generic_verify_cmd_green_then_red_blocks_r(tmp_path):
+def test_verify_cmd_green_then_red_blocks_r(tmp_path):
     env = _env(tmp_path, "generic")
     record_edit(env)
     time.sleep(0.02)
@@ -165,7 +167,7 @@ def test_generic_verify_cmd_green_then_red_blocks_r(tmp_path):
     assert "previously passed now fails" in reason
 
 
-def test_generic_two_v_blocks_then_finish_demands_escalation(tmp_path):
+def test_two_v_blocks_then_finish_demands_escalation_panel(tmp_path):
     # PANEL mode (ESCALATION_PANEL=1): today's original single-block,
     # spawn-both-in-parallel escalation, byte-identical message — still
     # reachable as an opt-in. (LADDER is the harness default now; see the
@@ -181,13 +183,23 @@ def test_generic_two_v_blocks_then_finish_demands_escalation(tmp_path):
     assert "unerr-opus" in reason3 and "unerr-fable" in reason3
 
 
-def test_generic_t_does_not_deny_test_file_edit(tmp_path):
+def test_t_denies_test_edit_once_then_allows_same_edit_as_override(tmp_path):
+    """Rule T is a one-time, override-able nudge, not a hard read-only deny:
+    the first edit to a test-shaped path is denied with a message pointing
+    at the grader running its own copy of the checks (fake-progress risk);
+    re-issuing the SAME edit a second time is then treated as an
+    evidence-cited override and allowed through."""
     env = _env(tmp_path, "generic")
     result = deny(env, "Edit", "tests/test_x.py")
-    assert result is None
+    reason = deny_reason(result)
+    assert "grader runs its own copy" in reason
+    assert "fakes progress" in reason
+
+    result2 = deny(env, "Edit", "tests/test_x.py")  # same file, re-issued
+    assert result2 is None
 
 
-def test_generic_rule_c_does_not_deny_datetime_now(tmp_path, tmp_path_factory):
+def test_rule_c_removed_does_not_deny_datetime_now(tmp_path, tmp_path_factory):
     env = _env(tmp_path, "generic")
     conv_file = tmp_path_factory.mktemp("conv") / "conv_utcnow.py"
     conv_file.write_text("import datetime\nx = datetime.datetime.utcnow()\n")
@@ -195,7 +207,7 @@ def test_generic_rule_c_does_not_deny_datetime_now(tmp_path, tmp_path_factory):
     assert result is None
 
 
-def test_generic_unmarked_failing_command_never_triggers_r(tmp_path):
+def test_unmarked_failing_command_never_triggers_r(tmp_path):
     env = _env(tmp_path, "generic")
     record_edit(env)
     time.sleep(0.02)
@@ -290,9 +302,10 @@ def test_ladder_no_further_block_after_both_agents_used(tmp_path):
     assert r2 is not None  # sanity: V itself is unaffected by escalation state
 
 
-def test_swe_ladder_default_rung1_demands_opus_only(tmp_path):
-    """Same rung-1 shape under the swe profile — ESCALATION_PANEL is
-    orthogonal to HARNESS_PROFILE."""
+def test_ladder_rung1_demands_opus_only_under_legacy_hooks_value(tmp_path):
+    """Same rung-1 shape via HARNESS_HOOKS="1" (a legacy value that still
+    resolves to the single universal profile) — ESCALATION_PANEL is
+    orthogonal to HARNESS_HOOKS's exact value."""
     env = _env(tmp_path, "1")  # HARNESS_HOOKS=1, no ESCALATION_PANEL -> LADDER
     record_edit(env)
     gate(env)  # V (1st)
@@ -303,9 +316,10 @@ def test_swe_ladder_default_rung1_demands_opus_only(tmp_path):
     assert "unerr-fable" not in reason3
 
 
-def test_swe_panel_mode_demands_both_agents(tmp_path):
-    """ESCALATION_PANEL=1 under the swe profile reproduces today's
-    spawn-both-in-parallel message, same as under generic."""
+def test_panel_mode_demands_both_agents_under_legacy_hooks_value(tmp_path):
+    """ESCALATION_PANEL=1 under HARNESS_HOOKS="1" reproduces today's
+    spawn-both-in-parallel message, same as under "generic" — both legacy
+    values collapse to the same universal profile."""
     env = _env(tmp_path, "1", escalation_panel="1")
     record_edit(env)
     gate(env)  # V (1st)
@@ -315,46 +329,47 @@ def test_swe_panel_mode_demands_both_agents(tmp_path):
     assert "unerr-opus" in reason3 and "unerr-fable" in reason3
 
 
-# ── swe profile regression-lock ──────────────────────────────────────────
+# ── legacy HARNESS_HOOKS="1" regression-lock (still maps to universal) ───
 
 
-def test_swe_t_denies_tests_dir_edit(tmp_path):
-    env = _env(tmp_path, "1")  # HARNESS_HOOKS=1, no HARNESS_PROFILE -> default "swe"
+def test_t_denies_tests_dir_edit(tmp_path):
+    env = _env(tmp_path, "1")  # HARNESS_HOOKS=1 -> universal
     result = deny(env, "Edit", "tests/test_foo.py")
     reason = deny_reason(result)
-    assert "read-only" in reason
+    assert "grader runs its own copy" in reason
 
 
-def test_swe_pytest_sensor_matches_broad_run(tmp_path):
+def test_unmarked_test_run_never_satisfies_v_marked_run_does(tmp_path):
+    """Universal Gate V has no fixed test-runner sensor: an unmarked pytest
+    run never counts toward verification, whether it looks broad (a bare
+    file target) or narrow (a `-k` filter) — shape is irrelevant. Only the
+    literal `# unerr:verify` marker satisfies V."""
     env = _env(tmp_path, "1")
     record_edit(env)
     time.sleep(0.02)
-    record_bash(env, BROAD_TEST_CMD, ok=True)
-    result = gate(env)
-    assert result is None  # broad green post-edit satisfies V
-
-
-def test_swe_narrow_k_filter_not_broad(tmp_path):
-    env = _env(tmp_path, "1")
-    record_edit(env)
+    record_bash(env, BROAD_TEST_CMD, ok=True)  # unmarked broad-shaped run
     time.sleep(0.02)
-    record_bash(env, NARROW_TEST_CMD, ok=True)
+    record_bash(env, NARROW_TEST_CMD, ok=True)  # unmarked narrow-shaped run
     result = gate(env)
     reason = block_reason(result)
-    assert "NARROW" in reason
+    assert "# unerr:verify" in reason  # neither unmarked run satisfied V
+
+    time.sleep(0.02)
+    record_bash(env, BROAD_TEST_CMD + " # unerr:verify", ok=True)  # marked -> satisfies V
+    assert gate(env) is None
 
 
-def test_swe_v_then_r_canned_sequence(tmp_path):
+def test_v_then_r_canned_sequence(tmp_path):
     env = _env(tmp_path, "1")
     record_edit(env)
     result_v = gate(env)
     reason_v = block_reason(result_v)
-    assert "# unerr:verify" not in reason_v  # swe's V message never mentions the generic marker
+    assert "# unerr:verify" in reason_v  # universal V message names the marker
 
     time.sleep(0.02)
-    record_bash(env, BROAD_TEST_CMD, ok=True)
+    record_bash(env, BROAD_TEST_CMD + " # unerr:verify", ok=True)
     time.sleep(0.02)
-    record_bash(env, BROAD_TEST_CMD, ok=False)  # regression: passed, then failed
+    record_bash(env, BROAD_TEST_CMD + " # unerr:verify", ok=False)  # regression: passed, then failed
     result_r = gate(env)
     reason_r = block_reason(result_r)
     assert "previously passed now fails" in reason_r

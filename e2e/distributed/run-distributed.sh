@@ -61,6 +61,9 @@ case "$ARM" in
   claude-*)      CLAUDE_ARM_KIND="gateway" ;;
   *)             CLAUDE_ARM_KIND="" ;;
 esac
+# HARNESS_HOOKS default (claude arms only): benchmark-aware — resolved
+# further below, once BENCHMARK is known and PY_HOST is available (search
+# for "_HH_RULE"). It needs BENCHMARK, so it cannot live here.
 # Per-mix MODEL MAP — the SINGLE source of truth for which models each claude-<mix>
 # ensemble runs (bash 3.2 has no assoc arrays -> case). Each arm sets the four Claude
 # Code tier aliases (haiku/sonnet/opus/fable) UNLESS the operator already exported an
@@ -232,6 +235,48 @@ TASK_IDLE_S="${TASK_IDLE_S:-2700}"          # per-task no-output idle watchdog o
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
 
+# HARNESS_HOOKS default (claude arms only; universal profile since 2026-07-21):
+# the finish gates (V/Z/R) + Gate E escalation ladder + deny rules live behind
+# HARNESS_HOOKS (harbor_agents.py: _hooks_on = value not in ("","0")). Any
+# non-empty/non-"0" value turns the single `universal` harness ON; the legacy
+# "1" and "generic" spellings both resolve to it. Leaving it unset used to mean
+# "full unerr harness agent, hooks OFF" — silent, and an 89-task terminal
+# run was once launched that way by accident (~$9.47 + 1h wasted). Two
+# measured runs on the SAME 5 claude-gpt x terminal-mini ids proved
+# hooks-on strictly better (hooks unset: 4/5 resolved $8.27 0 escalation vs
+# HARNESS_HOOKS=generic: 5/5 resolved $9.60, escalation correctly
+# concentrated on the one hard task — see HARNESS_UNIVERSAL.md), so hooks
+# are ON by default for every claude-* arm (CLAUDE_ARM_KIND non-empty), for
+# EVERY benchmark — the old per-benchmark profile split ("1"=swe vs "generic")
+# was collapsed into ONE `universal` profile 2026-07-21 (both spellings now
+# resolve to `universal` in harbor_agents.py / cc-harness-hooks.py; see
+# HARNESS_UNIVERSAL.md), so there is no longer a family-dependent default.
+# ARM=econ is NEVER defaulted — its own hooks path (run-instance.sh under
+# e2e/econ) is unaffected.
+# An operator-supplied value ALWAYS wins over this default, INCLUDING an
+# explicitly empty one (`HARNESS_HOOKS= ...`) — test set-ness with
+# ${HARNESS_HOOKS+x}, not -n, so "set but empty" is distinguishable from
+# "never mentioned". Opt-out for a baseline-control run: HARNESS_HOOKS=0
+# (the only spelling _hooks_on treats as a genuine, explicit OFF; empty/
+# unset also read as OFF downstream but "0" is the documented one to type).
+if [ -n "$CLAUDE_ARM_KIND" ] && [ -z "${HARNESS_HOOKS+x}" ]; then
+  # Universal harness: any non-empty/non-"0" value is ON. The old per-benchmark
+  # "1" (swe) vs "generic" profile split was collapsed 2026-07-21 — both spellings
+  # now resolve to the single `universal` profile in harbor_agents.py /
+  # cc-harness-hooks.py — so hooks default ON for EVERY benchmark on a claude-*
+  # arm, with no family-dependent branch. See HARNESS_UNIVERSAL.md.
+  HARNESS_HOOKS="1"
+  _HH_RULE="arm=$ARM (claude): universal harness ON by default (HARNESS_HOOKS=1) for benchmark=$BENCHMARK"
+fi
+if [ -n "$CLAUDE_ARM_KIND" ]; then
+  case "${HARNESS_HOOKS:-}" in
+    ""|0) _HH_STATE="OFF" ;;
+    *)    _HH_STATE="ON" ;;
+  esac
+  _HH_RULE="${_HH_RULE:-operator-supplied HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (no default applied)}"
+  echo "==> arm=$ARM: HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (finish gates + escalation ladder $_HH_STATE; $_HH_RULE; opt out with HARNESS_HOOKS=0)"
+fi
+
 # Tigris end-of-run archive (OPT-IN, default off): opt-in end-of-run archive of
 # results/traces to Tigris. ONE shared bucket serves every per-(arm×benchmark)
 # app — the AWS_* creds for it are auto-staged onto each combo's app at prepare
@@ -259,6 +304,7 @@ if [ "${PLAN_ONLY:-0}" = "1" ] || [ "${1:-}" = "--print-plan" ]; then
   echo "    APP=$APP"
   echo "    LABEL=${LABEL:-<unset>} (raw=${RAW_LABEL:-<unset>})"
   echo "    DATASET=$DATASET SPLIT=$SPLIT"
+  echo "    HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (CLAUDE_ARM_KIND=${CLAUDE_ARM_KIND:-<none>}; ${_HH_RULE:-no default applied (ARM=econ)}; opt out with HARNESS_HOOKS=0)"
   echo "    worker env additions: BENCHMARK=$BENCHMARK"
   echo "    coordinator env additions: ARM=$ARM BENCHMARK=$BENCHMARK MAX_FAILURE_RERUN=$MAX_FAILURE_RERUN"
   exit 0
@@ -947,12 +993,15 @@ fi
 [ -n "$CLAUDE_ARM_KIND" ] && EXTRA_ENV+=(-e TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-claude-toolbox}")
 # terminal-flow knobs (all claude arms; harness_terminal.py reads them on the
 # worker): TERMINAL_STOCK_AGENT=1 = bare first-party claude-code agent (the
-# no-harness baseline control), HARNESS_HOOKS=1 = opt back into the SWE-shaped
-# finish-gate hooks ("generic" = same hooks under the benchmark-agnostic
-# profile), HARNESS_PROFILE=swe|generic = explicit profile override (default
-# swe when HARNESS_HOOKS=1 and this is unset). Forwarded only when set — unset
-# = full unerr harness agent, hooks off (the defaults baked into
-# harness_terminal/harbor_agents); no default value is set here for either var.
+# no-harness baseline control), HARNESS_HOOKS = the single `universal`
+# finish-gate + escalation + deny harness (any non-empty/non-"0" value = ON) —
+# DEFAULTED to "1" for every claude-* arm near the PY_HOST definition above
+# (opt out with HARNESS_HOOKS=0). HARNESS_PROFILE is LEGACY/ignored since the
+# universal collapse (2026-07-21) — still forwarded when explicitly set so an
+# old invocation doesn't error, but the harness no longer reads it. Forwarded
+# only when set/resolved — TERMINAL_STOCK_AGENT and HARNESS_PROFILE have NO
+# default (ARM=econ never gets a HARNESS_HOOKS default either — its own
+# hooks path is unaffected).
 [ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
 [ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
 [ -n "${HARNESS_PROFILE:-}" ] && EXTRA_ENV+=(-e HARNESS_PROFILE="$HARNESS_PROFILE")

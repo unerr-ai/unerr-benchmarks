@@ -635,9 +635,9 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # limit under parallel workers, and with --max-retries 0 Harbor treats a
     # single 429 as trial-fatal. TERMINAL_MAX_RETRIES, when set, overrides
     # the default for every arm — this worker only READS the env; the
-    # launcher (run-distributed.sh) forwards a knob only when the caller
-    # sets it, and does not yet have a TERMINAL_MAX_RETRIES passthrough line
-    # (see report).
+    # launcher (run-distributed.sh) forwards it to worker machines via its
+    # TERMINAL_MAX_RETRIES passthrough line, so setting it on the launcher
+    # invocation reaches this read.
     default_max_retries = "1" if ":" in agent else "0"
     max_retries = os.environ.get("TERMINAL_MAX_RETRIES", default_max_retries)
     # --model is OMITTED when `model` is empty (the unerr gateway-claude path —
