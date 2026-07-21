@@ -9,19 +9,39 @@
 #   (no args)            the newest out/bench-*/manifest.tsv (last bench.sh matrix)
 #   --matrix <id>        that matrix's fleets (out/bench-<id>/manifest.tsv)
 #   --manifest <path>    an explicit manifest.tsv
-#   <LABEL> [APP]        one fleet by label (APP inferred: arm from a -claude or
-#                        -claude-real fold in the label, benchmark from $BENCHMARK
-#                        else the label's -pro/-terminal/-live_verified/-lite
-#                        suffix, else verified)
+#   <LABEL> [APP]        one fleet by label (APP inferred: arm from the label's
+#                        arm token — econ/claude-native/claude-gpt/claude-open/
+#                        legacy claude(-real) — benchmark from $BENCHMARK else
+#                        the label's -pro/-terminal/-live_verified/-lite suffix,
+#                        else verified)
 #
 # Options:
 #   --watch [secs]   re-print every <secs> (default 15) until Ctrl-C — the monitor
-#   --instances      also print the per-instance table (id, status, resolved, worker)
+#   --instances      also print the per-instance table (id, status, resolved, worker,
+#                    attempt count). Combined with --cost, each row is ALSO enriched
+#                    with that task's OWN $ cost, turns, in/out tokens, and a per-tier
+#                    (conductor/oracle/reasoner/executor) breakdown — or, when the cost
+#                    record carries a by_model dict (any claude-<mix> gateway arm), a
+#                    per-model breakdown (real model name + cache-hit-rate) instead —
+#                    i.e. which model/sub-agent tier spent what on THAT instance, for
+#                    live-run monitoring at task granularity (not just the fleet aggregate).
+#                    Reuses the same --cost meta dump — no second coordinator
+#                    round-trip. A task with no cost record yet (still running)
+#                    prints "-"; an unbilled claude-native row prints "n/a" (never a
+#                    fake $0). --instances alone and --cost alone are unaffected.
 #   --cost           add cost + per-tier (conductor/oracle/reasoner/executor) token·turn·$
 #                    breakdown, read live from the coordinator queue.db per-instance meta
 #                    (econ: telemetry/tier_cost_db; claude: litellm_spend_logs; claude-real:
 #                    meta.cost.source=="claude-native" — real Anthropic $, broken out on
 #                    its own line below the fleet total, never counted as litellm spend).
+#                    When the cost record ALSO carries a by_model dict (any claude-<mix>
+#                    gateway arm), that REPLACES the per-tier lines with a per-model
+#                    breakdown instead — real model name (e.g. gpt-5.6-terra[conductor]),
+#                    $, in/out tokens, requests, and a cache-hit-rate note — so per-model
+#                    attribution (= per-sub-agent attribution on gateway arms) survives
+#                    even for a model litellm_cost.py's TIER_BY_MODEL hasn't mapped yet,
+#                    instead of collapsing into one misleading "other" tier bucket. econ
+#                    (no by_model) keeps the per-tier rendering, byte-identical.
 #                    Fleet total + a MATRIX TOTAL (cost across all runs in view). Only
 #                    completed instances have cost (it accrues on completion).
 #   --json           dump each fleet's raw /status JSON instead of the summary line
@@ -31,6 +51,8 @@
 #   ./status.sh --matrix smk-e --watch           # live-monitor that matrix every 15s
 #   ./status.sh smk-e-econ --instances           # one fleet + its per-instance rows
 #   ./status.sh --matrix smk-e --cost            # + total $ and per-tier token/turn/cost
+#   ./status.sh smk-e-econ --instances --cost    # per-instance rows enriched w/ per-task
+#                                                 # $/turns/tokens/tier, plus the fleet total
 #   ./status.sh mini-claude swebench-dist-claude-verif   # explicit APP overrides inference
 #   BENCHMARK=pro ./status.sh <LABEL>            # non-verified fleet whose label lacks the suffix
 set -uo pipefail
@@ -49,7 +71,7 @@ while [ $# -gt 0 ]; do
     --instances) INSTANCES=1; shift ;;
     --cost)      COST=1; shift ;;
     --json)      JSON=1; shift ;;
-    -h|--help)   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)          echo "ERROR: unknown flag '$1'" >&2; exit 2 ;;
     *)           POS+=("$1"); shift ;;
   esac
@@ -76,17 +98,16 @@ _bench_from_label() {  # <label>
 labels=(); apps=(); combos=()
 [ -n "$MATRIX" ] && [ -z "$MANIFEST" ] && MANIFEST="$HERE/out/bench-$MATRIX/manifest.tsv"
 if [ "${#POS[@]}" -ge 1 ]; then
-  # explicit LABEL [APP] — infer app from the label's -claude/-claude-real fold +
-  # benchmark suffix if not given. claude-real MUST be matched before the bare
-  # *claude* fallback (its label also contains "claude") or it mislabels as claude.
+  # explicit LABEL [APP] — infer app from the label's arm token (fc_arm_from_label:
+  # strips the benchmark/graderr suffix then matches the known arm set
+  # most-specific-first, so claude-gpt/claude-open/claude-native each resolve to
+  # their OWN app instead of collapsing into a shared "claude" fallback) +
+  # benchmark suffix if not given.
   lbl="${POS[0]}"; app="${POS[1]:-}"
   if [ -z "$app" ]; then
     bench="$(_bench_from_label "$lbl")"
-    case "$lbl" in
-      *claude-real*) app="$(fc_default_app claude-real "$bench")" ;;
-      *claude*)      app="$(fc_default_app claude "$bench")" ;;
-      *)             app="$(fc_default_app econ "$bench")" ;;
-    esac
+    arm="$(fc_arm_from_label "$lbl" "$bench")"
+    app="$(fc_default_app "$arm" "$bench")"
   fi
   labels+=("$lbl"); apps+=("$app"); combos+=("$lbl")
 else
@@ -160,6 +181,79 @@ q = "p{p} l{l} d{d} x{x} f{f}".format(
     x=c.get("dead", 0), f=c.get("failed", 0))
 retry = f"reatt={reatt} up4retry={c.get('failed', 0)} dead={c.get('dead', 0)}"
 print(f"  {combo:<26} {label:<22}  {armed}  w={ws}  {q:<22}  {retry:<28}  resolved={res}/{tot} ({pct})")
+# ── per-instance meta, keyed by instance_id — loaded ONCE from the metaf dump
+# fc_meta_rows already fetched (no second coordinator round-trip). Feeds BOTH the
+# --instances per-row enrichment right below AND the fleet-wide aggregate further
+# down, so --cost alone still computes exactly the same totals it always has.
+def _kfmt(n):
+    n = n or 0
+    return f"{n/1_000_000:.2f}M" if n >= 1_000_000 else f"{n/1000:.0f}k"
+
+TIER_ORDER = ["conductor", "oracle", "reasoner", "executor", "fast", "other"]
+
+def _model_label(model, tier):
+    # "other"/absent tier is the fallback bucket for a model TIER_BY_MODEL doesn't
+    # know about yet (litellm_cost.py) — tagging every row "[other]" would be noise,
+    # so only show the tier when it's a real, known bucket.
+    return f"{model}[{tier}]" if tier and tier != "other" else model
+
+def _model_part(model, d):
+    # One model's $/tokens/requests segment, styled like the by-tier line; appends a
+    # cache-hit-rate note whenever the field is present — on a gateway arm cached
+    # input can dwarf fresh input (~10x seen live on claude-gpt), so it's a
+    # first-order cost driver, not a footnote.
+    label = _model_label(model, d.get("tier"))
+    usd = float(d.get("usd") or 0)
+    calls = int(d.get("requests") or 0)
+    seg = f"{label}=${usd:.4f}(in={_kfmt(d.get('in_tokens'))} out={_kfmt(d.get('out_tokens'))} x{calls}"
+    rate = d.get("cache_hit_rate")
+    cached_in = d.get("cached_in") or 0
+    if rate is not None or cached_in:
+        seg += f" cache={100 * (rate or 0):.0f}%"
+    return seg + ")"
+
+meta_rows = []
+meta_by_id = {}
+if want_cost and metapath:
+    try:
+        meta_rows = json.load(open(metapath))
+    except Exception:
+        meta_rows = []
+    for row in meta_rows:
+        if isinstance(row, list) and len(row) >= 4:
+            meta_by_id[row[0]] = row[3]
+
+def _row_cost(meta):
+    # meta is one instance's meta_json blob, or None (not completed yet). Returns
+    # None when there's no record at all (still running); else a dict whose usd is
+    # None when a record exists but nothing has posted yet, so the caller renders
+    # "n/a"/"-" instead of a fake $0.
+    if not isinstance(meta, dict):
+        return None
+    tel = meta.get("telemetry") or {}
+    tcd = meta.get("tier_cost_db") or {}
+    cst = meta.get("cost") or {}
+    cst = cst if isinstance(cst, dict) else {}
+    is_native = cst.get("source") == "claude-native"
+    # same authoritative-usd precedence as the fleet aggregate below: claude
+    # litellm cost -> econ sqlite tier_cost_db -> telemetry stream estimate.
+    u = cst.get("usd")
+    if u is None:
+        u = tcd.get("usd")
+    if u is None:
+        u = tel.get("usd")
+    bt = cst.get("by_tier") or tcd.get("by_tier") or tel.get("by_tier") or {}
+    bm = cst.get("by_model") or {}  # gateway arms (claude-<mix>) only — see litellm_cost.py
+    return dict(
+        usd=(float(u) if u is not None else None),
+        turns=int(tel.get("turns") or 0),
+        tin=int(tel.get("in_tokens") or cst.get("in_tokens") or 0),
+        tout=int(tel.get("out_tokens") or cst.get("out_tokens") or 0),
+        by_tier=(bt if isinstance(bt, dict) else {}),
+        by_model=(bm if isinstance(bm, dict) else {}),
+        is_native=is_native,
+    )
+
 if show:
     for it in insts:
         r = "R" if it.get("resolved") else "."
@@ -168,22 +262,55 @@ if show:
         wk = it.get("worker_id") or "-"
         att = it.get("attempt_count", 0)
         rt = f" retried×{att-1}" if att and att > 1 else ""
-        print(f"      {iid:<34} {st:<8} {r}  worker={wk}  att={att}{rt}")
+        line = f"      {iid:<34} {st:<8} {r}  worker={wk}  att={att}{rt}"
+        tier_line = ""
+        if want_cost:
+            info = _row_cost(meta_by_id.get(iid))
+            if info is None:
+                line += "  cost=-  turns=-  in=- out=-"
+            elif info["usd"] is None:
+                # no $ posted yet: native rows say "n/a" (never litellm spend),
+                # anything else falls back to "-" — neither ever reads as $0.
+                line += f"  cost={'n/a' if info['is_native'] else '-'}  turns=-  in=- out=-"
+            else:
+                line += (f"  cost=${info['usd']:.4f}  turns={info['turns']}"
+                         f"  in={_kfmt(info['tin'])} out={_kfmt(info['tout'])}")
+                if info["by_model"]:
+                    # Per-model attribution (gateway arms) takes precedence over
+                    # by-tier — the model name is always ground-truth, unlike a
+                    # tier that may still be unmapped ("other") for a new model.
+                    ordered_models = sorted(
+                        info["by_model"].items(), key=lambda kv: -float(kv[1].get("usd") or 0))
+                    parts = [_model_part(m, d) for m, d in ordered_models if isinstance(d, dict)]
+                    if parts:
+                        tier_line = f"          by-model: {'  '.join(parts)}"
+                elif info["by_tier"]:
+                    ordered = [t for t in TIER_ORDER if t in info["by_tier"]] \
+                        + [t for t in info["by_tier"] if t not in TIER_ORDER]
+                    parts = []
+                    for tier in ordered:
+                        t = info["by_tier"].get(tier) or {}
+                        if not isinstance(t, dict):
+                            continue
+                        tusd = float(t.get("usd") or 0)
+                        calls = int(t.get("requests") or t.get("messages") or 0)
+                        parts.append(f"{tier}=${tusd:.4f}(in={_kfmt(t.get('in_tokens'))} "
+                                      f"out={_kfmt(t.get('out_tokens'))} x{calls})")
+                    if parts:
+                        tier_line = f"          by-tier: {'  '.join(parts)}"
+        print(line)
+        if tier_line:
+            print(tier_line)
 
-# ── cost + per-tier breakdown, from the queue.db meta dump (both arms) ──────────
-def _kfmt(n):
-    n = n or 0
-    return f"{n/1_000_000:.2f}M" if n >= 1_000_000 else f"{n/1000:.0f}k"
-
+# ── cost + per-tier breakdown, fleet-wide — from the SAME meta_rows loaded above ──
 fleet_usd = 0.0
 if want_cost and metapath:
-    try:
-        rows = json.load(open(metapath))
-    except Exception:
-        rows = []
+    rows = meta_rows
     tot_turns = tot_in = tot_out = priced_insts = 0
     tiers = {}   # tier -> {usd,in,out,calls,insts}
-    TIER_ORDER = ["conductor", "oracle", "reasoner", "executor", "fast", "other"]
+    models = {}  # bare model -> {tier,usd,tin,tout,cached_in,calls,insts} — populated only
+                 # for gateway arms (claude-<mix>) whose cost record carries by_model;
+                 # stays empty for econ, so the tier printout below is untouched there.
     # claude-native (claude-real arm): real-Anthropic $, meta.cost.source=="claude-native".
     # Folded into fleet_usd/priced_insts like any other row, but tracked separately too
     # so the line below can label it distinctly — NEVER as litellm spend — and so an
@@ -217,6 +344,24 @@ if want_cost and metapath:
         tot_turns += int(tel.get("turns") or 0)
         tot_in += int(tel.get("in_tokens") or cst.get("in_tokens") or 0)
         tot_out += int(tel.get("out_tokens") or cst.get("out_tokens") or 0)
+        # by_model (gateway arms — real model name, e.g. gpt-5.6-terra) takes
+        # precedence over by_tier: a claude cost.by_tier can still collapse onto a
+        # single "other" bucket until TIER_BY_MODEL knows the model (litellm_cost.py).
+        bm = cst.get("by_model") or {}
+        if isinstance(bm, dict) and bm:
+            for model, m in bm.items():
+                if not isinstance(m, dict):
+                    continue
+                a = models.setdefault(model, dict(
+                    tier=m.get("tier") or "other", usd=0.0, tin=0, tout=0,
+                    cached_in=0, calls=0, insts=0))
+                a["usd"] += float(m.get("usd") or 0)
+                a["tin"] += int(m.get("in_tokens") or 0)
+                a["tout"] += int(m.get("out_tokens") or 0)
+                a["cached_in"] += int(m.get("cached_in") or 0)
+                a["calls"] += int(m.get("requests") or 0)
+                a["insts"] += 1
+            continue
         # by_tier: claude cost.by_tier | econ tier_cost_db.by_tier | telemetry.by_tier
         bt = cst.get("by_tier") or tcd.get("by_tier") or tel.get("by_tier") or {}
         if isinstance(bt, dict):
@@ -234,11 +379,22 @@ if want_cost and metapath:
         native_str = f"${native_usd:.4f}" if native_priced else "n/a (claude-native)"
         na_note = f"  ({native_na} n/a)" if native_na else ""
         print(f"        of which claude-native (Anthropic $, NOT litellm spend): {native_str}  ×{native_priced}{na_note}")
-    ordered = [t for t in TIER_ORDER if t in tiers] + [t for t in tiers if t not in TIER_ORDER]
-    for tier in ordered:
-        a = tiers[tier]
-        share = (100 * a["usd"] / fleet_usd) if fleet_usd else 0
-        print(f"        {tier:<10} ${a['usd']:.4f} ({share:4.0f}%)  in={_kfmt(a['tin'])} out={_kfmt(a['tout'])}  calls={a['calls']}  ×{a['insts']}")
+    if models:
+        # Per-model attribution (gateway arms) replaces the tier breakdown, which
+        # would otherwise dump every dollar into one "other" bucket until
+        # TIER_BY_MODEL knows the model (litellm_cost.py::tier_of).
+        for model, a in sorted(models.items(), key=lambda kv: -kv[1]["usd"]):
+            label = _model_label(model, a["tier"])
+            share = (100 * a["usd"] / fleet_usd) if fleet_usd else 0
+            denom = a["tin"] + a["cached_in"]
+            cache_note = f"  cache={100 * a['cached_in'] / denom:.0f}%" if denom else ""
+            print(f"        {label:<26} ${a['usd']:.4f} ({share:4.0f}%)  in={_kfmt(a['tin'])} out={_kfmt(a['tout'])}  calls={a['calls']}  ×{a['insts']}{cache_note}")
+    else:
+        ordered = [t for t in TIER_ORDER if t in tiers] + [t for t in tiers if t not in TIER_ORDER]
+        for tier in ordered:
+            a = tiers[tier]
+            share = (100 * a["usd"] / fleet_usd) if fleet_usd else 0
+            print(f"        {tier:<10} ${a['usd']:.4f} ({share:4.0f}%)  in={_kfmt(a['tin'])} out={_kfmt(a['tout'])}  calls={a['calls']}  ×{a['insts']}")
 
 # machine-readable tail for the matrix roll-up (grade % + total cost), filtered out in snapshot().
 print(f"__ROLLUP__\t{res}\t{tot}\t{reatt}\t{c.get('failed',0)}\t{c.get('dead',0)}\t{fleet_usd:.6f}")

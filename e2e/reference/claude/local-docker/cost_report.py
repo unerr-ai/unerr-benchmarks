@@ -231,13 +231,13 @@ def aggregate_by_model(rows):
 
 # ── Per-task x tier pivot (--detailed only) ─────────────────────────────────────
 
-CANONICAL_TIER_ORDER = ["conductor", "reasoner", "fast", "oracle"]
+CANONICAL_TIER_ORDER = ["sonnet", "haiku", "opus", "fable"]
 
 
 def _tier_columns(rows):
     """Ordered tier-column list for the per-task x tier tables: the canonical
-    tiers (conductor/reasoner/fast/oracle) first, any other tier names seen
-    in the data appended alphabetically after."""
+    claude model classes (sonnet/haiku/opus/fable) first, any other tier
+    names seen in the data appended alphabetically after."""
     seen = set()
     for r in rows:
         seen.update(r["by_tier"].keys())

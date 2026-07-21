@@ -129,6 +129,14 @@ own env still overrides the mix default. The open mix's values also live as hard
 - **Adding a mix:** one `case` entry in `run-distributed.sh` mapping `ARM=claude-<newmix>` to its four
   `ANTHROPIC_DEFAULT_*_MODEL` values, plus a table here. The runner treats every `claude-<mix>` value
   uniformly as a gateway arm reading its model map from env — no other runner code changes needed.
+- **Cost attribution:** each mix's models must ALSO be added to `TIER_BY_MODEL` in
+  `e2e/reference/claude/local-docker/litellm_cost.py` (keyed bare — `bare_model()` strips the `openai/`
+  prefix this table uses, so both the prefixed and bare form resolve to the same tier), or every dollar
+  for that mix falls into the `"other"` tier bucket in cost reporting (`status.sh --cost`) even though the
+  per-model spend itself is still correctly recorded (`litellm_spend_logs`' `by_model` breakdown is
+  unaffected by a missing tier — `status.sh` renders that directly when present). This map is baked into
+  the worker image, so a map change only takes effect on the **next fresh bake** — `status.sh`'s
+  rendering is host-side and needs no rebake.
 
 ---
 
@@ -222,8 +230,8 @@ LABEL=mini10-run1 ./run-distributed.sh arm
 | `WEBSEARCH=0` | no | **econ arm only** — force Exa web search OFF for a clean, baseline-comparable (no-web) econ run. No effect on claude (already opt-in). |
 | `EXA_API_KEY` | auto (econ arm) | econ-arm Exa search key — **default-on** for econ, sourced from `econ-coding-agent/.env.local` (canonical) then `e2e/econ/.env.local`; injected into workers unless `WEBSEARCH=0`. |
 | `TAVILY_API_KEY` | auto (only when `WEBSEARCH=1`) | claude-arm search key (opt-in). econ arm uses `EXA_API_KEY` (default-on, above). |
-| `HARNESS_HOOKS` | no | **This flow hard-enables the hooks** (`HARNESS_ON=1` in `run-instance.sh`) — the knob mainly matters on the terminal flow (unset/"0" = OFF, its default; "1" = ON with profile from `HARNESS_PROFILE`; "generic" = ON with the generic profile). See [HARBOR_CLAUDE_CODE.md §3.5](../../../distributed/HARBOR_CLAUDE_CODE.md) for gate details. |
-| `HARNESS_PROFILE` | no | `"swe"` (default here — pytest/test-file sensors, byte-identical legacy behavior) or `"generic"` (Bash ledger + agent-declared `# unerr:verify` marks; built for terminal, available on this flow only as a labeled A/B — never for baseline-comparable runs). |
+| `HARNESS_HOOKS` | no | **This flow hard-enables the hooks** (`HARNESS_ON=1` in `run-instance.sh`) — the knob mainly matters on the terminal flow (unset/"0" = OFF, its default; any non-empty, non-"0" value = ON — the single universal harness; legacy "generic"/"1" both mean ON). See [HARNESS_UNIVERSAL.md](../../../distributed/HARNESS_UNIVERSAL.md) for gate details. |
+| `HARNESS_PROFILE` | no | **Retired** — the harness now has one universal profile; this var is no longer read (accepted for env-wiring compat, ignored). |
 
 ---
 

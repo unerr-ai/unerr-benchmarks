@@ -1,14 +1,20 @@
 """LiteLLM per-instance cost + token telemetry for the Claude-Code SWE-bench
-"open-models" arm.
+gateway arms (claude-<mix>: claude-open, claude-gpt, ...).
 
-Why this exists: the open-models arm routes conductor/reasoner/fast/oracle
-traffic through a shared econ-litellm gateway (Fireworks BYOK) instead of a
-per-tier session DB the way econ does. To get REAL per-model spend (not the
-upstream catalog price) we mint a short-lived virtual key scoped to one
-benchmark instance, let Claude Code's traffic run against it, then read that
-key's spend logs back and group them by model/tier. The BYOK rates below are
-copied verbatim from e2e/econ/econ-tier-cost.py::ECON_COST_MATRIX — the
+Why this exists: every claude-<mix> gateway arm routes its sonnet/haiku/
+opus/fable traffic through a shared econ-litellm gateway (Fireworks BYOK)
+instead of a per-tier session DB the way econ does. To get REAL per-model
+spend (not the upstream catalog price) we mint a short-lived virtual key
+scoped to one benchmark instance, let Claude Code's traffic run against it,
+then read that key's spend logs back and group them by model/tier. The BYOK
+rates below are copied verbatim from e2e/econ/econ-tier-cost.py::ECON_COST_MATRIX — the
 single source of truth for these prices; keep both in sync.
+
+CLAUDE-ONLY: this module is the litellm cost path for the claude-<mix>
+gateway arms only — econ's own cost flows through a separate
+econ-telemetry/tier_cost_db path (e2e/econ/), untouched by this file. The
+tier vocabulary below (sonnet/haiku/opus/fable) names the claude harness's
+model CLASSES, not econ's conductor/reasoner/fast/oracle tiers.
 
 Runs on the benchmark HOST (plain python3, `time.sleep` is fine) — never
 inside the sandboxed instance container.
@@ -45,15 +51,32 @@ COST_MATRIX: dict[str, dict] = {
     "gpt-oss-20b": {"input": 0.0, "cachedInput": 0.0, "cacheWrite": 0.0, "output": 0.0},
 }
 
-# open-models arm's model map (CLAUDE_OPEN_MODELS): sonnet=minimax-m3,
-# opus=deepseek-v4-pro, haiku=gpt-oss-120b, fable=glm-5.2. Keyed by BARE model.
+# Model->tier map shared by every claude-<mix> gateway arm. Keyed by BARE model
+# (see bare_model() — it strips any provider/path prefix, e.g. run-distributed.sh's
+# model map uses `openai/gpt-5.6-terra` while the litellm spend log shows bare
+# `gpt-5.6-terra`; both resolve here). Must stay in sync with run-distributed.sh's
+# `ARM=claude-<mix>` model-map `case` AND the table in
+# e2e/reference/claude/fly-remote/README.md §3 — a model missing here falls into
+# the "other" tier bucket. Baked into the worker image: a change here only takes
+# effect on the NEXT fresh bake, not a running fleet.
+#
+# Values are the claude harness's model CLASSES (NOT econ's tier names):
+# sonnet = main-loop, haiku = fast/sub-agent, opus = escalation, fable = oracle.
 TIER_BY_MODEL: dict[str, str] = {
-    "minimax-m3": "conductor",
-    "deepseek-v4-flash": "conductor",   # legacy conductor, pre-OL-8.B4
-    "deepseek-v4-pro": "reasoner",
-    "gpt-oss-120b": "fast",
-    "gpt-oss-20b": "fast",              # legacy self-hosted executor, pre-OL-8.B4
-    "glm-5.2": "oracle",
+    # claude-open (open-weight ensemble): sonnet=minimax-m3, opus=deepseek-v4-pro,
+    # haiku=gpt-oss-120b, fable=glm-5.2.
+    "minimax-m3": "sonnet",
+    "deepseek-v4-flash": "sonnet",   # legacy conductor, pre-OL-8.B4
+    "deepseek-v4-pro": "opus",
+    "gpt-oss-120b": "haiku",
+    "gpt-oss-20b": "haiku",              # legacy self-hosted executor, pre-OL-8.B4
+    "glm-5.2": "fable",
+    # claude-gpt (GPT-5.6): sonnet=gpt-5.6-terra, opus=gpt-5.6-sol,
+    # haiku=gpt-5.6-luna, fable=gpt-5.6-sol-high.
+    "gpt-5.6-terra": "sonnet",
+    "gpt-5.6-sol": "opus",
+    "gpt-5.6-luna": "haiku",
+    "gpt-5.6-sol-high": "fable",
 }
 
 
@@ -127,8 +150,11 @@ def bare_model(model: str) -> str:
 
 
 def tier_of(model: str) -> str:
-    """Map a (possibly prefixed) model id to its open-models-arm tier via
-    TIER_BY_MODEL, defaulting to 'other' for anything unmapped.
+    """Map a (possibly prefixed) model id to its claude harness model class
+    (sonnet/haiku/opus/fable — main-loop / fast+sub-agent / escalation /
+    oracle) via TIER_BY_MODEL (shared across every claude-<mix> gateway arm;
+    this file is claude-only, distinct from econ's own tier vocabulary),
+    defaulting to 'other' for anything unmapped.
     @sem domain=observability role=normalization
     """
     return TIER_BY_MODEL.get(bare_model(model), "other")

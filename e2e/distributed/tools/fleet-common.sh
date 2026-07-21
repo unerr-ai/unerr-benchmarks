@@ -10,6 +10,7 @@
 # Provides:
 #   fc_fly_token            -> exports FLY_API_TOKEN (env first, else ~/.fly/config.yml). Never prints it.
 #   fc_default_app <arm> [benchmark] -> the app for a combo (swebench-dist-<arm>-<slug>; slug = benchmark with '_'->'-' and 'verified'->'verif' — fly blocks names containing "verified")
+#   fc_arm_from_label <label> [bench] -> the arm token embedded in a fleet LABEL (e.g. "claude-gpt" out of "mtx-abc-claude-gpt-terminal")
 #   fc_machines <app> <label> [role]   -> machine ids, one per line (role optional: coordinator|worker)
 #   fc_coord <app> <label>             -> the coordinator machine id (first match), or empty
 #   fc_status <app> <coord_mid>        -> raw /status JSON (curl'd inside the coordinator via ssh)
@@ -47,6 +48,33 @@ fc_default_app() {  # <arm> [benchmark]
   # so the app slug shortens it: verified -> verif, live-verified -> live-verif.
   bench="${bench//verified/verif}"
   echo "swebench-dist-${arm}-${bench}"
+}
+
+# ── label -> arm (the mix token embedded in a fleet LABEL, e.g. "claude-gpt" out
+# of "mtx-abc-claude-gpt-terminal"). Strips the benchmark/graderr suffix first
+# (skipped for a verified label — it carries no suffix, see bench.sh) so the
+# arm token is trailing, then matches the known arm set MOST-SPECIFIC-FIRST —
+# claude-native/claude-gpt/claude-open MUST be checked before the bare legacy
+# "claude" (every one of those labels also ends in "...claude") or they'd all
+# mislabel as claude's own app. An unrecognized "claude-<mix>" falls through to
+# the future-proof branch, which reconstructs the FULL "claude-<mix>" (NOT just
+# "<mix>" — a naive ${tmp##*-} would wrongly yield just "gpt"). ──
+fc_arm_from_label() {  # <label> [bench]
+  local lbl="$1" bench="${2:-verified}" tmp="$lbl"
+  if [ "$bench" != "verified" ]; then
+    tmp="${tmp%-graderr-*}"
+    tmp="${tmp%-$bench}"
+  fi
+  case "$tmp" in
+    *-econ)          echo econ ;;
+    *-claude-native) echo claude-native ;;
+    *-claude-gpt)    echo claude-gpt ;;
+    *-claude-open)   echo claude-open ;;
+    *-claude-real)   echo claude-real ;;
+    *-claude)        echo claude ;;
+    *-claude-*)      echo "claude-${tmp##*-claude-}" ;;
+    *)               echo econ ;;
+  esac
 }
 
 # ── machine ids for a fleet, optionally role-scoped (same query as run-distributed.sh fleet_ids) ──
