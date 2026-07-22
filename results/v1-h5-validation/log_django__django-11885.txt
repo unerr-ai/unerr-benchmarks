@@ -1,8 +1,0 @@
-/opt/toolbox/run-instance.sh: line 68:    28 Trace/breakpoint trap   timeout 600 "$TOOLBOX/opencode" init "$REPO_DIR" --json > /tmp/opencode-init.log 2>&1
-[run-instance] graph init: FAILED/timeout (see /tmp/opencode-init.log) — agent may cold-index on first tool call
-[run-instance] econ run starting (repo=/testbed)
-/opt/toolbox/run-instance.sh: line 85:    33 Trace/breakpoint trap   "$TOOLBOX/opencode" run --format json --print-logs --dir "$REPO_DIR" --dangerously-skip-permissions "$PROBLEM" > "$OUT/events.jsonl" 2>> "$OUT/err.txt"
-[run-instance] econ exit=133
-[econ.err] [graph-init] FAILED/timeout: rosetta error: failed to open elf at /lib/ld-musl-x86_64.so.1 
-[econ.err] rosetta error: failed to open elf at /lib/ld-musl-x86_64.so.1
-[econ.err]  [run-instance] sessionID=<none>

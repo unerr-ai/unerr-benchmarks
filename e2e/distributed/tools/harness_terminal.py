@@ -94,9 +94,10 @@ scratch, abandon)`).
       Harbor's `Verifier.verify()` (src/harbor/verifier/verifier.py) just
       execs the task's OWN `tests/test.{sh,ps1,bat}` and parses whatever
       reward file it writes — pytest isn't hardcoded by the framework. But
-      every real terminal-bench-2-1 (2.1) task vendored here follows the SAME boilerplate
+      every real terminal-bench-2-1 (2.1) task follows the SAME boilerplate
       (confirmed in the actual vendored `tests/test.sh` for both
-      e2e/distributed/terminal-bench/tasks/{regex-log,chess-best-move}/):
+      {regex-log,chess-best-move} under the baked /work/terminal-bench/tasks/;
+      host copy of the same task set: e2e/distributed/out/tb21-tasks/):
       `uv run pytest /tests/test_outputs.py -rA` then
       `echo 1|0 > /logs/verifier/reward.txt` on the pytest exit code — i.e.
       pytest end-state, exactly as the brief described.
@@ -363,8 +364,9 @@ _TOML_TIMEOUT_RE = re.compile(
 def _task_timeout_hint(task_dir: str) -> int:
     """Best-effort agent+verifier timeout_sec sum straight out of task.toml.
     0 if unreadable/absent; the caller falls back to the worker's flat
-    ceiling either way — never fatal. Verified against the two tasks
-    vendored under terminal-bench/tasks/ (both -> 1800)."""
+    ceiling either way — never fatal. Verified against two tasks under the
+    baked /work/terminal-bench/tasks/ (regex-log, chess-best-move; both
+    -> 1800)."""
     try:
         with open(os.path.join(task_dir, "task.toml"), encoding="utf-8") as f:
             text = f.read()
