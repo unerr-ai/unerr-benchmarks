@@ -14,7 +14,7 @@ unerr serves a live code graph plus your team's rules through MCP tools. For any
 
 | To… | Use |
 |---|---|
-| Find code, or pull context for a change | `search_code({query})` — a task phrase returns a CODE-STRUCTURE recon bundle: focus entity (+ body for single-entity edits) + callers (blast radius) + top relevant entities + conventions. For additional bodies, use `file_read({entity})` or `search_code({query, include_body:true})` or `cache_ref` (zero recompute). Anchored notes come via prompt injection or on-demand recall, not inline. A bare symbol returns ranked matches. |
+| Find code, or pull context for a change | `search_code({query})` — a task phrase returns a CODE-STRUCTURE recon bundle: focus entity (+ body for single-entity edits) + callers (blast radius) + top relevant entities + conventions. For additional bodies, use `file_read({entity})` or `search_code({query, include_body:true})` or `cache_ref` (zero recompute). A bare symbol returns ranked matches. |
 | Exact string / regex across files | `search_code({query, mode:'literal'\|'regex'})` — match + surrounding lines, no follow-up read |
 | Who calls it / what it calls (before a risky edit) | `get_references({key, direction:'callers'\|'callees'})` |
 | Read a file or one function | `file_read` (`entity:` for one symbol); `file_outline` for structure |
@@ -33,12 +33,12 @@ Domain comment (Layer 8): when you `file_edit` an entity that carries an `@sem` 
 
 ## The hooks already do the protective work — don't pay a call to repeat it
 
-Anchored notes (on the prompt), conventions and drift (on read), and the blast-radius gate (on edit) arrive on their own as `ur|<tag>` lines. Read them. Don't spend a `search_code` / `get_references` / `file_read` to re-fetch context you were already handed.
+Conventions and drift (on read) and the blast-radius gate (on edit) arrive on their own as `ur|<tag>` lines. Read them. Don't spend a `search_code` / `get_references` / `file_read` to re-fetch context you were already handed.
 
 ## Delegate by default — the main thread routes and consolidates, sub-agents do the work
 
 Delegation is the default behavior, not something to ask permission for: spawn sub-agents immediately when a turn has delegable work — never ask, never announce intent to ask; the user never needs to say "use unerr sub agents." Treat sub-agents as the primary way work gets done, not an occasional offload. On any non-trivial turn the main thread is a routing-and-consolidation layer: plan the change, split off its delegable slices, hand each to a sub-agent, then review and integrate the returned diffs. Aim for 2-3 sub-agents running in parallel on a substantive turn. The worker tier is the DEFAULT executor — route the majority of scoped coding to it, not just mechanical chores. What stays on the main thread is narrow — architecture / algorithm design, a new public interface, cross-cutting wiring, and bug root-causing; everything else is a slice to delegate:
-On a multi-slice turn (a build, a broad refactor/migrate/audit, or an enumerated list of changes), externalize the plan into the built-in task tracker BEFORE the first edit, unprompted — one task per slice. On Claude Code call `TaskCreate` for each slice, then `TaskUpdate` to mark each completed as it lands; other hosts use their built-in tracker the same way. Fan out one sub-agent per task; clear the tracker at turn end.
+On any long or multi-step turn — 2+ steps, whether they run in parallel or in sequence (a build, a broad refactor/migrate/audit, an enumerated list, or a multi-step fix) — externalize the plan into the built-in task tracker BEFORE the first edit, unprompted — one task per step, kept updated as each lands (in-progress → done). On Claude Code call `TaskCreate` for each step, then `TaskUpdate` to mark it completed as it lands; other hosts use their built-in tracker the same way. When steps are independent slices, fan out one sub-agent per task; sequential steps stay tracked the same way. Clear the tracker at turn end.
 - `Task({subagent_type:'unerr-junior', …})` — read-only investigation (find / trace / map X), lint/format, docstrings/@sem, post-edit code review when unerr-reviewer is unavailable, security audits, git operations (branch/PR prep), benchmark/profiling runs, verify-runs (run typecheck + targeted tests + lint, return the failure list — no edits), shell-command runs (run a sequence of build/script/migration/setup commands, report the output).
 - `Task({subagent_type:'unerr-worker', …})` — scoped feature implementation from a clear spec (add a flag, wire X into Y, implement a handler — the bulk of ordinary coding), add/improve tests, multi-site mechanical refactor (rename / extract / inline / move), caller/import propagation (update every call site + import after a signature change), typecheck/build-error fixes (fix tsc/build errors mechanically, re-run until green), scaffold (generate a new file's skeleton from a sibling template), dependency upgrades, migration scripts.
 
@@ -50,7 +50,7 @@ Same change across many files? One command (`prettier --write .`, a codemod) →
 
 ## Close-out (zero round-trip)
 
-Emit `unerr-save:` lines in your closing message — the Stop hook persists them, no tool call: `intent` (first), then `decision` / `blocker` / `resolution`, and `note <kind|anchor|polarity|content>` for a non-obvious convention. User rules ("remember / always / never") are captured automatically. When unerr shaped your answer, say so plainly ("unerr found <name>", "<N> places call <name>") — never echo `ur|<tag>` lines.
+Emit `unerr-save:` lines in your closing message — the Stop hook persists them, no tool call: `intent` (first), then `decision` / `blocker` / `resolution`. When the user states a durable rule ("remember", "always", "never", "from now on"), a hook nudge fires — write the rule verbatim into this repo's CLAUDE.md (or the agent's instruction file) immediately; unerr does not store user rules. When unerr shaped your answer, say so plainly ("unerr found <name>", "<N> places call <name>") — never echo `ur|<tag>` lines.
 
 ## Output discipline
 
