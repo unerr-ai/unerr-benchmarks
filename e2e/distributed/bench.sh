@@ -25,7 +25,8 @@
 #    a real fleet; check a live fleet per README §3, or use ./download-all.sh.)
 #
 #   ./bench.sh prepare --arms econ,claude --benches verified,pro,terminal   # warm 6 fleets
-#   # ... raise your GPUs + ./gpu-flip.sh --conductor <id> ... between prepare and start ...
+#   # ... raise your GPUs + ./gpu-flip.sh --conductor <id> between prepare and start
+#   #     (gpu-flip.sh lives in ../unerr-terminal-bench/infra/litellm/) ...
 #   ./bench.sh start   --arms econ,claude --benches verified,pro,terminal   # arm+poll+pull+teardown all 6
 #   PLAN_ONLY=1 ./bench.sh run econ:pro claude:terminal                     # preview, no fly calls
 #

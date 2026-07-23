@@ -94,9 +94,9 @@ by this module.
    `# unerr:verify`; there is no fixed repo/tests/layout assumption and no
    "mechanically denied" test-edit guarantee. Rule T (the test-edit nudge)
    is a soft one-time reminder, not a hard deny; the old broad-test rule C
-   is removed entirely. Gated OFF by default here via HARNESS_HOOKS (unset/0
-   for terminal); any other value opts the SAME universal hooks in (see
-   __init__'s hooks resolution) — there is no profile axis anymore. The
+   is removed entirely. The universal harness is ALWAYS on for claude-* arms
+   (there is no HARNESS_HOOKS on/off switch and no profile axis anymore — see
+   __init__). The
    appended ON prompt (_build_autonomy_prompt below) mirrors this: the
    FIX-DISCIPLINE "fix real source, not the checks" bullet is always
    present, and the FINISH CONTRACT paragraph (the machine-checked stop
@@ -143,27 +143,30 @@ _ON_OPERATOR_POLICY = (
 def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> str:
     """The ON operator policy appended via --append-system-prompt — same base
     autonomy directive + shortest-path/delegation policy + TRACK/SHAPE/
-    ONBOARD/FIX-DISCIPLINE/DELEGATION/ESCALATION/FINISH-CONTRACT prompt
-    run-instance.sh's HARNESS_ON block uses (kept verbatim; not re-authored),
-    collapsed to a SINGLE universal profile: classify the task's SHAPE
-    (REPAIR/PRODUCE/OPERATE, §2 Layer 0 of HARNESS_UNIVERSAL.md) before
-    onboarding, since what replaces reproduce-first and what the done-signal
-    must exercise both depend on it; discover the project's own build/test/
-    run check while onboarding (REPAIR); fix real source rather than the
-    check; and verify against the agent-marked `# unerr:verify` command
-    (including a line against restating your own written output as its own
-    proof — the chess-best-move false-green). The FINISH CONTRACT paragraph
-    (the machine-checked stop gate) is appended ONLY when `hooks_on`; the
-    FIX-DISCIPLINE "fix real source, not the checks" bullet and the SHAPE
-    paragraph are always present regardless of hooks. `escalation_panel`
-    picks the ESCALATION paragraph's shape: False (default) is a mechanical
-    two-rung LADDER (unerr-opus alone first, unerr-fable only if still
-    unresolved) — the default because on the gateway arms both agents map to
-    the same model family at different effort, so a parallel panel is a
-    doubled bill for a correlated second opinion; True is the original
-    PARALLEL panel (unerr-opus AND unerr-fable together), opt-in via
-    ESCALATION_PANEL=1 for arms (e.g. claude-open) where the two tiers are
-    genuinely different models."""
+    ONBOARD/FIX-DISCIPLINE/DELEGATION/ESCALATION/VERIFY/FINISH-CONTRACT
+    prompt run-instance.sh's HARNESS_ON block uses (kept verbatim; not
+    re-authored), collapsed to a SINGLE universal profile: classify the
+    task's SHAPE (REPAIR/PRODUCE/OPERATE, §2 Layer 0 of
+    HARNESS_UNIVERSAL.md) before onboarding, since what replaces
+    reproduce-first and what the done-signal must exercise both depend on
+    it; discover the project's own build/test/run check while onboarding
+    (REPAIR); fix real source rather than the check; require an
+    independent, adversarial verifier (fresh-context Task call, told to
+    DISPROVE the artifact, never a self-graded re-read) before finishing;
+    and verify against the agent-marked `# unerr:verify` command (including
+    a line against restating your own written output as its own proof —
+    the chess-best-move false-green). The VERIFY and FINISH CONTRACT
+    paragraphs (the machine-checked stop gate) are appended ONLY when
+    `hooks_on`; the FIX-DISCIPLINE "fix real source, not the checks" bullet,
+    the D1-D4 discipline bullets, and the SHAPE paragraph are always present
+    regardless of hooks. `escalation_panel` picks the ESCALATION paragraph's
+    shape: False (default) is a mechanical two-rung LADDER (unerr-opus alone
+    first, unerr-fable only if still unresolved) — the default because on
+    the gateway arms both agents map to the same model family at different
+    effort, so a parallel panel is a doubled bill for a correlated second
+    opinion; True is the original PARALLEL panel (unerr-opus AND
+    unerr-fable together), opt-in via ESCALATION_PANEL=1 for arms (e.g.
+    claude-open) where the two tiers are genuinely different models."""
     test_files_bullet = (
         "\n- Fix real source, not the checks. A grader runs its own copy of "
         "the tests/checks, so editing a test or the verification itself to "
@@ -208,6 +211,22 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
             "value isn't taken directly from the task statement, prove it "
             "by recomputing the answer independently, never by comparing "
             "your own output to itself."
+        ) if hooks_on else ""
+    )
+    verify_block = (
+        (
+            "\n\nVERIFY — before you finish, do not grade your own work: "
+            "spawn a SEPARATE verifier via the Task tool, fresh context, "
+            "given only the task's acceptance criteria and the artifact, "
+            "and tell it to DISPROVE it. It must turn the criteria into a "
+            "checklist of atomic yes/no checks — including whether any "
+            "edit was over-scoped or unnecessary — GROUND each one by "
+            "actually running or exercising the artifact or comparing it "
+            "to an independent reference, never by reading the source and "
+            "judging it plausible, and stay adversarial, actively looking "
+            "for why it is wrong. Its green, grounded run is what you mark "
+            "with `# unerr:verify` to finish; a verify that only re-reads "
+            "a value you wrote proves the write, not correctness."
         ) if hooks_on else ""
     )
     # ESCALATION_PANEL frozen contract: True is the ORIGINAL parallel-panel
@@ -284,7 +303,21 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
         "lockfiles, and README. If a runtime or tool the task needs is "
         "missing, install it yourself (uv/pip/npm/apt/apk) — never assume "
         "the environment is complete. Note the build / test / run / lint "
-        "commands you find; you will verify against them.\n\n"
+        "commands you find; you will verify against them. When a task names "
+        "a specific framework version to install, follow that framework's "
+        "own documented build procedure — benchmark checkers assume the "
+        "canonical path. Before touching code, also write a lean plan to "
+        "/tmp/cc-harness/scope.md: line 1 the exact acceptance surface "
+        "(output path, format, tolerances — what the grader checks), then "
+        "the task's capability class, then 2-5 subtasks split CORE vs "
+        "scaffolding. Declare the class by running a no-op command "
+        "containing the marker `# unerr:class <name>` (perception-vision, "
+        "numerical-scientific, systems-lowlevel, ml-frameworks, "
+        "text-data-transform, security-adversarial, web-research-retrieval, "
+        "build-compile, devops-operate, esoteric-codegen, "
+        "scientific-modeling, bio-design) — the harness replies with that "
+        "class's playbook. Keep the plan short: a routing manifest, not "
+        "documentation.\n\n"
         "FIX DISCIPLINE (applies to every edit you make):\n"
         "- Fix at the definition. Change the entity whose behavior is wrong "
         "at the site where it is DEFINED; a fix that coerces or "
@@ -294,7 +327,22 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
         "its source uses — a value that starts typed (an int, a field "
         "length, an enum member) carries that type through to where it is "
         "stored; do not collapse it to the rendered or stringified form you "
-        "usually see it printed as."
+        "usually see it printed as.\n"
+        "- Execute what you produce. Never finish with an artifact (script, "
+        "pipeline, model) you have not actually run — running it once is "
+        "part of verifying it, not optional.\n"
+        "- Install by the canonical path. If a task pins a framework or "
+        "version, follow that project's own documented build/install steps "
+        "(the apt/pip/uv/npm path it prescribes) — graders assume the "
+        "canonical build, and a missing runtime means install it, never ship "
+        "blind.\n"
+        "- Preserve verbatim output. For extraction tasks (a flag, an exact "
+        "string, an OCR read), keep the raw result exactly — never "
+        "normalize leetspeak, casing, or digits into natural language.\n"
+        "- Write the artifact incrementally. Emit the output file from the "
+        "first correct segment onward rather than buffering the whole result "
+        "for one final write — a mid-run death then still leaves gradable "
+        "partial output."
         + test_files_bullet +
         "\n\n"
         "DELEGATION — use your agents when they pay, not by reflex:\n"
@@ -303,14 +351,20 @@ def _build_autonomy_prompt(hooks_on: bool, escalation_panel: bool = False) -> st
         "web lookups. Do a single quick lookup yourself.\n"
         "- unerr-worker (executor): scoped multi-file mechanical changes; "
         "run independent slices in parallel. Do a small single-file edit "
-        "yourself.\n\n"
+        "yourself.\n"
+        "- Tier by the hardest part, not the average. A hard core subtask "
+        "keeps the strong tier even when its siblings are trivial: route the "
+        "core up and delegate only the cheap scaffolding down — never "
+        "collapse a mixed task to one middle tier.\n\n"
         "ESCALATION — the moment a problem proves hard, STOP soloing "
         "(continuing to grind alone is how hard tasks are lost). Escalate "
         "on ANY of these countable triggers: (a) after 2 distinct attempts "
         "the problem's symptom is still present when you re-check; (b) you "
         "have edited the same file 3 or more times without reaching a "
         "working fix; (c) you have 2+ candidate approaches and the evidence "
-        "does not decide between them; (d) " + trigger_d + ".\n"
+        "does not decide between them; (d) " + trigger_d + "; (e) your "
+        "reconstruction scores implausibly close to chance/variance "
+        "against a provided reference.\n"
         + escalation_action + escalation_gate_note
         + finish_contract
     )
@@ -362,8 +416,7 @@ def _find_python_standalone_tarball(context_dir: Path) -> Path | None:
 
 
 def _hooks_settings_command(remote_dir: str, hooks_on: bool,
-                             hooks_value: str, escalation_panel: bool,
-                             pybin: str) -> str:
+                             escalation_panel: bool, pybin: str) -> str:
     """Shell command writing .claude/settings.local.json + the PreToolUse
     auto-approve helper script (`allow-all.sh`).
 
@@ -382,11 +435,12 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
     (code.claude.com/docs/en/hooks) grants the sub-agent's tools. VERIFIED
     locally: sub-agent denials 11->0, build-pmars reward 0/1 -> 1/1.
 
-    Whenever hooks are on (HARNESS_HOOKS is any non-off value) the SAME three
+    The universal harness is ALWAYS on for claude-* arms, so the SAME three
     mechanical gate hooks — PreToolUse deny, PostToolUse record, and the Stop
-    gate (byte-identical wiring to run-instance.sh step 3.15) — are added to
-    the SAME hook arrays; there is a single universal profile now, so
-    HARNESS_HOOKS on/off is the only axis forwarded to cc-harness-hooks.py.
+    gate (byte-identical wiring to run-instance.sh step 3.15) — are always
+    added to the SAME hook arrays; there is a single universal profile and no
+    HARNESS_HOOKS on/off axis anymore (ESCALATION_PANEL, the escalation shape,
+    is the only thing forwarded to cc-harness-hooks.py).
     Claude Code evaluates a `deny` before an `allow`, so a denied edit stays
     blocked even though the allow-hook matches "*". Never
     .claude/settings.json — unerr owns that (written by `unerr install
@@ -394,12 +448,11 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
     only ADDS hooks, never clobbers unerr's own.
 
     Each gate-hook command is prefixed with an inline `env
-    HARNESS_HOOKS=<hooks_value> ESCALATION_PANEL=<0|1>` — a Claude Code hook
-    is spawned by the CLI as its OWN subprocess, not inherited from this
-    install() step's Python process, so cc-harness-hooks.py cannot rely on
-    session-env propagation to know whether hooks are on (or the escalation
-    shape) to apply; the inline prefix pins it deterministically on every
-    invocation. The PreToolUse allow-all hook above is hooks-agnostic and
+    ESCALATION_PANEL=<0|1>` — a Claude Code hook is spawned by the CLI as its
+    OWN subprocess, not inherited from this install() step's Python process, so
+    cc-harness-hooks.py cannot rely on session-env propagation to know the
+    escalation shape to apply; the inline prefix pins it deterministically on
+    every invocation. The PreToolUse allow-all hook above is hooks-agnostic and
     stays unprefixed.
 
     `pybin` is the interpreter path install() already resolved via
@@ -423,8 +476,7 @@ def _hooks_settings_command(remote_dir: str, hooks_on: bool,
         # propagation (see this function's own docstring).
         escalation_panel_value = "1" if escalation_panel else "0"
         hook_env_prefix = (
-            f"env HARNESS_HOOKS={hooks_value} "
-            f"ESCALATION_PANEL={escalation_panel_value} "
+            f"env ESCALATION_PANEL={escalation_panel_value} "
         )
         pretooluse += (
             ",\n"
@@ -547,9 +599,12 @@ class ClaudeUnerrAgent(ClaudeCode):
     # merges into the container env LAST (after the alias-flatten, ~line 1477 of
     # claude_code.py), so:
     #   * ANTHROPIC_MODEL (the main-loop model) is pinned to the SONNET alias
-    #     value (== `conductor`, the one tier harness_terminal always sets) — the
-    #     main loop runs on the conductor model instead of the missing
-    #     claude-opus-4-8; and
+    #     value (gpt-5.6-terra) so the conductor rides the sonnet tier — a valid
+    #     non-empty model (vs the missing claude-opus-4-8 default) — while the
+    #     OPUS tier (sol) stays reserved for opus-tier escalation and sub-agents
+    #     like unerr-opus. (Reverted OPUS->SONNET 2026-07-22, back to the sonnet
+    #     conductor; sonnet is always set for a gateway ensemble, so the fallback
+    #     never lands on the missing default.) And
     #   * OPUS/HAIKU/FABLE keep their distinct per-tier models, so in-agent
     #     escalation and sub-agents each resolve to their intended GPT tier
     #     instead of collapsing to one.
@@ -627,28 +682,12 @@ class ClaudeUnerrAgent(ClaudeCode):
         return f"{flags} --dangerously-skip-permissions".strip()
 
     def __init__(self, logs_dir, *args, **kwargs):
-        # HARNESS_HOOKS: unset/"0" -> off; any other value -> on. There is no
-        # profile axis anymore — the harness has a single universal profile,
-        # so HARNESS_HOOKS is purely on/off. self._hooks_env_value is the raw
-        # string, re-forwarded verbatim to the hook processes themselves (see
-        # _hooks_settings_command) since a Claude Code hook subprocess isn't
-        # guaranteed to inherit this session's env.
-        self._hooks_env_value = os.environ.get("HARNESS_HOOKS", "")
-        self._hooks_on = self._hooks_env_value not in ("", "0")
-        # Spliced UNQUOTED into the `env VAR=<value>` prefix of each hook
-        # command inside the settings.local.json JSON (see
-        # _hooks_settings_command's hook_env_prefix). It's an operator-set env
-        # token, so in normal use it's a tiny safe vocabulary — but a typo'd
-        # value carrying a space/quote/paren would corrupt the JSON (invalid
-        # settings -> hooks silently don't load) AND break the hook's shell.
-        # Fail LOUD on anything that isn't a bare token rather than degrade
-        # silently. Empty is fine (HARNESS_HOOKS default).
-        if self._hooks_env_value and not re.fullmatch(
-                r"[A-Za-z0-9_.-]+", self._hooks_env_value):
-            raise ValueError(
-                f"HARNESS_HOOKS={self._hooks_env_value!r} is not a bare "
-                r"token ([A-Za-z0-9_.-]+): it would corrupt the hook "
-                "settings JSON and shell. Set it to a simple value.")
+        # The universal harness is ALWAYS on for claude-* arms (arm selection
+        # happens upstream via CLAUDE_ARM_KIND / HARNESS_ON); there is no
+        # HARNESS_HOOKS on/off switch anymore — cc-harness-hooks.py:_profile()
+        # is unconditional too, and nothing is forwarded to the hook subprocess
+        # except the escalation shape (ESCALATION_PANEL, below).
+        self._hooks_on = True
         # ESCALATION_PANEL toggles ladder-vs-panel escalation shape. Default
         # (unset/not "1") is the ladder; only "1" opts back into the parallel
         # panel (see _build_autonomy_prompt's docstring for why the default
@@ -773,8 +812,8 @@ class ClaudeUnerrAgent(ClaudeCode):
             hooks_src = context_dir / "cc-harness-hooks.py"
             if not hooks_src.is_file():
                 raise RuntimeError(
-                    f"HARNESS_HOOKS={self._hooks_env_value!r} but "
-                    f"cc-harness-hooks.py is missing under {context_dir}")
+                    "universal harness is on but cc-harness-hooks.py is "
+                    f"missing under {context_dir}")
             await environment.upload_file(
                 source_path=hooks_src, target_path=f"{remote}/cc-harness-hooks.py")
 
@@ -863,10 +902,9 @@ class ClaudeUnerrAgent(ClaudeCode):
         # SUB-AGENTS run tools under -p/root is written ALWAYS (--dangerously-
         # skip-permissions reaches the main session only — see
         # _hooks_settings_command). The mechanical deny + record + Stop gate
-        # ride in the SAME file whenever hooks are on (HARNESS_HOOKS is any
-        # non-off value); hooks_value/escalation_panel are re-forwarded
-        # inline on each gate-hook command (see _hooks_settings_command's own
-        # docstring). STRICT (exec_as_agent, not _lenient_exec, root-caused
+        # ride in the SAME file (the universal harness is always on);
+        # escalation_panel is re-forwarded inline on each gate-hook command
+        # (see _hooks_settings_command's own docstring). STRICT (exec_as_agent, not _lenient_exec, root-caused
         # 2026-07-20): a silently-failed or silently-mislanded write here
         # leaves every gate inert with zero trace — a task without gates
         # produces invalid benchmark data, which is worse than a loud
@@ -878,4 +916,4 @@ class ClaudeUnerrAgent(ClaudeCode):
             environment,
             command=_hooks_settings_command(
                 remote, self._hooks_on,
-                self._hooks_env_value, self._escalation_panel, pybin))
+                self._escalation_panel, pybin))

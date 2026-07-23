@@ -199,12 +199,46 @@ def scenario_e():
     os.unlink(db)
 
 
+def scenario_f():
+    print("== F: no-gradeable-verdict harbor death ('no_result_death') is eligible for exactly one rerun, budget-capped ==")
+    q, db = new_queue(max_attempts=2, max_failure_rerun=1)
+    q.seed("run-F", ["INST-F"])
+
+    check("claimed INST-F", q.claim("w1").get("instance_id") == "INST-F")
+    # harbor produced NO result.json (idle-watchdog / timeout kill / crash before
+    # grading) -> harness_terminal.py run() sets no_result_death=true, still
+    # reports /complete as done+resolved=0 (never /fail) — see that flag's docstring.
+    q.complete("INST-F", "w1", patch="", report_json={"ok": 0},
+               meta_json={"no_result_death": True}, resolved=0)
+    r = row_of(q, "INST-F")
+    check("no-verdict death lands as 'done' resolved=0 (harness reports a clean /complete)",
+          r["status"] == "done" and r["resolved"] == 0, f"status={r['status']} resolved={r['resolved']}")
+
+    check("fresh queue drained (pending==0)", q._counts().get("pending") == 0)
+    claim2 = q.claim("w2")
+    check("failure-rerun re-leased the no-verdict-death row",
+          claim2.get("instance_id") == "INST-F", f"claim={claim2}")
+    check("fail_reruns bumped to 1", row_of(q, "INST-F")["fail_reruns"] == 1)
+
+    # The rerun ALSO produces no verdict — proves the budget caps a SECOND
+    # no-result death on the same instance, not just the first flag-shape's count.
+    q.complete("INST-F", "w2", patch="", report_json={"ok": 0},
+               meta_json={"no_result_death": True}, resolved=0)
+    r = row_of(q, "INST-F")
+    check("rerun also no-verdict -> 'done' resolved=0, fail_reruns stays 1 (not re-bumped)",
+          r["status"] == "done" and r["resolved"] == 0 and r["fail_reruns"] == 1)
+    check("budget spent -> claim returns {done:true}, NOT requeued a 2nd time",
+          q.claim("w3").get("done") is True)
+    os.unlink(db)
+
+
 if __name__ == "__main__":
     scenario_a()
     scenario_b()
     scenario_c()
     scenario_d()
     scenario_e()
+    scenario_f()
     print()
     if FAILS:
         print(f"RESULT: {len(FAILS)} assertion(s) FAILED: {FAILS}")

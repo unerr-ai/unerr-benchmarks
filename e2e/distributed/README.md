@@ -10,7 +10,8 @@ legacy aliases), **`BENCHMARK`** picks the
 dataset (`verified` | `lite` | `pro` | `terminal` | `live_verified`, default `verified`). §1–§7 below describe a
 single fleet (the historical SWE-bench Verified + econ path); **[§8](#8-other-benchmarks--the-matrix-launcher)
 is the multi-benchmark + matrix layer** — run any subset of arm×benchmark combos as independent
-fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh`, and pull everything with
+fleets with `bench.sh`, flip dedicated GPUs with `gpu-flip.sh` (now in
+`../unerr-terminal-bench/infra/litellm/` — §8.4), and pull everything with
 `download-all.sh`. Read §8 first if you're running anything other than Verified.
 
 ## 0. Invariants (do not violate)
@@ -226,11 +227,14 @@ MACHINES=25 ARM=econ LABEL=full-dedicated DEDICATED_CONDUCTOR=1 ./run-distribute
 - **Verification:** after the flip the runner probes `/health/liveliness` and `/v1/model/info`; a
   `WARN: could not confirm conductor routing` means the gateway image lacks the flip wrapper (do the
   one-time deploy above) — otherwise you'd pay for an unused GPU. Manual control:
-  `./fireworks-conductor.sh {up|status|print-path|down}`.
+  `./fireworks-conductor.sh {up|status|print-path|down}` — the script lives in
+  `../unerr-terminal-bench/infra/litellm/` (§8.4); this runner resolves it via
+  `GATEWAY_SCRIPTS_DIR` and refuses to start a `DEDICATED_CONDUCTOR=1` run if it can't find it.
 - **Stale-flip preflight (prepare-side hard gate):** before creating any fleet machine,
   `run-distributed.sh` checks whether the gateway has ANY `<TIER>_DEPLOYMENT_PATH` secret set
   (leftover from a prior `DEDICATED_CONDUCTOR=1` run or a manual `gpu-flip.sh` flip) and, if so, runs
-  `gpu-flip.sh --verify` (§8.4) against it. A non-PASS verdict — the dedicated deployment behind that
+  `gpu-flip.sh --verify` (§8.4 — resolved via `GATEWAY_SCRIPTS_DIR`; a missing script only warns and
+  proceeds unchecked) against it. A non-PASS verdict — the dedicated deployment behind that
   flip is gone — **aborts the prepare** with `ERROR: gateway has a STALE dedicated flip — run
   ./gpu-flip.sh --verify (and --revert if dead) before preparing a fleet`, so a fleet never launches
   into a gateway that will 404 that tier for every worker. No tier secrets set → skipped silently; a
@@ -669,6 +673,12 @@ PLAN_ONLY=1 ./bench.sh run --arms econ,claude-open,claude-native --benches verif
   reads it. Per-combo logs are `out/bench-<matrix>/<arm>-<bench>.log`.
 
 ### 8.4 Dedicated GPUs: `gpu-flip.sh` (you raise them; the flip routes to them)
+> **Moved 2026-07-23:** `gpu-flip.sh` + `fireworks-conductor.sh` now live with the gateway they
+> operate, in the **unerr-terminal-bench** repo at `infra/litellm/` (alongside `econ-entrypoint.sh`,
+> `DEDICATED-FLIP.md`, `.env.local`). Run every command below from that directory. This repo only
+> calls them; point `GATEWAY_SCRIPTS_DIR=<that dir>` if your checkout isn't the sibling default
+> `../unerr-terminal-bench/infra/litellm`.
+
 You raise a dedicated Fireworks deployment per tier **manually** and pass its deployment id here.
 `gpu-flip.sh` sets the matching `<TIER>_DEPLOYMENT_PATH` secret on the `econ-litellm` gateway; the
 gateway's `econ-entrypoint.sh` rewrites just that tier's upstream to the dedicated `#deployments/…`
@@ -676,7 +686,10 @@ form at boot. Unset = serverless again. Runnable any time, any subset of tiers, 
 Tier → base-model slug mirrors `ECON_TIER_BINDING`: `conductor=minimax-m3 oracle=glm-5p2
 reasoner=deepseek-v4-pro executor=gpt-oss-120b`.
 ```bash
+cd ../../../unerr-terminal-bench/infra/litellm      # the scripts' home
+./fireworks-conductor.sh up            # optional: raise the conductor GPU (8x B300, ~$96/hr)
 ./gpu-flip.sh --conductor <dep-id> [--oracle <id>] [--reasoner <id>] [--executor <id>]
+                                       # flips, waits for the gateway restart, then verifies
 ./gpu-flip.sh --status                 # which tiers are currently dedicated vs serverless
 ./gpu-flip.sh --verify                 # probe all 4 tiers x {chat, responses} for a real tool call
 ./gpu-flip.sh --serverless             # revert ALL tiers
@@ -689,7 +702,7 @@ reasoner=deepseek-v4-pro executor=gpt-oss-120b`.
 
 `--verify` is the health check for a flip: for each of conductor/oracle/reasoner/executor it POSTs a
 "call the echo tool" prompt to both `/v1/chat/completions` and `/v1/responses` on the gateway (using
-`LITELLM_API_KEY`/`LITELLM_MASTER_KEY`, else sourced from `infra/litellm/.env.local`) and classifies the
+`LITELLM_API_KEY`/`LITELLM_MASTER_KEY`, else sourced from the `.env.local` beside it) and classifies the
 reply: a real tool call → `PASS`; `UnsupportedParamsError` → `FAIL(param-seam)`; a `NOT_FOUND`/`Model not
 found`/`NotFoundError` body → `FAIL(STALE-FLIP)` (the dedicated deployment behind that tier's secret is
 gone — printed alongside the exact revert command for that tier); anything else → `FAIL(other: ...)`
@@ -703,7 +716,8 @@ resolving:
 ```bash
 M=july16
 ./bench.sh prepare --arms econ,claude-open --benches verified,pro,terminal --matrix $M   # warm, no GPU yet
-# ... raise your dedicated GPUs on Fireworks, then route to them:
+# ... raise your dedicated GPUs on Fireworks, then route to them (from
+#     ../unerr-terminal-bench/infra/litellm — see §8.4):
 ./gpu-flip.sh --conductor <id> --oracle <id> --reasoner <id>
 ./bench.sh start   --arms econ,claude-open --benches verified,pro,terminal --matrix $M   # arm gates → poll → pull → teardown
 ./download-all.sh --matrix $M --submission          # re-summarize every bundle + traces (+ submissions)

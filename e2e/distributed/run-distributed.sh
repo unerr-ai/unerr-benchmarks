@@ -61,9 +61,9 @@ case "$ARM" in
   claude-*)      CLAUDE_ARM_KIND="gateway" ;;
   *)             CLAUDE_ARM_KIND="" ;;
 esac
-# HARNESS_HOOKS default (claude arms only): benchmark-aware — resolved
-# further below, once BENCHMARK is known and PY_HOST is available (search
-# for "_HH_RULE"). It needs BENCHMARK, so it cannot live here.
+# The universal finish-gate + escalation harness is ALWAYS on for every claude-*
+# arm — gated inside the container by HARNESS_ON (derived from the arm), with no
+# HARNESS_HOOKS/HARNESS_PROFILE toggle (both removed 2026-07-22).
 # Per-mix MODEL MAP — the SINGLE source of truth for which models each claude-<mix>
 # ensemble runs (bash 3.2 has no assoc arrays -> case). Each arm sets the four Claude
 # Code tier aliases (haiku/sonnet/opus/fable) UNLESS the operator already exported an
@@ -235,46 +235,17 @@ TASK_IDLE_S="${TASK_IDLE_S:-2700}"          # per-task no-output idle watchdog o
 KEEP="${KEEP:-0}"                           # 1 = keep the coordinator volume on teardown
 PY_HOST="${PYTHON:-python3}"
 
-# HARNESS_HOOKS default (claude arms only; universal profile since 2026-07-21):
-# the finish gates (V/Z/R) + Gate E escalation ladder + deny rules live behind
-# HARNESS_HOOKS (harbor_agents.py: _hooks_on = value not in ("","0")). Any
-# non-empty/non-"0" value turns the single `universal` harness ON; the legacy
-# "1" and "generic" spellings both resolve to it. Leaving it unset used to mean
-# "full unerr harness agent, hooks OFF" — silent, and an 89-task terminal
-# run was once launched that way by accident (~$9.47 + 1h wasted). Two
-# measured runs on the SAME 5 claude-gpt x terminal-mini ids proved
-# hooks-on strictly better (hooks unset: 4/5 resolved $8.27 0 escalation vs
-# HARNESS_HOOKS=generic: 5/5 resolved $9.60, escalation correctly
-# concentrated on the one hard task — see HARNESS_UNIVERSAL.md), so hooks
-# are ON by default for every claude-* arm (CLAUDE_ARM_KIND non-empty), for
-# EVERY benchmark — the old per-benchmark profile split ("1"=swe vs "generic")
-# was collapsed into ONE `universal` profile 2026-07-21 (both spellings now
-# resolve to `universal` in harbor_agents.py / cc-harness-hooks.py; see
-# HARNESS_UNIVERSAL.md), so there is no longer a family-dependent default.
-# ARM=econ is NEVER defaulted — its own hooks path (run-instance.sh under
-# e2e/econ) is unaffected.
-# An operator-supplied value ALWAYS wins over this default, INCLUDING an
-# explicitly empty one (`HARNESS_HOOKS= ...`) — test set-ness with
-# ${HARNESS_HOOKS+x}, not -n, so "set but empty" is distinguishable from
-# "never mentioned". Opt-out for a baseline-control run: HARNESS_HOOKS=0
-# (the only spelling _hooks_on treats as a genuine, explicit OFF; empty/
-# unset also read as OFF downstream but "0" is the documented one to type).
-if [ -n "$CLAUDE_ARM_KIND" ] && [ -z "${HARNESS_HOOKS+x}" ]; then
-  # Universal harness: any non-empty/non-"0" value is ON. The old per-benchmark
-  # "1" (swe) vs "generic" profile split was collapsed 2026-07-21 — both spellings
-  # now resolve to the single `universal` profile in harbor_agents.py /
-  # cc-harness-hooks.py — so hooks default ON for EVERY benchmark on a claude-*
-  # arm, with no family-dependent branch. See HARNESS_UNIVERSAL.md.
-  HARNESS_HOOKS="1"
-  _HH_RULE="arm=$ARM (claude): universal harness ON by default (HARNESS_HOOKS=1) for benchmark=$BENCHMARK"
-fi
+# The universal finish-gate (V/Z/R) + Gate E escalation ladder + deny harness is
+# ALWAYS on for every claude-* arm (CLAUDE_ARM_KIND non-empty), for EVERY
+# benchmark. It is gated inside the container by HARNESS_ON — run-instance.sh /
+# harness_terminal.py derive that solely from the arm (OPEN_MODELS / CLAUDE_REAL),
+# so there is nothing to resolve here: the HARNESS_HOOKS/HARNESS_PROFILE toggles
+# were removed 2026-07-22 and the hooks no longer read any env switch. ARM=econ
+# has its own hooks path (run-instance.sh under e2e/econ) and is unaffected. For a
+# bare-agent baseline, run a pre-harness git checkout image, not an env flag (the
+# old HARNESS_HOOKS=0 opt-out is gone).
 if [ -n "$CLAUDE_ARM_KIND" ]; then
-  case "${HARNESS_HOOKS:-}" in
-    ""|0) _HH_STATE="OFF" ;;
-    *)    _HH_STATE="ON" ;;
-  esac
-  _HH_RULE="${_HH_RULE:-operator-supplied HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (no default applied)}"
-  echo "==> arm=$ARM: HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (finish gates + escalation ladder $_HH_STATE; $_HH_RULE; opt out with HARNESS_HOOKS=0)"
+  echo "==> arm=$ARM: universal harness ON (finish gates + escalation ladder; always-on for claude-* arms, benchmark=$BENCHMARK)"
 fi
 
 # Tigris end-of-run archive (OPT-IN, default off): opt-in end-of-run archive of
@@ -304,7 +275,7 @@ if [ "${PLAN_ONLY:-0}" = "1" ] || [ "${1:-}" = "--print-plan" ]; then
   echo "    APP=$APP"
   echo "    LABEL=${LABEL:-<unset>} (raw=${RAW_LABEL:-<unset>})"
   echo "    DATASET=$DATASET SPLIT=$SPLIT"
-  echo "    HARNESS_HOOKS=${HARNESS_HOOKS:-<unset>} (CLAUDE_ARM_KIND=${CLAUDE_ARM_KIND:-<none>}; ${_HH_RULE:-no default applied (ARM=econ)}; opt out with HARNESS_HOOKS=0)"
+  echo "    harness: universal ON for claude-* arms (always-on; CLAUDE_ARM_KIND=${CLAUDE_ARM_KIND:-<none>})"
   echo "    worker env additions: BENCHMARK=$BENCHMARK"
   echo "    coordinator env additions: ARM=$ARM BENCHMARK=$BENCHMARK MAX_FAILURE_RERUN=$MAX_FAILURE_RERUN"
   exit 0
@@ -384,7 +355,8 @@ for v in vs:
     log "  WARNING: gateway $GATEWAY_APP still has dedicated tier flip(s) set after this teardown"
     log "    the underlying GPU deployment may already be gone (torn down or never flipped back) —"
     log "    a stale flip 404s that tier FLEET-WIDE for the next run against this gateway"
-    log "    run: ./gpu-flip.sh --verify   (then ./gpu-flip.sh --revert --<tier> if dead)"
+    log "    run (in unerr-terminal-bench/infra/litellm/): ./gpu-flip.sh --verify"
+    log "         then ./gpu-flip.sh --revert --<tier> if dead"
     log "  ================================================================"
   fi
 }
@@ -393,7 +365,11 @@ for v in vs:
 # cleanup_dedicated is idempotent + trap-driven so a mid-run abort can never orphan
 # the ~$80/hr Fireworks deployment: it unsets the gateway secret (reverting the
 # conductor to serverless) and deletes the deployment (stops billing).
-FW="$HERE/fireworks-conductor.sh"
+# The gateway-ops scripts moved to the gateway's own home when infra/litellm did:
+# unerr-terminal-bench/infra/litellm/{fireworks-conductor.sh,gpu-flip.sh}. This repo
+# only *calls* them; override GATEWAY_SCRIPTS_DIR if that checkout is elsewhere.
+GATEWAY_SCRIPTS_DIR="${GATEWAY_SCRIPTS_DIR:-$HERE/../../../unerr-terminal-bench/infra/litellm}"
+FW="$GATEWAY_SCRIPTS_DIR/fireworks-conductor.sh"
 CLEANED=0
 cleanup_dedicated() {
   [ "$DEDICATED_CONDUCTOR" = "1" ] || return 0
@@ -419,6 +395,8 @@ verify_gateway_flip() {                     # verify_gateway_flip <dedicated-mod
 #    raise the GPU + flip the gateway from one place). ──────────────────────────
 bring_up_dedicated() {
   echo "==> DEDICATED_CONDUCTOR=1 — bringing up ephemeral Fireworks conductor deployment (~\$80/hr while up)"
+  # Fail loud, never silently serverless: this flag is an explicit opt-in to a paid GPU.
+  [ -x "$FW" ] || { echo "ERROR: $FW not found — the gateway-ops scripts live in unerr-terminal-bench/infra/litellm/; set GATEWAY_SCRIPTS_DIR=<that dir>" >&2; exit 1; }
   trap 'cleanup_dedicated; exit 130' INT
   trap 'cleanup_dedicated; exit 143' TERM
   trap 'cleanup_dedicated' EXIT
@@ -513,11 +491,15 @@ if [ -z "$GF_SECRETS" ]; then
   echo "==> gpu-flip preflight: could not list secrets on $GATEWAY_APP (or none set) — skipping"
 elif printf '%s\n' "$GF_SECRETS" | grep -qE '(CONDUCTOR|ORACLE|REASONER|EXECUTOR)_DEPLOYMENT_PATH'; then
   echo "==> gpu-flip preflight: dedicated tier flip(s) present on $GATEWAY_APP — verifying with gpu-flip.sh --verify"
-  if ! "$HERE/gpu-flip.sh" --verify; then
+  if [ ! -x "$GATEWAY_SCRIPTS_DIR/gpu-flip.sh" ]; then
+    echo "    WARN: $GATEWAY_SCRIPTS_DIR/gpu-flip.sh not found — cannot verify the flip, proceeding unchecked"
+    echo "          (it lives in unerr-terminal-bench/infra/litellm/; set GATEWAY_SCRIPTS_DIR=<that dir>)"
+  elif ! "$GATEWAY_SCRIPTS_DIR/gpu-flip.sh" --verify; then
     echo "ERROR: gateway has a STALE dedicated flip — run ./gpu-flip.sh --verify (and --revert if dead) before preparing a fleet" >&2
     exit 1
+  else
+    echo "    gpu-flip preflight: verified OK"
   fi
-  echo "    gpu-flip preflight: verified OK"
 fi
 
 # ── campaign image pin (locks one image across all tranches of a multi-run
@@ -1014,18 +996,12 @@ fi
 [ -n "$CLAUDE_ARM_KIND" ] && EXTRA_ENV+=(-e TOOLBOX_TAG="${TOOLBOX_TAG:-unerr-claude-toolbox}")
 # terminal-flow knobs (all claude arms; harness_terminal.py reads them on the
 # worker): TERMINAL_STOCK_AGENT=1 = bare first-party claude-code agent (the
-# no-harness baseline control), HARNESS_HOOKS = the single `universal`
-# finish-gate + escalation + deny harness (any non-empty/non-"0" value = ON) —
-# DEFAULTED to "1" for every claude-* arm near the PY_HOST definition above
-# (opt out with HARNESS_HOOKS=0). HARNESS_PROFILE is LEGACY/ignored since the
-# universal collapse (2026-07-21) — still forwarded when explicitly set so an
-# old invocation doesn't error, but the harness no longer reads it. Forwarded
-# only when set/resolved — TERMINAL_STOCK_AGENT and HARNESS_PROFILE have NO
-# default (ARM=econ never gets a HARNESS_HOOKS default either — its own
-# hooks path is unaffected).
+# no-harness baseline control). The universal finish-gate + escalation + deny
+# harness is ALWAYS on for claude-* arms (gated by HARNESS_ON in the container) —
+# the HARNESS_HOOKS/HARNESS_PROFILE toggles were removed 2026-07-22 and are no
+# longer forwarded or read. Forwarded only when set — TERMINAL_STOCK_AGENT has
+# NO default.
 [ -n "${TERMINAL_STOCK_AGENT:-}" ] && EXTRA_ENV+=(-e TERMINAL_STOCK_AGENT="$TERMINAL_STOCK_AGENT")
-[ -n "${HARNESS_HOOKS:-}" ] && EXTRA_ENV+=(-e HARNESS_HOOKS="$HARNESS_HOOKS")
-[ -n "${HARNESS_PROFILE:-}" ] && EXTRA_ENV+=(-e HARNESS_PROFILE="$HARNESS_PROFILE")
 # ESCALATION_PANEL=1 = Gate E demands unerr-opus AND unerr-fable in parallel (the
 # judge-panel; worth its cost only when the two tiers are genuinely different
 # models, e.g. the claude-open ensemble). Unset/0 = the default two-rung ladder

@@ -104,9 +104,13 @@ unerr re-anchors these comments when code moves and flags a comment that drifted
   `BENCHMARK=verified|lite|pro|terminal|live_verified` axis and the matrix tooling: `bench.sh` (fire any subset of
   `arm:benchmark` combos as independent LABEL-scoped fleets, parallel or `--seq`, modes
   run/prepare/start/destroy — `run` = full one-shot per combo, `prepare`+`start` bracket a GPU
-  window — writes `out/bench-<matrix>/manifest.tsv`), `gpu-flip.sh` (you raise
-  dedicated Fireworks GPUs per tier and pass ids; it flips the `econ-litellm` gateway secrets —
-  conductor/oracle/reasoner/executor — never launches GPUs itself), and `download-all.sh` (pull every
+  window — writes `out/bench-<matrix>/manifest.tsv`), `gpu-flip.sh` +
+  `fireworks-conductor.sh` (**moved 2026-07-23 to `../unerr-terminal-bench/infra/litellm/`**, with
+  the gateway they operate — `fireworks-conductor.sh` raises/deletes the ephemeral Fireworks
+  deployment, `gpu-flip.sh` flips the `econ-litellm` gateway secrets per tier —
+  conductor/oracle/reasoner/executor — then waits for the restart and probes every tier for a real
+  tool call before exiting; `--verify` re-runs that probe any time. This repo resolves them via
+  `GATEWAY_SCRIPTS_DIR`), and `download-all.sh` (pull every
   fleet's results+traces via the matrix manifest, `--submission` per resolve_then_grade combo).
   **Monitor a live run** with the two read-only scripts (both take `<LABEL> [APP]`, `--matrix <id>`, or
   no-args = newest matrix, single-sourcing fleet lookup via `tools/fleet-common.sh`): `status.sh`

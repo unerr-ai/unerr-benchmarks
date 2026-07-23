@@ -19,16 +19,17 @@ coordinator over ssh. It works mid-run for the same reason Step 1 below does:
 traces are already durable in `queue.db` the moment a worker POSTs `/complete`.
 
 `status` + `failure_reason` distinguish two fundamentally different cases — and, since
-2026-07-21, a `done`+`resolved=0` row splits into two further sub-cases the coordinator
-itself now tells apart (`meta_json.silent_death`, Terminal only):
+2026-07-21, a `done`+`resolved=0` row splits into further sub-cases the coordinator
+itself now tells apart (`meta_json.silent_death` / `meta_json.no_result_death`, Terminal only):
 
 | Signal | Meaning | It's a... |
 |---|---|---|
 | `status='failed'` / non-null `failure_reason` | crash, timeout, empty patch | **execution failure** — infra problem. Auto-retried at drain (failure-rerun, below). |
 | `status='done'` AND `resolved=0` AND `meta_json.silent_death=true` | trajectory's LAST step is an unanswered agent nudge (`steps[-1].source=="user"`), Harbor exits clean (rc=0) | **silent session death** — TRANSIENT, not a real miss. Auto-retried at drain (same budget as `failed`, see §"Failure-rerun" in `README.md` §8.1). |
-| `status='done'` AND `resolved=0` AND (no `silent_death` flag, or non-Terminal benchmark) | the agent ran to completion, the **grader** scored it below threshold | **capability/harness gap** — not infra, NOT retried (rerunning it would burn real money re-running a genuine miss — e.g. TB2.1's `chess-best-move`, which fails reproducibly with a different wrong answer every run). |
+| `status='done'` AND `resolved=0` AND `meta_json.no_result_death=true` | Harbor produced NO gradeable `result.json` (`result_obj` empty — an idle-watchdog/timeout kill or crash before grading). The terminal harness still reports this via `/complete`, never `/fail` (its `report_text` is always non-empty), so it lands `done` not `failed` | **no-gradeable-verdict harbor death** — TRANSIENT, not a real miss (a clean run, even a wrong one, always writes `result.json`). Auto-retried at drain, same budget as `silent_death` (see `harness_terminal.py`'s `no_result_death` flag + `server.py`'s `_is_no_result_death_meta`). |
+| `status='done'` AND `resolved=0` AND (no transient-death flag, or non-Terminal benchmark) | the agent ran to completion, the **grader** scored it below threshold | **capability/harness gap** — not infra, NOT retried (rerunning it would burn real money re-running a genuine miss — e.g. TB2.1's `chess-best-move`, which fails reproducibly with a different wrong answer every run). |
 
-`status.sh`'s `up4retry` counts BOTH the `failed` row count AND any silent-death-eligible
+`status.sh`'s `up4retry` counts BOTH the `failed` row count AND any transient-death-eligible
 `done` rows (`/status`'s `pending_reruns` field) — it is no longer just `counts.failed`.
 
 **Fallback** (what `pull_traces.sh` does under the hood over ssh, or if you
@@ -73,7 +74,7 @@ and what each ACTUALLY contains:
 | `err_txt` | copy of Harbor `trial.log` = **SETUP/INSTALL log only** (`tools/harness_terminal.py:476` copies `trial_dir/trial.log` → `art_dir/err.txt`), ending with the `claude ... --append-system-prompt '<the whole prompt>'` invocation | install/setup verification ONLY |
 | `harbor_run_log` | stdout/stderr of the `harbor run` subprocess — the only place a SETUP-phase RuntimeError (before the agent ever starts) is captured | setup-phase RuntimeErrors |
 | `events_jsonl` | tiny synthesized `{type:harness_result,resolved,ts}` summary | quick resolved check |
-| `meta_json` | cost + telemetry (agent, arm, cost, cost_usd, n_*_tokens, rc, telemetry) plus, on Terminal, `silent_death` (bool — see Step 0's table and `harness_terminal.py`'s `_is_silent_death`) | cost/turns/tokens; `silent_death` drives the coordinator's failure-rerun eligibility |
+| `meta_json` | cost + telemetry (agent, arm, cost, cost_usd, n_*_tokens, rc, telemetry) plus, on Terminal, `silent_death` and `no_result_death` (bools — see Step 0's table and `harness_terminal.py`'s `_is_silent_death` / the `no_result_death` flag) | cost/turns/tokens; `silent_death` **and** `no_result_death` both drive the coordinator's failure-rerun eligibility |
 | `sessions_cast` | asciinema session (Terminal only) | replay the terminal session |
 | `claude_session_jsonl` | Claude Code's OWN session transcript (`claude-*` arms only), synced by `cc-harness-hooks.py`'s `_sync_claude_session` on every PostToolUse call | **the one trace that survives a trial killed mid-run** — see below |
 | `claude_sessions_tgz_b64` | base64 of a gzip tar of **every** Claude Code session `.jsonl` for the trial — main session PLUS every Task sub-agent sidechain (`cc-harness-hooks.py`'s additive `_sync_all_claude_sessions`, packaged by `harness_terminal.py`'s `_collect_traces`) | **the only trace of a Task sub-agent's OWN transcript** — `claude_session_jsonl` above only ever holds the main session, so this is what you need when the ladder (`unerr-opus`/`unerr-fable`) or routine delegation misbehaves. Decoded back to a real `claude-sessions.tgz` under `results/<label>/artifacts/<iid>/` at drain — `tar xzf` it, each member is `sessions/<sessionId>.jsonl` |

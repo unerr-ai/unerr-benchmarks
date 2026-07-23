@@ -367,21 +367,29 @@ correlated. The panel's value is model diversity.
 
 ## 6. Environment toggles (the complete inventory)
 
+The harness itself is **always on** for every `claude-*` arm — there is no
+runtime opt-out. Gating happens upstream only: `CLAUDE_ARM_KIND`
+(`run-distributed.sh`, which arm/mix runs at all) and `HARNESS_ON`
+(`run-instance.sh`, the SWE flow's own on/off switch). `cc-harness-hooks.py`
+itself now reads exactly one runtime toggle:
+
 | Env var | Values | Meaning |
 |---|---|---|
-| `HARNESS_HOOKS` | `0`/unset = OFF; any non-empty/non-`0` value = ON | Turns the mechanical gates + deny rules + escalation ledger ON. Legacy `1` and `generic` **both** resolve to `universal`. **Defaulted to `1`** for every `claude-*` arm by `run-distributed.sh`. Gates only the `.claude/settings.local.json` hooks-file upload (`harbor_agents.py:657`) — with `HARNESS_HOOKS=0` the container still gets the full unerr install (index, daemon, agent definitions, MCP registration, autonomy prompt). **This is NOT a bare-agent baseline** — see the warning below. `ARM=econ` is never defaulted. |
-| `ESCALATION_PANEL` | `1` = panel; unset/`0` = ladder | Gate E shape (see §5). Orthogonal to everything else. |
+| `ESCALATION_PANEL` | `1` = panel; unset/`0` = ladder | Gate E shape (see §5). The ONLY runtime toggle the harness itself reads. |
 | `TERMINAL_STOCK_AGENT` | `1` = bare first-party claude-code agent | **The only true no-harness baseline control** (terminal flow): uses Harbor's stock agent and never calls our `install()` — no unerr install, no index, no daemon, no MCP, no autonomy prompt. No default. |
+| ~~`HARNESS_HOOKS`~~ | — | **REMOVED (2026-07-22).** Used to gate the mechanical gates + deny rules + escalation ledger on/off; the hooks now run unconditionally and the var is no longer read anywhere, including the hook-command `env` prefix (which forwards only `ESCALATION_PANEL` now — see §7/§9). |
 | ~~`HARNESS_PROFILE`~~ | — | **RETIRED.** Accepted for env-wiring compat but never read; legacy `swe`/`generic` values are ignored. |
 
-> **Correctness warning (2026-07-21 audit).** `HARNESS_HOOKS=0` was previously
-> documented here as a "bare-agent baseline." That is false. It only skips
-> writing `.claude/settings.local.json` (`harbor_agents.py:657`) — the container
-> still gets the full unerr install, index, daemon, agent definitions, MCP
-> registration, and autonomy prompt. **Any past A/B that cites `HARNESS_HOOKS=0`
-> as "baseline Claude Code" is mislabeled**: it isolates the mechanical gates'
-> contribution only, not the harness's total effect. Use `TERMINAL_STOCK_AGENT=1`
-> for a true bare-agent control.
+> **Bare-agent baseline (2026-07-22).** With `HARNESS_HOOKS` gone there is no
+> env-flag way to get a bare baseline anymore. Build the toolbox image from a
+> git checkout taken BEFORE the harness landed instead — that gets you a
+> container with no unerr install, no hooks, no autonomy prompt, full stop.
+> `TERMINAL_STOCK_AGENT=1` remains the terminal-flow control that bypasses our
+> `install()` entirely on the SAME (current) checkout. *(Historical note:
+> `HARNESS_HOOKS=0` was once mistakenly documented here as a "bare-agent
+> baseline" — it only skipped writing `.claude/settings.local.json`; the
+> container still got the full unerr install, index, daemon, and autonomy
+> prompt. The variable no longer exists, so that mislabeling can't recur.)*
 
 ---
 
@@ -398,7 +406,7 @@ ClaudeCode (Harbor, harbor.agents.installed.claude_code)
         │                        (and shlex.quote the --append-system-prompt value)
         ├─ ENV_VARS           → forward the 4 tier aliases + ANTHROPIC_MODEL
         ├─ __init__()         → inject the universal prompt into --append-system-prompt;
-        │                        register unerr MCP; validate HARNESS_HOOKS is a bare token
+        │                        register unerr MCP
         └─ install()          → stage unerr (npm tgz + entitlement + index + daemon + agents,
                                  bundled python3 interpreter — no apt mutation, §2 Layer 1),
                                  then write .claude/settings.local.json (PreToolUse auto-approve +
@@ -409,10 +417,20 @@ ClaudeCode (Harbor, harbor.agents.installed.claude_code)
 
 | Claude tier | Host env var | `claude-gpt` (GPT-5.6) example |
 |---|---|---|
-| main loop / sonnet | `ANTHROPIC_MODEL` (= SONNET alias) / `ANTHROPIC_DEFAULT_SONNET_MODEL` | `openai/gpt-5.6-terra` |
-| opus (escalation) | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `openai/gpt-5.6-sol` |
-| haiku (sub-agents) | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `openai/gpt-5.6-luna` |
-| fable | `ANTHROPIC_DEFAULT_FABLE_MODEL` | `openai/gpt-5.6-sol-high` |
+| main loop (conductor) | `ANTHROPIC_MODEL` — pinned to the **SONNET** alias (`harbor_agents.py` `unerr_main_model` `env_fallback="ANTHROPIC_DEFAULT_SONNET_MODEL"`) | `openai/gpt-5.6-terra` |
+| sonnet (mid-tier sub-agents, e.g. `unerr-worker`) | `ANTHROPIC_DEFAULT_SONNET_MODEL` (same tier as the conductor) | `openai/gpt-5.6-terra` |
+| opus (escalation rung 1) | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `openai/gpt-5.6-sol` |
+| haiku (cheap sub-agents, e.g. `unerr-junior`) | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `openai/gpt-5.6-luna` |
+| fable (escalation rung 2) | `ANTHROPIC_DEFAULT_FABLE_MODEL` | `openai/gpt-5.6-sol-high` |
+
+> **Conductor model (2026-07-22):** the main loop rides the **sonnet** tier
+> (gpt-5.6-terra) — a valid non-empty model, vs the missing `claude-opus-4-8`
+> default. It was briefly repointed to the OPUS alias (sol) earlier the same day
+> and then **reverted to sonnet** before running, so the OPUS tier (sol) stays
+> reserved for opus-tier escalation (rung 1) and the `unerr-opus` sub-agent.
+> Changing it is a one-line `env_fallback` flip in `harbor_agents.py` + a rebake.
+> `--model` is still empty — a concrete `--model` would trigger Harbor's
+> tier-flatten (see fix #2 below) and collapse the ensemble.
 
 ### The root-caused fixes (all still load-bearing)
 
@@ -456,9 +474,7 @@ ClaudeCode (Harbor, harbor.agents.installed.claude_code)
    and newlines made bash mis-parse (`syntax error near unexpected token '('`),
    dropping all but the first word and exiting non-zero. Fix: pop
    `append_system_prompt` before `super().build_cli_flags()`, then re-append it
-   `shlex.quote`'d as a single token (`import shlex`). Plus a fail-loud `__init__`
-   guard rejecting a `HARNESS_HOOKS` value that isn't a bare `[A-Za-z0-9_.-]+`
-   token (it reaches the hook-command env unquoted inside the settings JSON).
+   `shlex.quote`'d as a single token (`import shlex`).
 
 ### Reusable decisions (for wiring Claude Code into any other Harbor benchmark)
 
@@ -562,6 +578,14 @@ previously-passing test was regressed", "issue text") and were reworded to make
 sense for PRODUCE/OPERATE too. A new Deny N (anti-tautology, §4) plus a matching
 FINISH CONTRACT sentence landed in the same change — see §12 for the full list.
 
+**Landed (2026-07-22) — D3 discipline bullet.** The FIX DISCIPLINE block gained
+a fourth bullet, **"Install by the canonical path"**: when a task pins a
+framework or version, follow that project's own documented build/install steps
+(the apt/pip/uv/npm path it prescribes, whichever the project uses) rather than
+improvising — a missing runtime means install it, never ship blind. Landed
+byte-identical in both `harbor_agents.py:_build_autonomy_prompt()` and
+`run-instance.sh`'s prompt-assembly block, parity-verified.
+
 ---
 
 ## 10. Running & debugging it locally
@@ -577,8 +601,8 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="openai/gpt-5.6-luna"
 export ANTHROPIC_DEFAULT_FABLE_MODEL="openai/gpt-5.6-sol-high"
 export PYTHONPATH="$PWD/e2e/distributed/tools"
 unset ANTHROPIC_MODEL                 # NO -m → empty model (fix 2)
-export HARNESS_HOOKS=1                 # gates + escalation ledger ON (unset/0 = gates OFF,
-                                        # NOT a bare-agent baseline — see §6)
+                                        # gates + escalation ledger run unconditionally now —
+                                        # no env flag to set (§6)
 
 harbor run \
   -d terminal-bench/terminal-bench-2-1 \
@@ -603,7 +627,8 @@ harbor run \
   the arrays. `unerr install claude-code` sets up the MCP + active-cognition hooks
   only — NOT tool permissions, which is why the harness owns the bypass.
 - **Gates inert?** Confirm `settings.local.json` exists in the container and is
-  valid JSON, and that `HARNESS_HOOKS` is a non-empty/non-`0` value.
+  valid JSON — the gates run unconditionally now, so a missing/invalid file is
+  the only way they go dark.
 
 ---
 
@@ -617,11 +642,11 @@ harbor run \
 | `e2e/distributed/tools/harness_terminal.py` | `_arm_agent_config` (fix 2 + gateway/auth wiring); `_collect_traces` (host-side artifact staging, incl. `claude-session.jsonl`) |
 | `e2e/reference/claude/local-docker/context/run-instance.sh` | SWE flow: prompt + hook settings writer (mirrors the terminal flow) |
 | `e2e/reference/claude/local-docker/run-benchmark.py` | Forwards env vars into the SWE instance container |
-| `e2e/distributed/run-distributed.sh` | Launcher: defaults `HARNESS_HOOKS=1` per claude-* arm; forwards env to workers |
+| `e2e/distributed/run-distributed.sh` | Launcher: resolves `CLAUDE_ARM_KIND` (which arm/mix gets the always-on harness); forwards `ESCALATION_PANEL` + tier env to workers |
 
 ---
 
-## 12. What landed (2026-07-21)
+## 12. What landed (2026-07-21 → 2026-07-22)
 
 - `cc-harness-hooks.py`: `_profile()` → `None`|`universal`; deleted the swe record/
   gate/deny branches, `TEST_CMD_RE`/`is_broad_test`, and Rule C; softened Rule T to a
@@ -636,6 +661,8 @@ harbor run \
   **byte-identical** to the harbor copy (4595 chars).
 - `run-distributed.sh`: `HARNESS_HOOKS=1` default for every claude-* benchmark (no
   more family-dependent `1`-vs-`generic`); `ARM=econ` never defaulted.
+  *(Superseded 2026-07-22 — `HARNESS_HOOKS` itself is retired; see the entry
+  below.)*
 - **econ untouched** — verified: 0 econ files in the diff; the `CLAUDE_ARM_KIND`
   guard keeps econ out of the defaulting; econ has its own `run-instance.sh`.
 - **Claude Code session-transcript collection** (2026-07-21, closes the
@@ -656,9 +683,10 @@ harbor run \
   effectively never fires — see §4); the real gap is the PROMPT, which assumes a
   REPAIR-shaped task that only ~15% of TB2.1 matches. Produced the task-shape
   classification (§2 Layer 0), the media-processing and artifact-discipline
-  rules, the `HARNESS_HOOKS=0` baseline correction (§6), and the
-  environment-footprint principle (§2 Layer 1). The prompt/gate-message changes
-  themselves were landed in a follow-up change — see the next entry and §9.
+  rules, the bare-baseline correction (§6, later superseded 2026-07-22 when
+  `HARNESS_HOOKS` itself was retired), and the environment-footprint principle
+  (§2 Layer 1). The prompt/gate-message changes themselves were landed in a
+  follow-up change — see the next entry and §9.
 - **Task-shape branch + anti-tautology nudge landed (2026-07-21, closes §9's
   pending item).** `harbor_agents.py:_build_autonomy_prompt()` and
   `run-instance.sh`'s heredoc both gained a SHAPE step (REPAIR/PRODUCE/OPERATE
@@ -685,6 +713,28 @@ harbor run \
   fixed test layout" → "no fixed check layout"; etc.) so they read correctly on
   PRODUCE/OPERATE tasks. Tests: `test_cc_harness_hooks.py` 28/28 PASS (6 new
   Rule N cases); `--selftest` 32/32 PASS (4 new Rule N cases).
+- **`HARNESS_HOOKS`/`HARNESS_PROFILE` fully removed — harness always-on
+  (2026-07-22).** The mechanical gates now run unconditionally on every
+  `claude-*` arm; there is no runtime opt-out anymore. Gating is upstream-only:
+  `CLAUDE_ARM_KIND` (`run-distributed.sh`, which arm/mix gets the harness at
+  all) and `HARNESS_ON` (`run-instance.sh`, the SWE flow's own on/off switch)
+  — never an env value `cc-harness-hooks.py` itself reads. The hook-command
+  `env` prefix now forwards only `ESCALATION_PANEL` (§6/§7) — `HARNESS_HOOKS`
+  is no longer spliced into it, and the `__init__` bare-token guard against it
+  is gone with the var. A true bare-agent baseline is now obtained by building
+  the toolbox image from a git checkout taken BEFORE the harness landed, not
+  by an env flag — see §6. `run-distributed.sh`'s prior per-arm
+  `HARNESS_HOOKS=1` default (the 2026-07-21 entry above) is retired along with
+  the variable.
+- **No-result-death auto-retry (2026-07-22).** A terminal Harbor trial that
+  produces NO gradeable `result.json` — an idle-watchdog/timeout kill or a
+  crash before grading — is now flagged by `harness_terminal.py`'s `run()`
+  (`meta["no_result_death"] = True`) and picked up by the coordinator's
+  existing failure-rerun path (`server.py`'s `_is_no_result_death_meta` +
+  `_eligible_rerun_ids`), auto-retried once at the SAME budget as the existing
+  `silent_death` rerun (§4). A clean run — even a wrong one — ALWAYS writes
+  `result.json`, so a genuine capability miss (e.g. `chess-best-move`, §2)
+  is never rerun by this path.
 
 Landing a change to these files needs a **rebake** (`harbor_agents.py`,
 `cc-harness-hooks.py`, `harness_terminal.py`, `benchmarks.py`,
@@ -789,8 +839,8 @@ entry) found the same-day design above was still SWE-shaped in one respect: it
 assumed discovery collapses SWE-vs-terminal, which holds for REPAIR-shaped tasks
 but not the ~85% of TB2.1 that are PRODUCE/OPERATE-shaped (§0, §2 Layer 0). That
 audit is the source of the task-shape classification, the media and
-artifact-discipline rules, the gate-efficacy table (§4), and the `HARNESS_HOOKS=0`
-baseline correction (§6).
+artifact-discipline rules, the gate-efficacy table (§4), and the bare-baseline
+correction (§6, superseded 2026-07-22 — see §12).
 
 Related memory notes: `claude-gpt-terminal-dogfood10-result`,
 `harness-hooks-python3-missing`, `append-prompt-shell-quoting-bug`.

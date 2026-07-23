@@ -11,11 +11,14 @@ Failure-rerun (sibling of the stale-lease reaper): once the fresh `pending`
 queue is drained, Queue.claim gives a rerun-eligible instance up to
 MAX_FAILURE_RERUN more tries — either a `failed` row (MAX_ATTEMPTS exhaustion
 via /fail) or a `done`+`resolved=0` row that harness_terminal.py flagged as a
-silent session death (an unanswered Claude Code nudge, never a genuine
-capability miss — see Queue._is_silent_death_meta). A rerun's eventual
-/complete overwrites the earlier outcome in place. MAX_FAILURE_RERUN=0
-disables both paths (current/original behaviour: exhausted attempts
-dead-letter straight to `dead`; a silent death is never retried).
+TRANSIENT death: a silent session death (an unanswered Claude Code nudge — see
+Queue._is_silent_death_meta) or a no-gradeable-verdict harbor death (no
+result.json — an idle-watchdog/timeout kill or crash before grading, which
+still reports via /complete not /fail — see Queue._is_no_result_death_meta).
+Neither is a genuine capability miss. A rerun's eventual /complete overwrites
+the earlier outcome in place. MAX_FAILURE_RERUN=0 disables both paths
+(current/original behaviour: exhausted attempts dead-letter straight to `dead`;
+a transient death is never retried).
 
 Stdlib only (http.server + sqlite3 + json + threading) so the coordinator image
 stays minimal and dependency-free. PLAN.md mentions aiohttp aspirationally;
@@ -184,9 +187,11 @@ class Queue:
         on `pending==0` so fresh work always drains first (end-of-run only).
         Eligible rows come in two shapes (see `_eligible_rerun_ids`): a
         `failed` row (attempts exhausted — an execution failure) or a `done`
-        row with `resolved=0` that harness_terminal.py flagged as a silent
-        session death (an unanswered Claude Code nudge, NOT a genuine
-        capability miss — see `_is_silent_death_meta`). Failing that too, it
+        row with `resolved=0` that harness_terminal.py flagged as a transient
+        death — a silent session death (unanswered Claude Code nudge — see
+        `_is_silent_death_meta`) or a no-gradeable-verdict harbor death (see
+        `_is_no_result_death_meta`), neither a genuine capability miss. Failing
+        that too, it
         distinguishes `{done:true}` (queue truly drained — no pending, no
         leased, no row with rerun budget left) from `{wait:true}` (leased
         rows still in flight, or armed-but-idle, so the worker should poll
@@ -450,18 +455,45 @@ class Queue:
             return False
         return isinstance(meta, dict) and meta.get("silent_death") is True
 
+    def _is_no_result_death_meta(self, meta_json: Optional[str]) -> bool:
+        """True only when a `done` row's `meta_json` EXPLICITLY carries
+        `"no_result_death": true` — harness_terminal.py's run() sets this when
+        the harbor trial produced NO gradeable result.json at all (an
+        idle-watchdog / timeout kill or a crash before grading), a TRANSIENT
+        infra death distinct from `silent_death` (which is the agent's OWN
+        unanswered "no visible output" nudge, rc=0 WITH a result.json). Such a
+        run still reports via /complete (harness_terminal always returns a
+        non-empty report_text, so worker-loop.py never routes it to /fail) and
+        lands as `done`+`resolved=0` — so without this flag it looks identical
+        to a genuine capability miss and never gets a rerun. A clean run — even
+        one graded WRONG — ALWAYS writes result.json, so this never fires on a
+        real miss (chess-best-move stays excluded). Same conservative contract
+        as `_is_silent_death_meta`: any parse failure / missing field / falsey
+        value reads False, never True.
+        """
+        if not meta_json:
+            return False
+        try:
+            meta = json.loads(meta_json)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(meta, dict) and meta.get("no_result_death") is True
+
     def _eligible_rerun_ids(self) -> list[tuple[str, str]]:
         """`(instance_id, cause)` pairs currently eligible for a
         failure-rerun, in claim order (lowest instance_id first) — the
         shared selection query for both `claim()`'s end-of-run pull and
         `_pending_reruns()`'s status/drain count. `cause` is `"failed"`
-        (execution failure, MAX_ATTEMPTS exhausted via /fail) or
-        `"silent_death"` (finished `done` with `resolved=0` but flagged a
-        silent session death in `meta_json` — see `_is_silent_death_meta`).
-        Both bounded by `fail_reruns < MAX_FAILURE_RERUN`. A `done`+
-        `resolved=0` row WITHOUT the silent-death flag (a genuine
-        capability miss) is deliberately excluded — see
-        `_is_silent_death_meta`.
+        (execution failure, MAX_ATTEMPTS exhausted via /fail), `"silent_death"`
+        (finished `done` with `resolved=0` but flagged a silent session death
+        in `meta_json` — see `_is_silent_death_meta`), or `"no_result"`
+        (finished `done` with `resolved=0` but flagged a no-gradeable-verdict
+        harbor death — see `_is_no_result_death_meta`). All bounded by
+        `fail_reruns < MAX_FAILURE_RERUN`. A `done`+`resolved=0` row WITHOUT
+        either transient-death flag (a genuine capability miss) is deliberately
+        excluded — see `_is_silent_death_meta` / `_is_no_result_death_meta`.
+        The `cause` is a log label only; claim() requeues every cause
+        identically (status='pending', fail_reruns+1).
         """
         rows = self._conn.execute(
             "SELECT instance_id, status, meta_json FROM tasks "
@@ -475,12 +507,15 @@ class Queue:
                 out.append((iid, "failed"))
             elif self._is_silent_death_meta(meta_json):
                 out.append((iid, "silent_death"))
+            elif self._is_no_result_death_meta(meta_json):
+                out.append((iid, "no_result"))
         return out
 
     def _pending_reruns(self) -> int:
         """Count of rows still eligible for a failure-rerun (see
         `_eligible_rerun_ids`) under the MAX_FAILURE_RERUN budget — `failed`
-        rows AND `done`+`resolved=0` rows flagged as a silent session death.
+        rows AND `done`+`resolved=0` rows flagged as a silent session death or
+        a no-gradeable-verdict harbor death.
 
         Read-only helper shared by `drain()`, `status()`, and `claim()`'s
         done-check — an eligible row is NOT terminal yet (claim() will still
@@ -495,7 +530,8 @@ class Queue:
     def drain(self) -> dict[str, bool]:
         """`{drained:true}` once ARMED, no pending/leased rows, and no row
         still eligible for a failure-rerun (see `_eligible_rerun_ids` —
-        `failed` OR a silent-death-flagged `done`+`resolved=0` row).
+        `failed` OR a `done`+`resolved=0` row flagged as a transient death:
+        silent-death or no-gradeable-verdict).
 
         The `armed` guard means an un-released (prepare-phase) queue — seeded but
         not yet armed, or momentarily empty — never reads as drained, so the

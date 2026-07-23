@@ -9,7 +9,7 @@ bundle is built, before the HOLD) — the fleet then archives itself; a host pul
 is no longer the only way results escape the volume. Also runnable from the host
 against a pulled bundle dir.
 
-It does three things:
+It does four things:
   1. GENERATE overview.json — a compact run summary (grade %, cost + per-tier
      token/turn breakdown from meta.jsonl, status counts, timing, per-instance
      rows). Same cost normalization the report/status tooling uses: econ from
@@ -17,7 +17,10 @@ It does three things:
      LiteLLM spend.
   2. GENERATE submission/ (resolve_then_grade only) via make_submission.py
      (best-effort — empty-patch runs still archive their partial submission).
-  3. UPLOAD the organized tree to s3://<bucket>/<prefix>/<benchmark>/<arm>/
+  3. GENERATE tb-submission/ (gated — TB_SUBMISSION env or benchmark=='terminal')
+     via make_tb_submission.py: a LOCAL mirror of the TB-2.1 leaderboard
+     submission format (best-effort — never blocks the archive).
+  4. UPLOAD the organized tree to s3://<bucket>/<prefix>/<benchmark>/<arm>/
      <date>/<label>/ under stable category folders.
 
 S3 KEY LAYOUT (bucket + prefix from flags/env):
@@ -26,6 +29,9 @@ S3 KEY LAYOUT (bucket + prefix from flags/env):
         bundle.tgz                        the full tarball (one-shot restore)
         submission/preds.json             resolve_then_grade only
         submission/all_preds.jsonl
+        leaderboard/<date>-<model>-<effort>-<agent>.json  TB-2.1 submission mirror (gated)
+        leaderboard/trials.jsonl          per-task reward/tokens/cost/trajectory_path
+        leaderboard/README-gaps.md        HARD-requirement gaps vs real leaderboard eligibility
         grading/merged.json               merged grade report
         grading/<iid>/report.json         per-instance swebench grade
         traces/<iid>/events.jsonl         per-instance execution trace ...
@@ -235,6 +241,49 @@ def gen_submission(data_dir, label, model_name):
         _log(f"submission: skipped ({type(e).__name__}: {e})")
 
 
+# ── TB-2.1 leaderboard-submission capture (gated, terminal benchmark only by default) ──
+def _tb_submission_enabled(args):
+    """TB_SUBMISSION=1 forces on, TB_SUBMISSION=0 forces off (either overrides
+    --no-tb-submission's absence); otherwise default ON when
+    benchmark=='terminal', OFF for every other benchmark."""
+    if args.no_tb_submission:
+        return False
+    env_val = os.environ.get("TB_SUBMISSION")
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip().lower() not in ("0", "false", "no")
+    return args.benchmark == "terminal"
+
+
+def gen_tb_submission(data_dir, label, args):
+    """Best-effort: run make_tb_submission.py against results/<label>/ to
+    produce tb-submission/{<date>-<model>-<effort>-<agent>.json,trials.jsonl,
+    README-gaps.md} — a LOCAL mirror of the TB-2.1 leaderboard submission
+    format (see SOL_AB_PLAN.md), archived under the leaderboard/ category by
+    plan_uploads. Gated by _tb_submission_enabled; swallows all errors —
+    never blocks the archive."""
+    try:
+        spec = importlib.util.spec_from_file_location("make_tb_submission", _TOOLS_DIR / "make_tb_submission.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        argv = ["--data-dir", str(data_dir), "--label", label,
+                "--benchmark", args.benchmark, "--arm", args.arm]
+        for flag, val in (
+            ("--agent-name", args.tb_agent_name), ("--agent-version", args.tb_agent_version),
+            ("--model-id", args.tb_model_id), ("--reasoning-effort", args.tb_reasoning_effort),
+            ("--display-name", args.tb_display_name), ("--display-url", args.tb_display_url),
+            ("--display-org", args.tb_display_org), ("--org-url", args.tb_org_url),
+            ("--dataset-ref", args.tb_dataset_ref), ("--trials-per-task", args.tb_trials_per_task),
+        ):
+            if val:
+                argv += [flag, str(val)]
+        rc = mod.main(argv)
+        _log(f"tb-submission built (make_tb_submission rc={rc})")
+    except SystemExit as e:
+        _log(f"tb-submission: make_tb_submission exited {e.code} (archiving whatever it produced)")
+    except Exception as e:  # noqa: BLE001 — never let tb-submission-gen abort the archive
+        _log(f"tb-submission: skipped ({type(e).__name__}: {e})")
+
+
 # ── the upload plan: (local_path, s3_key_suffix) pairs under the run prefix ─────
 def plan_uploads(data_dir, label):
     data = pathlib.Path(data_dir)
@@ -261,6 +310,8 @@ def plan_uploads(data_dir, label):
     add_tree(data / "logs" / "grade-merged", "grading")
     # submission (generated)
     add_tree(rundir / "submission", "submission")
+    # TB-2.1 leaderboard-submission mirror (generated, gated — see gen_tb_submission)
+    add_tree(rundir / "tb-submission", "leaderboard")
     # results data files (not the artifacts/ subtree — that's traces/)
     for name in ("preds.json", "meta.jsonl", "dead.jsonl", "cost-report.md", "cost-report.json"):
         add(rundir / name, f"results/{name}")
@@ -292,6 +343,19 @@ def main(argv=None):
     ap.add_argument("--finished-at", default=os.environ.get("RUN_FINISHED_AT", ""))
     ap.add_argument("--model-name", default=os.environ.get("SUBMISSION_MODEL_NAME", ""))
     ap.add_argument("--no-submission", action="store_true", help="skip submission generation (harness_run benchmarks)")
+    # TB-2.1 leaderboard-submission capture (see gen_tb_submission / _tb_submission_enabled)
+    ap.add_argument("--no-tb-submission", action="store_true",
+                     help="skip TB-2.1 leaderboard-submission capture (else gated by TB_SUBMISSION env or benchmark=='terminal')")
+    ap.add_argument("--tb-agent-name", default=os.environ.get("TB_AGENT_NAME", ""))
+    ap.add_argument("--tb-agent-version", default=os.environ.get("TB_AGENT_VERSION", ""))
+    ap.add_argument("--tb-model-id", default=os.environ.get("TB_MODEL_ID", ""))
+    ap.add_argument("--tb-reasoning-effort", default=os.environ.get("TB_REASONING_EFFORT", ""))
+    ap.add_argument("--tb-display-name", default=os.environ.get("TB_DISPLAY_NAME", ""))
+    ap.add_argument("--tb-display-url", default=os.environ.get("TB_DISPLAY_URL", ""))
+    ap.add_argument("--tb-display-org", default=os.environ.get("TB_DISPLAY_ORG", ""))
+    ap.add_argument("--tb-org-url", default=os.environ.get("TB_ORG_URL", ""))
+    ap.add_argument("--tb-dataset-ref", default=os.environ.get("TB_DATASET_REF", ""))
+    ap.add_argument("--tb-trials-per-task", default=os.environ.get("TB_TRIALS_PER_TASK", ""))
     ap.add_argument("--generate-only", action="store_true", help="write overview.json + submission into the run dir, then stop (no S3) — call before bundling so both ride bundle.tgz")
     ap.add_argument("--dry-run", action="store_true", help="print the upload plan + overview; do NOT touch S3")
     args = ap.parse_args(argv)
@@ -310,6 +374,12 @@ def main(argv=None):
     # 1. submission (resolve_then_grade)
     if not args.no_submission:
         gen_submission(str(data_dir), args.label, args.model_name)
+
+    # 1b. TB-2.1 leaderboard-submission mirror (gated — see _tb_submission_enabled)
+    if _tb_submission_enabled(args):
+        gen_tb_submission(str(data_dir), args.label, args)
+    else:
+        _log("tb-submission: skipped (TB_SUBMISSION unset/0 and benchmark != 'terminal', or --no-tb-submission)")
 
     # 2. overview.json — written into results/<label>/ so it ALSO rides bundle.tgz
     overview = build_overview(str(data_dir), args.label, args.arm, args.benchmark,

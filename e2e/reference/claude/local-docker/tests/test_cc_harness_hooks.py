@@ -3,9 +3,10 @@
 Drives the hooks script exactly as Claude Code would: one hook-event JSON
 object piped to stdin per subcommand invocation (record/gate/deny), state
 isolated per test via CC_HARNESS_STATE pointed at a pytest tmp_path. Covers
-the single "universal" profile (HARNESS_HOOKS unset/""/"0" -> hooks off;
-ANY other value, including the legacy "generic"/"1"/"swe" strings, resolves
-to the same universal behavior): Gate Z/R/V/E driven purely by the
+the single always-on "universal" profile (the HARNESS_HOOKS/HARNESS_PROFILE
+toggles were removed 2026-07-22 — cc-harness-hooks.py no longer reads any env
+switch; a legacy "generic"/"1"/"swe" value left in the env is harmlessly
+ignored): Gate Z/R/V/E driven purely by the
 agent-declared `# unerr:verify` Bash marker (there is no fixed
 test-runner sensor), Rule T's one-time, override-able deny on
 test-shaped edit paths, and Rule N's one-time, capped, fail-open
@@ -29,12 +30,13 @@ NARROW_TEST_CMD = "pytest tests/ -k foo"
 
 
 def _env(tmp_path, hooks, profile=None, escalation_panel=None):
-    """Build a subprocess env with CC_HARNESS_STATE isolated to tmp_path and
-    the HARNESS_HOOKS/HARNESS_PROFILE/ESCALATION_PANEL contract vars set
-    explicitly (removed when None, never inherited ambiently from the test
-    runner's own env). escalation_panel=None (the default) leaves
-    ESCALATION_PANEL unset -> LADDER mode, matching the harness's own
-    default."""
+    """Build a subprocess env with CC_HARNESS_STATE isolated to tmp_path and the
+    ESCALATION_PANEL contract var set explicitly (removed when None, never
+    inherited ambiently from the test runner's own env). HARNESS_HOOKS /
+    HARNESS_PROFILE are still accepted for backward-compat and set here when
+    passed, but cc-harness-hooks.py no longer reads them (removed 2026-07-22) —
+    they're harmless. escalation_panel=None (the default) leaves ESCALATION_PANEL
+    unset -> LADDER mode, matching the harness's own default."""
     env = dict(os.environ)
     env["CC_HARNESS_STATE"] = str(tmp_path)
     if hooks is None:
@@ -277,13 +279,6 @@ def test_n_is_capped_at_one_denial_per_run_even_across_different_commands(tmp_pa
     assert second is None
 
 
-def test_n_fails_open_when_hooks_off(tmp_path):
-    env = _env(tmp_path, None)  # HARNESS_HOOKS unset -> hooks off
-    record_edit(env, file_path="move.txt")
-    cmd = "test \"$(cat move.txt)\" = 'g2g4'  # unerr:verify"
-    assert deny_bash(env, cmd) is None
-
-
 def test_rule_c_removed_does_not_deny_datetime_now(tmp_path, tmp_path_factory):
     env = _env(tmp_path, "generic")
     conv_file = tmp_path_factory.mktemp("conv") / "conv_utcnow.py"
@@ -492,20 +487,6 @@ def test_record_syncs_claude_session_when_hooks_on(tmp_path):
     dest = dest_dir / "claude-session.jsonl"
     assert dest.is_file()
     assert dest.read_text() == src.read_text()
-
-
-def test_record_does_not_sync_claude_session_when_hooks_off(tmp_path):
-    config_dir = tmp_path / "claude-config"
-    dest_dir = tmp_path / "sessions-dest"
-    _write_session(config_dir, "-app", "session-uuid.jsonl", '{"type":"user"}\n')
-
-    env = _env(tmp_path / "state", None)  # HARNESS_HOOKS unset -> hooks off
-    env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-    env["CC_HARNESS_SESSIONS_DEST"] = str(dest_dir)
-
-    record_edit(env)
-
-    assert not (dest_dir / "claude-session.jsonl").exists()
 
 
 def test_record_syncs_oldest_session_when_no_isSidechain_field(tmp_path):

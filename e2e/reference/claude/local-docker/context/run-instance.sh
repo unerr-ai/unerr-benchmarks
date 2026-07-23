@@ -64,20 +64,13 @@ HARNESS_ON=0
 if [ "$OPEN_MODELS" = "1" ] || [ "$CLAUDE_REAL" = "1" ]; then
   HARNESS_ON=1
 fi
-# PROFILE selects which hook behavior + prompt text the harness uses when
-# HARNESS_ON=1: "swe" (default) is this benchmark's existing test-file-deny +
-# test-based finish contract, byte-identical to before this var existed;
-# "generic" (via HARNESS_PROFILE=generic, or the shorthand HARNESS_HOOKS=generic)
-# swaps in a benchmark-agnostic checkable-outcome contract (see step 3.15 and the
-# ON prompt block below). run-benchmark.py does not forward either var into this
-# container today, so PROFILE stays "swe" on the SWE-bench flow unless a caller
-# explicitly wires one through.
-PROFILE="${HARNESS_PROFILE:-swe}"
-if [ "${HARNESS_HOOKS:-}" = "generic" ]; then
-  PROFILE=generic
-fi
-# ESCALATION_PANEL selects the ON-prompt escalation shape, orthogonal to PROFILE
-# and applied in both: unset/"0"/anything but "1" -> PANEL=0, the default two-rung
+# The universal harness is ALWAYS on when HARNESS_ON=1: a single profile (the
+# benchmark-agnostic `# unerr:verify`-marker checkable-outcome contract; see
+# step 3.15 and the ON prompt block below). The old swe/generic PROFILE split
+# and the HARNESS_HOOKS/HARNESS_PROFILE toggles are removed — the hooks run
+# unconditionally under HARNESS_ON, gated only by the arm.
+# ESCALATION_PANEL selects the ON-prompt escalation shape:
+# unset/"0"/anything but "1" -> PANEL=0, the default two-rung
 # LADDER (unerr-opus alone, then unerr-fable only if still unresolved — cheapest
 # when both tiers are one model family at different effort, e.g. claude-gpt/
 # claude-native); "1" -> PANEL=1, the original judge-panel (unerr-opus AND
@@ -233,10 +226,9 @@ if [ "$MODE" = "on" ]; then
   #      real reason it's safe. All three hooks are FAIL-OPEN by construction
   #      (cc-harness-hooks.py: any internal exception -> exit 0), so a bug
   #      here degrades to a no-op gate/deny, never a broken run. Each hook
-  #      command is prefixed `env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1
-  #      ESCALATION_PANEL=$PANEL` so cc-harness-hooks.py sees PROFILE and the
-  #      escalation-panel flag deterministically regardless of the shell that
-  #      spawns it (mirrors the terminal agent's own hook wiring).
+  #      command is prefixed `env ESCALATION_PANEL=$PANEL` so cc-harness-hooks.py
+  #      sees the escalation-panel flag deterministically regardless of the shell
+  #      that spawns it (mirrors the terminal agent's own hook wiring).
   if [ "$HARNESS_ON" = "1" ]; then
     # $TOOLBOX is NOT set inside the instance container: Dockerfile.instance COPYs
     # the toolbox to /opt/toolbox but does not carry the toolbox image's ENV, and no
@@ -255,7 +247,7 @@ if [ "$MODE" = "on" ]; then
       {
         "matcher": "Bash|Edit|Write|MultiEdit|mcp__unerr__file_edit",
         "hooks": [
-          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py deny" }
+          { "type": "command", "command": "env ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py deny" }
         ]
       }
     ],
@@ -263,14 +255,14 @@ if [ "$MODE" = "on" ]; then
       {
         "matcher": "Bash|Task|Edit|Write|MultiEdit|mcp__unerr__file_edit",
         "hooks": [
-          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py record" }
+          { "type": "command", "command": "env ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py record" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "env HARNESS_PROFILE=$PROFILE HARNESS_HOOKS=1 ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py gate" }
+          { "type": "command", "command": "env ESCALATION_PANEL=$PANEL $PYBIN $TOOLBOX/cc-harness-hooks.py gate" }
         ]
       }
     ]
@@ -401,14 +393,14 @@ if [ "$MODE" = "on" ]; then
   # claude-real) only, since a hook gate is not prompt prose and can't
   # double-harness (it fires once, at Stop, never mid-turn).
   if [ "$HARNESS_ON" = "1" ]; then
-    # Universal profile fragments (single form, no PROFILE branching):
+    # Universal harness prompt fragments (single form, always on):
     # discover the project's own check while onboarding, reproduce the
     # failure first, then verify against the command marked `# unerr:verify`.
     TEST_FILES_BULLET="
 - Fix real source, not the checks. A grader runs its own copy of the tests/checks, so editing a test or the verification itself to make it pass usually only fakes progress — fix the code the check exercises. Change a test only when the task itself is to change tests."
     ESCALATION_TRIGGER_D="your change turned your verification red and one rework did not recover it"
     FINISH_CONTRACT="FINISH CONTRACT — machine-checked when you try to stop (an unmet gate returns you to work with instructions): every task has a checkable outcome. Before your first change, decide the command that proves success for THIS task — prefer the project's own test/build/run check you found while onboarding; otherwise a script you write, curl the endpoint, or diff output against expected. Run it BEFORE you edit to confirm it fails the way the task describes (a reproduced failure is your grounded before/after), appending the marker comment \`# unerr:verify\` — the harness tracks marked commands only. After your final change, re-run the marked check and confirm it exits 0. The stop gate blocks finishing when no marked verification has succeeded since your last change; a marked command that once passed and now fails is a regression — fix it before finishing. Mark only the check you would stake the task on, never exploratory commands. A verify command that merely reads back a value you wrote yourself proves the write happened, not that the value is correct — when the expected value isn't taken directly from the task statement, prove it by recomputing the answer independently, never by comparing your own output to itself."
-    # ESCALATION_PANEL fragment (see PANEL above, orthogonal to PROFILE): PANEL=1
+    # ESCALATION_PANEL fragment (see PANEL above): PANEL=1
     # keeps the original judge-panel text byte-identical (both tiers spawned
     # together, one escalation round — worth it only when the tiers are
     # genuinely decorrelated models, e.g. claude-open); PANEL=0 (default) swaps
@@ -426,17 +418,22 @@ TRACK — before your first edit, if the task takes 2+ steps call TaskCreate to 
 
 SHAPE — classify the task before ONBOARD, into one of three shapes (this decides what onboarding and verification mean for THIS task): REPAIR — something exists and is broken (a repo, a failing test) — keeps the steps below as written: onboard, reproduce the failure first, fix, re-verify. PRODUCE — create an artifact to an exact spec (write a file, render an image, emit a report), no project to onboard and nothing failing at t=0 — reproduce-first is replaced by spec extraction: read the task statement and write down the exact output path, filename, format, field names, value constraints, and tolerances; those become what you verify against. OPERATE — make a system actually work (boot it, serve it, make it reachable) — probe the current state first, then verify by EXERCISING the running thing (curl the endpoint, ssh in, connect the client), never by inspecting config. Two rules apply regardless of shape: any non-text input (image, video, audio, binary) must be processed programmatically (PIL / cv2 / numpy / ffmpeg / objdump — install the tool if it is absent); looking at it may inform a hypothesis but is never the basis of an answer. And the exact output path, filename, and format are part of correctness, not presentation — re-read the task statement for them before finishing and confirm the artifact exists exactly where specified.
 
-ONBOARD — before your first edit, learn how THIS project builds, tests, and runs itself: read its CI workflows (.github/workflows, .gitlab-ci.yml — the richest source, they list the exact commands maintainers run), its config/manifests (Makefile, package.json, pyproject.toml, Cargo.toml, go.mod, pom.xml, CMakeLists.txt), lockfiles, and README. If a runtime or tool the task needs is missing, install it yourself (uv/pip/npm/apt/apk) — never assume the environment is complete. Note the build / test / run / lint commands you find; you will verify against them.
+ONBOARD — before your first edit, learn how THIS project builds, tests, and runs itself: read its CI workflows (.github/workflows, .gitlab-ci.yml — the richest source, they list the exact commands maintainers run), its config/manifests (Makefile, package.json, pyproject.toml, Cargo.toml, go.mod, pom.xml, CMakeLists.txt), lockfiles, and README. If a runtime or tool the task needs is missing, install it yourself (uv/pip/npm/apt/apk) — never assume the environment is complete. Note the build / test / run / lint commands you find; you will verify against them. When a task names a specific framework version to install, follow that framework's own documented build procedure — benchmark checkers assume the canonical path. Before touching code, also write a lean plan to /tmp/cc-harness/scope.md: line 1 the exact acceptance surface (output path, format, tolerances — what the grader checks), then the task's capability class, then 2-5 subtasks split CORE vs scaffolding. Declare the class by running a no-op command containing the marker \`# unerr:class <name>\` (perception-vision, numerical-scientific, systems-lowlevel, ml-frameworks, text-data-transform, security-adversarial, web-research-retrieval, build-compile, devops-operate, esoteric-codegen, scientific-modeling, bio-design) — the harness replies with that class's playbook. Keep the plan short: a routing manifest, not documentation.
 
 FIX DISCIPLINE (applies to every edit you make):
 - Fix at the definition. Change the entity whose behavior is wrong at the site where it is DEFINED; a fix that coerces or special-cases at a downstream site where the value merely flows through is almost always the wrong layer.
-- Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.$TEST_FILES_BULLET
+- Keep values in their native type. Emit each value in the type its source uses — a value that starts typed (an int, a field length, an enum member) carries that type through to where it is stored; do not collapse it to the rendered or stringified form you usually see it printed as.
+- Execute what you produce. Never finish with an artifact (script, pipeline, model) you have not actually run — running it once is part of verifying it, not optional.
+- Install by the canonical path. If a task pins a framework or version, follow that project's own documented build/install steps (the apt/pip/uv/npm path it prescribes) — graders assume the canonical build, and a missing runtime means install it, never ship blind.
+- Preserve verbatim output. For extraction tasks (a flag, an exact string, an OCR read), keep the raw result exactly — never normalize leetspeak, casing, or digits into natural language.
+- Write the artifact incrementally. Emit the output file from the first correct segment onward rather than buffering the whole result for one final write — a mid-run death then still leaves gradable partial output.$TEST_FILES_BULLET
 
 DELEGATION — use your agents when they pay, not by reflex:
 - unerr-junior (fast, cheap): parallel recon across many files, running test suites or repro scripts (it reports exact output), web lookups. Do a single quick lookup yourself.
 - unerr-worker (executor): scoped multi-file mechanical changes; run independent slices in parallel. Do a small single-file edit yourself.
+- Tier by the hardest part, not the average. A hard core subtask keeps the strong tier even when its siblings are trivial: route the core up and delegate only the cheap scaffolding down — never collapse a mixed task to one middle tier.
 
-ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard tasks are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct attempts the problem's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate approaches and the evidence does not decide between them; (d) $ESCALATION_TRIGGER_D.
+ESCALATION — the moment a problem proves hard, STOP soloing (continuing to grind alone is how hard tasks are lost). Escalate on ANY of these countable triggers: (a) after 2 distinct attempts the problem's symptom is still present when you re-check; (b) you have edited the same file 3 or more times without reaching a working fix; (c) you have 2+ candidate approaches and the evidence does not decide between them; (d) $ESCALATION_TRIGGER_D; (e) your reconstruction scores implausibly close to chance/variance against a provided reference.
 $ESCALATION_SPAWN Triggers (b) and (d) are machine-checked at stop: if they have fired and you try to finish without having escalated, the stop gate blocks you and returns you to work.
 
 $FINISH_CONTRACT"

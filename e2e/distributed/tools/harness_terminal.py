@@ -954,6 +954,21 @@ def run(worker, iid: str, scratch: str, abandon) -> tuple[bool, str, str, str]:
     # _collect_traces above) so it reads the exact bytes the coordinator
     # will also receive, not a possibly-stale trial_dir glob.
     meta["silent_death"] = _is_silent_death(art_dir)
+    # No-gradeable-verdict death: harbor produced no parseable result.json, so
+    # result_obj is still {} (an idle-watchdog / timeout kill or a crash before
+    # grading — see the run-loop stall_reason branches and the
+    # `no result.json` inner["error"] above). This is a TRANSIENT infra death,
+    # NOT a capability miss: a clean run — even one graded WRONG
+    # (chess-best-move, reward 0) — ALWAYS writes result.json, so result_obj is
+    # non-empty for every genuine completion. A stalled/crashed terminal run
+    # otherwise reports via /complete (report_text is always non-empty, so
+    # worker-loop.py never routes it to /fail) and lands as done+resolved=0
+    # with silent_death=false — invisible to the failure-rerun path. Flagged as
+    # a DISTINCT signal (not folded into silent_death, which specifically means
+    # the agent's own unanswered "no visible output" nudge) so the coordinator
+    # (server.py Queue._eligible_rerun_ids / _is_no_result_death_meta) grants it
+    # exactly one budgeted rerun.
+    meta["no_result_death"] = not bool(result_obj)
     meta_text = json.dumps(meta)
 
     return resolved, report_text, "", meta_text

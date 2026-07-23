@@ -21,8 +21,19 @@ try/except that falls through to a silent, unconditional exit(0). A bug in
 this script degrades to a no-op gate/deny, never a stuck or crashed agent turn.
 
 Subcommands (each reads one hook-event JSON object from stdin):
-  record   PostToolUse recorder. Silent. Appends one compact JSON line per
-           edit/cmd/task event to the state log. Never prints, never blocks.
+  record   PostToolUse recorder. Appends one compact JSON line per
+           edit/cmd/task event to the state log; never blocks. A
+           `# unerr:verify`-marked Bash command is ALSO classified weak/not
+           at record time (_verify_strength, T1.1/T1.5, see "VERIFY
+           STRENGTH" below), and record may PRINT a PostToolUse
+           hookSpecificOutput.additionalContext nudge (Channel-B, §8; see
+           _post_record_context) — AT MOST ONE per call, in priority order:
+           (1) a weak-verify nudge, once per distinct weak reason this
+           session; (2) a per-class capability playbook when the command
+           carries a `# unerr:class <name>` marker, once per class (item
+           12, baked in verbatim from ROUTING_DECOMPOSITION_SPEC.md §7);
+           (3) a periodic re-injection of the agent's own scope.md every
+           DEFAULT_REINJECT_EVERY tool-events (TP.6, baked at 25).
            ALSO best-effort-syncs Claude Code's OWN session transcript
            ($CLAUDE_CONFIG_DIR/projects/**/*.jsonl, default ~/.claude/...)
            into /logs/agent/sessions/claude-session.jsonl — Harbor's
@@ -47,49 +58,95 @@ Subcommands (each reads one hook-event JSON object from stdin):
            {"decision":"block","reason":"..."} so Claude Code returns the
            agent to work instead of ending the turn. An OVERALL cap (3 total
            blocks, across all gates) guarantees this can never loop forever
-           even if the agent never satisfies a gate. Gate V requires a GREEN
-           `# unerr:verify`-marked command with no edit landed since — there
-           is no fixed test-runner assumption, the agent declares which
-           command IS the proof. Gate E escalates on a VERIFICATION-revealed
-           trigger (a prior R-block, or V capped at 2) OR a light mechanical
+           even if the agent never satisfies a gate. Gate V requires a
+           GREEN `# unerr:verify`-marked command that is NOT weak (T1.2/B2 —
+           see "VERIFY STRENGTH" below) with no edit landed since — a
+           weak-only green does not satisfy it and gets a distinct,
+           actionable Stop message (WEAK_VERIFY_V_BLOCK_MSG) instead of the
+           generic "you never verified" one. There is no fixed test-runner
+           assumption, the agent declares which command IS the proof. Gate E
+           escalates on a VERIFICATION-revealed trigger (a prior R-block, V
+           capped at 2, or N weak-only V-blocks per the T2.1 coupling —
+           default N == V's own cap, so the default case adds no new
+           trigger, only a distinct escalation message) OR a light mechanical
            "stuck" signal (the same command failing STUCK_FAIL_THRESHOLD+
            times with no intervening success) — the raw edit-count arm was
            removed, see Phase A findings. ESCALATION_PANEL (unset/"0",
            default) -> LADDER: unerr-opus alone, then unerr-fable only if the
            trigger persists past opus; "1" -> PANEL: the original
-           spawn-both-in-parallel single block.
+           spawn-both-in-parallel single block. On an ALLOW (the agent may
+           finish), gate ALSO records telemetry-only final-gate-state (T2.4:
+           whether unerr-opus/unerr-fable ran + the block-count summary) so
+           the fable hit-rate can be computed post-run — never gates.
   deny     PreToolUse hook. Reads the state log, evaluates the deny rules in
-           a fixed order (T, B, N — first match wins), and on a match prints a
-           hookSpecificOutput permissionDecision:"deny" object so Claude Code
-           refuses the tool call before it runs. T (an edit into a
+           a fixed order (T, B, N, G — first match wins), and on a match
+           prints a hookSpecificOutput permissionDecision:"deny" object so
+           Claude Code refuses the tool call before it runs. T (an edit into a
            test-shaped path fires a one-time nudge — the grader runs its own
            copy of the checks, so editing a test usually only fakes progress;
            an identical re-issue on the same file is treated as an
            evidence-cited override and allowed through), B (5+ un-greened
            edits on one file AND verification has already blocked -> forced
-           escalation, reads the same state log gate uses), and N (a
+           escalation, reads the same state log gate uses), N (a
            `# unerr:verify`-marked Bash command whose whole body only compares
            a file the agent itself wrote this session against a string
            literal -> a one-time, capped nudge — that proves the write
            happened, not that the value is correct; a re-issue of the SAME
            command is an evidence-cited override and allowed through; see
-           rule_n()) are the three rules — the old python/django-specific
+           rule_n() — the narrow PreToolUse FAST-PATH, kept for its speed;
+           Gate V's weak-verify requirement, above, is the GENERAL,
+           PostToolUse-time form of the same idea, see _verify_strength),
+           and G (T2.2, trust-the-green: a further edit to a file a NON-weak
+           green verify already covers, with no new red since -> a capped,
+           override-able "don't re-open a proven artifact" nudge; see
+           rule_g()) are the four rules — the old python/django-specific
            time-source convention check (Rule C) has been removed, it does
            not belong in a universal harness. Every deny also appends a
            "deny" event to the state log.
 
-PROFILE: HARNESS_HOOKS unset/""/"0" turns every subcommand into a no-op; ANY
-other value ("1", "generic", "swe", "universal", ...) turns hooks on with the
-single "universal" profile — there used to be a separate "swe"
-(TEST_CMD_RE-gated pytest/manage.py-test/tox/bin-test/repro* sensor) and
-"generic" (agent-declared `# unerr:verify` marker) profile; they have been
-collapsed into one (the old "generic" sensor, unconditionally): every Bash
-command is ledgered as a "cmd" event, and a command counts as verification
-only when the agent suffixes it with the literal `# unerr:verify` (or
-`#unerr:verify`) marker. This works uniformly whether the task is a
-SWE-bench repo with a fixed test layout or a Terminal-Bench-style task with
-none and a hidden grader. HARNESS_PROFILE is accepted for env-wiring compat
-but its value is never read.
+VERIFY STRENGTH — Gate V grounding (the "backstop layer",
+HARNESS_IMPROVEMENT_PLAN.md §6-§8, §10 Phases 1-3): `record` classifies
+every `# unerr:verify`-marked Bash command weak or not at record time
+(_verify_strength) — weak covers (a) existence/structure-only checks
+(test -f/-s/-e, ls, stat, wc, file, or a signature-only `grep -q`/`-c`)
+with no comparison of a computed value, (b) self-referential: a literal
+comparison against a file this session itself edited (reusing the narrow
+_tautology_target shapes rule_n already detects), (c) no-comparison: a bare
+compile/run/import asserting nothing about correctness, and (d) tamper
+(T1.5): a file the verify command references hashed (sha256) differently
+than at that exact command's first recorded sight this session — an edited
+check counts as failed, not passed. A recognized test-runner/build/
+health-check invocation is NEVER weak regardless of shape. `#
+independent: <why>` anywhere in the command clears ONLY the
+self-referential classification (T1.3 — independence is undecidable, and a
+literal comparison is legitimate when it comes from the task statement);
+existence-only/no-comparison/tamper are BANNED classes that can never
+qualify, override or not (T1.5). Gate V's `_last_green_verify_ts` counts
+only non-weak greens (strict grounding is always on); a weak-only green
+still blocks Gate V, with a distinct, actionable message. N (== V's own
+cap by default) weak-only V-blocks additionally couple into Gate E (T2.1)
+— reusing the existing escalation ladder/panel, no new block type. Rule N
+stays as a narrow, fast PreToolUse deny for one tautology shape;
+_verify_strength at Gate V is the GENERAL form of the same idea and is
+what actually gates finishing (an N-deny's override lets that ONE tool
+call run, it does not retroactively clear the command's later "cmd"
+event's weak flag). Rule G (T2.2, always on) is the mirror image
+(anti-over-escalation / trust-the-green — the mcmc regression guard):
+once a non-weak green covers a file's current state with no new red since,
+a further edit to it gets a capped, override-able "don't re-open a proven
+artifact" nudge.
+
+PROFILE: the harness is ALWAYS ON — one "universal" profile, no on/off env
+toggle. There used to be a separate "swe" (TEST_CMD_RE-gated
+pytest/manage.py-test/tox/bin-test/repro* sensor) and "generic"
+(agent-declared `# unerr:verify` marker) profile; they have been collapsed
+into one (the old "generic" sensor, unconditionally): every Bash command is
+ledgered as a "cmd" event, and a command counts as verification only when
+the agent suffixes it with the literal `# unerr:verify` (or `#unerr:verify`)
+marker. This works uniformly whether the task is a SWE-bench repo with a
+fixed test layout or a Terminal-Bench-style task with none and a hidden
+grader. HARNESS_HOOKS and HARNESS_PROFILE have been removed — there is no
+env var left to gate this on or off.
 
 State lives at $CC_HARNESS_STATE/state.jsonl (default /tmp/cc-harness/),
 deliberately OUTSIDE the repo — it must never appear in the graded
@@ -126,23 +183,21 @@ DEFAULT_SESSIONS_DEST_DIR = "/logs/agent/sessions"
 CLAUDE_SESSION_DEST_NAME = "claude-session.jsonl"
 
 # ── profile resolution ───────────────────────────────────────────────────
-# HARNESS_HOOKS: unset/""/"0" -> hooks off, every subcommand a no-op. ANY
-# other value ("1", "generic", "swe", "universal", ...) -> hooks on, the
-# single "universal" profile. There used to be a "swe" sensor (a fixed
-# TEST_CMD_RE pytest/manage.py-test/tox/bin-test/repro* pattern) and a
-# "generic" one (agent-declared `# unerr:verify` markers on ANY Bash
-# command); they have been collapsed into one — the old "generic" sensor,
-# unconditionally. HARNESS_PROFILE_ENV is kept defined for env-wiring
-# compat but its value is never read (see _profile()).
+# The hooks run unconditionally — no env toggle here. HARNESS_HOOKS and
+# HARNESS_PROFILE have been removed; whether the harness runs at all is
+# gated upstream (CLAUDE_ARM_KIND / HARNESS_ON), never inside this module.
+# There used to be a "swe" sensor (a fixed TEST_CMD_RE
+# pytest/manage.py-test/tox/bin-test/repro* pattern) and a "generic" one
+# (agent-declared `# unerr:verify` markers on ANY Bash command); they have
+# been collapsed into one — the old "generic" sensor, unconditionally.
 #
-# ESCALATION_PANEL: orthogonal to HARNESS_HOOKS — controls Gate E's
-# escalation SHAPE, not whether it fires. unset/"0"/anything else -> LADDER
-# (the default): a mechanical two-rung hand-off, unerr-opus alone first,
-# unerr-fable only if the trigger persists after opus. "1" -> PANEL (the
-# original behavior): spawn unerr-opus AND unerr-fable together as a
-# decorrelated judge panel. See _escalation_panel().
-HARNESS_HOOKS_ENV = "HARNESS_HOOKS"
-HARNESS_PROFILE_ENV = "HARNESS_PROFILE"  # compat only — never read, see _profile()
+# ESCALATION_PANEL is now the SOLE remaining harness env toggle — it
+# controls Gate E's escalation SHAPE, not whether it fires. unset/"0"/
+# anything else -> LADDER (the default): a mechanical two-rung hand-off,
+# unerr-opus alone first, unerr-fable only if the trigger persists after
+# opus. "1" -> PANEL (the original behavior): spawn unerr-opus AND
+# unerr-fable together as a decorrelated judge panel. See
+# _escalation_panel().
 ESCALATION_PANEL_ENV = "ESCALATION_PANEL"
 
 # Literal substrings only (no whitespace-tolerant regex) — both forms are
@@ -183,18 +238,35 @@ RULE_B_DENY_CAP = 2
 # nudge, never a repeated or hard block. See rule_n().
 TAUTOLOGY_DENY_CAP = 1
 
+# Rule G (trust-the-green, T2.2): capped like Rule T/B/N — once a NON-weak
+# green verify exists for an artifact, further edits to it are denied absent
+# a new red verify, but this is a strong HEURISTIC not a certainty, so it
+# stays override-able (a re-issued identical edit is allowed) and bounded.
+TRUST_GREEN_DENY_CAP = 2
+
+# ── Gate V grounding (baked in, always on — T3.2). Strict-verify,
+# escalate-on-weak, trust-green, the weak-verify escalation threshold, the
+# reinject cadence, the nudge text, and the per-class playbooks are all
+# fixed defaults below with no env override — unlike ESCALATION_PANEL,
+# which remains the sole configurable toggle. See _harness_verify_strict()/
+# _harness_escalate_on_weak()/_harness_trust_green().
+
+# Weak-verify Stop-blocks are the SAME gate letter "V" as a never-verified
+# run (an enhanced Gate-V requirement, not a new gate — see evaluate_gate),
+# so they share GATE_CAPS["V"]/OVERALL_CAP unchanged. This name exists only
+# for the escalation-coupling threshold below (T2.1).
+DEFAULT_WEAK_VERIFY_ESCALATE_N = GATE_CAPS["V"]
+DEFAULT_REINJECT_EVERY = 25
+
 
 # ── profile ───────────────────────────────────────────────────────────────
 
 def _profile():
-    """Resolve whether the harness is active. HARNESS_HOOKS unset/""/"0" ->
-    None (hooks off, every subcommand is a no-op). ANY other value ("1",
-    "generic", "swe", "universal", ...) -> the string "universal" — there is
-    only one profile now, so any truthy value opts in. HARNESS_PROFILE is
-    accepted for env-wiring compat but its value is never read."""
-    hh = os.environ.get(HARNESS_HOOKS_ENV) or ""
-    if hh in ("", "0"):
-        return None
+    """The harness is ALWAYS active — one "universal" profile, no on/off
+    switch. HARNESS_HOOKS has been removed: hooks run unconditionally on every
+    claude-* arm (gated upstream by CLAUDE_ARM_KIND / HARNESS_ON, never here).
+    Kept returning the "universal" string so callers are unchanged; the old
+    None (hooks-off) return is gone, so any `profile is None` branch is dead."""
     return "universal"
 
 
@@ -204,7 +276,8 @@ def _escalation_panel():
     unerr-opus AND unerr-fable spawned together in parallel, byte-identical
     message). Unset/"0"/anything else -> False (LADDER, the default: a
     mechanical two-rung hand-off — unerr-opus alone first, unerr-fable only
-    if the trigger persists after opus). Orthogonal to HARNESS_HOOKS."""
+    if the trigger persists after opus). The sole remaining harness env
+    toggle — HARNESS_HOOKS/HARNESS_PROFILE have been removed."""
     return (os.environ.get(ESCALATION_PANEL_ENV) or "") == "1"
 
 
@@ -259,14 +332,21 @@ def _cmd_ledger(cmd_events):
 
 
 def _last_green_verify_ts(cmd_events):
-    """Latest `t` among `cmd` events that were BOTH verify-marked and
-    successful, or None if no such event exists yet."""
+    """Latest `t` among `cmd` events that were verify-marked, successful,
+    AND — strict grounding is always on (T1.2/B2) — NOT flagged
+    `verify_weak` by the Gate-V-grounding classifier (_verify_strength): a
+    weak green (existence-only, self-referential, no-comparison, or tamper)
+    does not count as proof. None if no qualifying event exists yet."""
+    strict = _harness_verify_strict()
     ts = None
     for e in cmd_events:
-        if e.get("ev") == "cmd" and e.get("verify") and e.get("ok"):
-            t = e.get("t", 0)
-            if ts is None or t > ts:
-                ts = t
+        if e.get("ev") != "cmd" or not e.get("verify") or not e.get("ok"):
+            continue
+        if strict and e.get("verify_weak"):
+            continue
+        t = e.get("t", 0)
+        if ts is None or t > ts:
+            ts = t
     return ts
 
 
@@ -487,20 +567,575 @@ def _sync_all_claude_sessions(candidates, heads):
             continue
 
 
+# ── Gate V grounding — verify-strength classifier + tamper-resistance +
+# Channel-B nudges (HARNESS_IMPROVEMENT_PLAN.md §6-§8, §10 Phases 1-3) ──────
+#
+# Grounding behaviors, hardwired to their always-on defaults (T3.2) — no
+# env read, no config to parse.
+
+def _harness_verify_strict():
+    """Gate-V grounding is always strict: only a non-weak green satisfies
+    Gate V; a weak green never counts as proof."""
+    return True
+
+
+def _harness_escalate_on_weak():
+    """The weak-verify-coupled Gate-E disjunct (T2.1) is always enabled:
+    Gate E fires on the pre-existing v_capped/r_already/repeated_failure
+    triggers, plus escalates specifically once greens were weak N or more
+    times."""
+    return True
+
+
+def _harness_trust_green():
+    """Rule G (T2.2, trust-the-green edit-deny) is always enabled."""
+    return True
+
+
+def _weak_verify_escalate_n():
+    """T2.1: number of weak-verify V-blocks that couple into Gate E. Fixed
+    at DEFAULT_WEAK_VERIFY_ESCALATE_N (== GATE_CAPS["V"], so the default
+    case is exactly the existing v_capped trigger, no new behavior)."""
+    return DEFAULT_WEAK_VERIFY_ESCALATE_N
+
+
+def _reinject_every():
+    """TP.6: N tool-events between periodic SCOPE re-injections. Fixed at
+    DEFAULT_REINJECT_EVERY."""
+    return DEFAULT_REINJECT_EVERY
+
+
+# ── T1.1/T1.5 — verify-strength classifier + tamper hashing ────────────────
+#
+# Narrow, precision-first shape detectors — same philosophy as
+# _tautology_target above: only match a command whose ENTIRE body (verify
+# marker stripped) is one of these recognizable weak shapes. A command that
+# mixes in real comparison logic is never flagged just because it also
+# touches `ls`/`wc`/etc. Err toward NOT flagging when uncertain (a missed
+# weak verify is caught by other layers; a false flag is only a bounded,
+# override-able nudge).
+_EXISTENCE_ONLY_RE = re.compile(
+    r'^(?:'
+    r'test\s+-[a-zA-Z]\s+\S+'
+    r'|\[\s*-[a-zA-Z]\s+\S+\s*\]'
+    r'|ls(?:\s+-\w+)*\s+\S*'
+    r'|stat(?:\s+-\w+)*\s+\S+'
+    r'|file(?:\s+-\w+)*\s+\S+'
+    r'|wc\s+-[lcwm]\s+\S+'
+    r'|du(?:\s+-\w+)*\s+\S+'
+    r')\s*;?\s*$'
+)
+# grep -q/-c of a bare signature string (a function/class/token name), no
+# comparison of a computed VALUE — narrower than "any grep": a single
+# command, no further pipe/diff.
+_GREP_SIGNATURE_RE = re.compile(
+    r"^grep\s+-[a-zA-Z]*[qc][a-zA-Z]*\s+(?:-\w+\s+)*['\"][^'\"]+['\"]\s+\S+\s*$"
+)
+# A bare compile/run/import with only an exit-code check — no visible
+# assertion about correctness. Single-command shapes only (no &&/;/| chaining
+# a real check after it), so a compile-THEN-test pipeline is never caught.
+_NO_COMPARISON_RE = re.compile(
+    r'^(?:gcc|g\+\+|cc|clang|clang\+\+)\b[^&;|]*$'
+    r'|^python3?\s+-c\s+["\']import\s+[\w.]+["\']\s*$'
+    r'|^python3?\s+\S+\.py\s*$'
+    r'|^node\s+\S+\.js\s*$'
+)
+# Known real test-runner/build/health-check invocations — NEVER weak even
+# though their body has no visible comparison (the comparison lives inside
+# the framework, out of sight). Prevents false-flagging `make check`,
+# `pytest`, `npm test`, a `curl -f` health probe, etc. — precision-first.
+_KNOWN_RUNNER_RE = re.compile(
+    r'\b(?:pytest|py\.test|unittest|tox|nose2?|'
+    r'npm\s+(?:run\s+)?test|yarn\s+test|jest|mocha|vitest|'
+    r'make\s+(?:check|test)|ctest|'
+    r'go\s+test|cargo\s+test|'
+    r'mvn\s+test|gradle\s+test|'
+    r'rspec|phpunit|'
+    r'curl\s+.*-[a-zA-Z]*f)\b'
+)
+# T1.3 override: a re-issued verify command whose comment carries
+# `# independent: <why>` counts as a qualifying green even if the classifier
+# flags it — independence is undecidable in general, and a literal
+# comparison is legitimate when the expected value comes verbatim from the
+# task statement. Applies ONLY to the "self-referential" classification (see
+# _verify_strength) — existence-only/no-comparison/tamper are banned classes
+# that can never qualify regardless of override (T1.5).
+_INDEPENDENT_OVERRIDE_RE = re.compile(r'#\s*independent\s*:\s*\S')
+# The `# independent: <why>` annotation is metadata for the OVERRIDE
+# decision above, not part of the command's own comparison shape — left in
+# place it trails the narrow tautology/existence-only/no-comparison regexes
+# below (all of which require the WHOLE body to be nothing but the checked
+# shape) and would silently defeat every one of them. Stripped from a COPY
+# used for shape classification only; _INDEPENDENT_OVERRIDE_RE itself still
+# matches against the ORIGINAL cmd.
+_INDEPENDENT_ANNOTATION_STRIP_RE = re.compile(r'#\s*independent\s*:.*$')
+
+
+def _strip_independent_annotation(cmd):
+    """Remove a trailing `# independent: <why>` annotation (and everything
+    after it, since bash comments run to end-of-line) before shape-matching
+    a command. See _INDEPENDENT_ANNOTATION_STRIP_RE."""
+    return _INDEPENDENT_ANNOTATION_STRIP_RE.sub('', cmd).rstrip()
+# T1.5: best-effort path-token extraction for tamper hashing — a token that
+# looks like a file path (contains '/' or a file-extension-shaped suffix),
+# is not a flag, and is not a shell keyword/builtin the classifier already
+# recognizes. Heuristic, never exhaustive — it only needs to catch the files
+# a genuine verify command names.
+_PATH_TOKEN_SKIP = {
+    "&&", "||", ">", ">>", "<", "test", "grep", "cat", "ls", "stat", "file",
+    "wc", "diff", "cmp", "curl", "python", "python3", "bash", "sh", "npm",
+    "run", "make", "pytest", "echo", "node", "go", "cargo",
+}
+
+
+def _parse_referenced_paths(cmd):
+    """Best-effort extraction of file-path-shaped tokens from a verify
+    command, for tamper hashing (T1.5). Capped small (8) — a real verify
+    command references a handful of files at most."""
+    body = _strip_verify_marker(cmd)
+    tokens = re.findall(r"[^\s\"'|&;()]+", body)
+    out = []
+    for tok in tokens:
+        if tok in _PATH_TOKEN_SKIP or tok.startswith("-") or tok.startswith("$"):
+            continue
+        cleaned = tok.strip("\"'()[]{}")
+        if not cleaned or cleaned.startswith("$"):
+            continue
+        if "/" in cleaned or re.search(r"\.[A-Za-z0-9]{1,8}$", cleaned):
+            if cleaned not in out:
+                out.append(cleaned)
+    return out[:8]
+
+
+def _hash_path(path):
+    """sha256 of `path`'s current bytes, or the sentinel "<missing>" if it
+    can't be read — a missing/unreadable file is itself a distinguishable,
+    comparable state (a check that referenced a since-deleted fixture).
+    Never raises."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return "<missing>"
+
+
+def _verify_tampered(cmd, events):
+    """T1.5 tamper detection: True if any file `_parse_referenced_paths(cmd)`
+    names now hashes DIFFERENTLY than it did at this exact command's (by
+    _cmd_key) first recorded sight this session — i.e. a referenced
+    check/fixture file was edited or deleted after the check was first
+    declared (catches extract-elf editing its own `expected` map, including
+    edits made via Bash — not just the Edit/Write tool events the ledger
+    already tracks). First sight of a command can never be tampered by
+    definition (no prior baseline to compare against)."""
+    key = _cmd_key(cmd)
+    paths = _parse_referenced_paths(cmd)
+    if not paths:
+        return False
+    baseline = None
+    for e in events:
+        if e.get("ev") == "cmd" and e.get("key") == key and e.get("ref_hashes"):
+            baseline = e["ref_hashes"]
+            break  # events are append-ordered -> first match is first sight
+    if baseline is None:
+        return False
+    current = {p: _hash_path(p) for p in paths}
+    return any(baseline.get(p) != current.get(p) for p in paths)
+
+
+def _verify_strength(cmd, output, events):
+    """T1.1 classifier + T1.5 tamper-resistance (folded into one call — both
+    need the same cmd-shape parsing and `events` history). Returns (weak:
+    bool, reason: str|None) where reason is one of "tamper",
+    "self-referential", "existence-only", "no-comparison", or None when not
+    weak. `output` (the command's stdout+stderr, see _extract_output) is
+    accepted for API completeness / future output-content signals; the
+    current rules are shape-based and do not need it. Precision-first:
+    uncertain cases are NOT flagged — a missed weak verify is caught by
+    other layers (Rule N, Gate R on a later regression), a false flag is
+    only a bounded, override-able nudge.
+
+    Weak shapes, in classification order:
+      1. tamper (T1.5) — ALWAYS wins; an edited check counts as failed, not
+         passed, regardless of shape, and is never override-able.
+      2. self-referential — the whole body is a literal comparison against a
+         file the agent wrote/edited THIS session (reuses _tautology_target's
+         narrow shapes). The ONLY class the `# independent:` override (T1.3)
+         can clear.
+      3. existence-only — the whole body is a bare existence/structure check
+         (test -f/-s, ls, stat, wc, file, a signature-only grep -q/-c) with
+         no value comparison. Never override-able (T1.5, "banned class").
+      4. no-comparison — a bare compile/run/import with only an exit-code
+         check. Never override-able (T1.5, "banned class").
+    A recognized test-runner/build/health-check invocation (_KNOWN_RUNNER_RE)
+    is NEVER weak, regardless of shape — its comparison lives inside the
+    framework, out of sight. Shape classification runs against `cmd` with
+    any `# independent: <why>` annotation stripped first
+    (_strip_independent_annotation) — the annotation is override metadata,
+    not part of the comparison shape."""
+    shape_cmd = _strip_independent_annotation(cmd)
+    body = " ".join(_strip_verify_marker(shape_cmd).split())
+    if not body:
+        return False, None
+
+    if _verify_tampered(shape_cmd, events):
+        return True, "tamper"
+
+    if _KNOWN_RUNNER_RE.search(body):
+        return False, None
+
+    target = _tautology_target(shape_cmd)
+    if target is not None:
+        target_base = os.path.basename(target)
+        written_this_session = any(
+            e.get("ev") == "edit" and os.path.basename(e.get("file") or "") == target_base
+            for e in events
+        )
+        if written_this_session:
+            return True, "self-referential"
+
+    if _EXISTENCE_ONLY_RE.match(body) or _GREP_SIGNATURE_RE.match(body):
+        return True, "existence-only"
+
+    if _NO_COMPARISON_RE.match(body):
+        return True, "no-comparison"
+
+    return False, None
+
+
+# ── T3.1 — Channel-B just-in-time nudges + T3.2 config + item-12 playbooks ─
+
+_WEAK_NUDGE_DEFAULTS = {
+    "existence-only": (
+        "This verify only checks that something EXISTS or has the right "
+        "shape (a file, a line count, a header) -- it never compares a "
+        "VALUE. Add a value comparison: recompute the expected result "
+        "independently and diff/compare against it."
+    ),
+    "self-referential": (
+        "This verify compares a file you wrote/computed this session "
+        "against a literal you also chose -- that proves the write "
+        "happened, not that the value is correct. Recompute the expected "
+        "value by a DIFFERENT method, or cite the literal's task-statement "
+        "origin with `# independent: <why>` and re-issue the command."
+    ),
+    "no-comparison": (
+        "This verify compiles/runs something and only checks exit-0 -- it "
+        "asserts nothing about correctness. Add an assertion that checks "
+        "the actual output/behavior against an expected value."
+    ),
+    "tamper": (
+        "A file this verify references was edited or deleted after this "
+        "check first ran -- an edited check counts as failed, not passed. "
+        "Restore the original check/fixture or write a fresh check you "
+        "have not since modified."
+    ),
+}
+
+
+def _weak_verify_nudge_text(reason):
+    """T3.1 baked nudge text for a given weak reason (_WEAK_NUDGE_DEFAULTS).
+    None if `reason` is unrecognized."""
+    return _WEAK_NUDGE_DEFAULTS.get(reason)
+
+
+# Item 12 — per-class capability playbooks, VERBATIM from
+# ROUTING_DECOMPOSITION_SPEC.md §7 (all 11 classes with a playbook) — see
+# _playbooks().
+_BAKED_PLAYBOOKS = {
+    "perception-vision": (
+        "Any answer that depends on the content of an image, video, or frame: the pixels are "
+        "DATA to be processed programmatically, never read with your own eyes as the answer. "
+        "Looking may form a hypothesis; it is never the basis of the answer.\n"
+        "Pick the extraction method by content type: text → OCR (e.g. tesseract); "
+        "synthetically rendered content with known fonts/colors/shapes → deterministic "
+        "template / glyph / color matching; motion or geometry → cv2 / numpy frame analysis.\n"
+        "Cross-check: derive the perceived fact by two independent means (or one method plus a "
+        "structural sanity assertion) and require agreement before using it. A single extraction "
+        "that \"looks right\" is not trusted.\n"
+        "Decompose as perceive → cross-check → downstream logic. The downstream logic is "
+        "usually deterministic and cheap; the entire risk is in the perception.\n"
+        "Verify the final answer by re-deriving the perceived fact independently — never by "
+        "re-reading the value you wrote.\n"
+        "If there is no programmatic extraction path (open-world scene understanding), say so "
+        "and escalate to a genuinely multimodal model; do not fake it with ad-hoc pixel heuristics."
+    ),
+    "numerical-scientific": (
+        "Parse the input EXACTLY first — delimiter, decimal separator (a comma may be a "
+        "decimal point), header, units. A parse bug silently corrupts every number after it.\n"
+        "Solve with an established library (scipy / numpy / statsmodels / primer3, …) rather "
+        "than a hand-rolled approximation, unless the task forbids it.\n"
+        "Know the domain invariants and assert them: expected physical ranges, that a fit did "
+        "NOT hit a parameter bound, that a distribution normalizes, that a rate is positive. "
+        "A result violating a known invariant is wrong regardless of what your check returns.\n"
+        "Verify by recomputing with an INDEPENDENT method or a stricter unconstrained refit and "
+        "asserting the invariants; re-running the same fit only proves determinism.\n"
+        "If honest attempts keep missing the invariants, the model or the parse is wrong — "
+        "escalate; do not loosen tolerances to pass."
+    ),
+    "systems-lowlevel": (
+        "Reason about the actual machine contract (ELF/ABI/syscall/relocation/memory "
+        "semantics), not a surface approximation. When behavior is wrong, fix the DEFINING "
+        "component; never patch input data or a downstream site to paper over a mis-modeled "
+        "component — feeding a broken reader different bytes instead of fixing the reader is "
+        "the classic wrong-layer error.\n"
+        "Reproduce the exact failure and read it literally: a crash names the component that "
+        "failed — trace it to its cause before hypothesizing.\n"
+        "Decompose setup/install (cheap) from the emulation/relocation/ABI core (hard); spend "
+        "the reasoning on the core.\n"
+        "Verify by EXERCISING the artifact against real reference behavior (the actual "
+        "rendered output, the actual memory image, the actual program result), never a "
+        "structural/header check that a content-wrong artifact also passes.\n"
+        "This class routinely exceeds a mid-tier model; if the core is deep "
+        "emulation/relocation debugging, route it to the strongest tier from the start."
+    ),
+    "ml-frameworks": (
+        "Use the framework's OFFICIAL documented build / install / run path — graders assume "
+        "the canonical layout; an alternative build that \"works\" often lands artifacts where "
+        "the checker does not look.\n"
+        "Separate \"it runs\" from \"it's correct.\" Compiling, loading a state_dict, or printing "
+        "tokens proves nothing about numerical correctness; for anything generative, "
+        "degenerate / constant / repeating output is a failure signal, not success.\n"
+        "When inferring an architecture or config from a reference artifact, treat an "
+        "implausible baseline (loss ≈ variance, accuracy ≈ chance) as evidence the "
+        "reconstruction is WRONG — sweep candidates until the baseline collapses; never "
+        "proceed on a bad baseline.\n"
+        "Know the semantics that make distributed/numeric code correct (e.g. which "
+        "collective's backward sums across ranks) and verify against an INDEPENDENT reference "
+        "implementation, not your own re-implementation's assumptions.\n"
+        "Route the correctness core to the strongest tier; env/build/training runs are cheap "
+        "scaffolding."
+    ),
+    "text-data-transform": (
+        "Enumerate EVERY constraint the task states — output path, format, field names, and "
+        "every rule (\"only X\", \"byte-identical\", \"one event per line\") — and make each a "
+        "separate check. The usual miss is a constraint you never checked, not the main goal.\n"
+        "Read the spec's semantics precisely (one-match vs all-matches; inclusive vs "
+        "exclusive ranges; exact vs normalized strings); small choices flip the answer.\n"
+        "Verify by recomputing the expected output with logic INDEPENDENT of your transform "
+        "(a different parser, a hand-computed small case, a diff against the original on real "
+        "data). Re-running your own transform as the check is a tautology.\n"
+        "Preserve verbatim outputs exactly (flags, extracted strings, casing, digits); never "
+        "normalize them to natural language."
+    ),
+    "security-adversarial": (
+        "First decide the goal's shape: EXISTENCE (craft one input that beats a VISIBLE / "
+        "provided check → a faithful self-test is possible) vs UNIVERSAL robustness "
+        "(block/withstand ALL of a hidden adversarial set → any self-test is only a weak "
+        "proxy).\n"
+        "For universal robustness, prefer a known-hardened library/tool over a hand-rolled "
+        "matcher, state explicitly that a self-authored check cannot prove universality, and "
+        "test the way the grader will (run it in a real browser, run the actual cracker).\n"
+        "For \"remove/neutralize X everywhere,\" cover the FULL surface — git history, not just "
+        "the working tree; all encodings/vectors, not a few — and verify with the grader's "
+        "own method.\n"
+        "Trust literal evidence over a self-written scanner: if a plain grep finds the secret, "
+        "it is there, whatever your custom scan reports."
+    ),
+    "web-research-retrieval": (
+        "Retrieve through the provided search tools, not raw scraping of a site that will "
+        "anti-bot you; if a source is blocked, switch method rather than proceeding on partial "
+        "data.\n"
+        "Pin the exact selection criterion (as-of date, \"all-reported\", the exact metric) and "
+        "apply it to the COMPLETE fetched data.\n"
+        "Verify by cross-checking that the chosen answer actually satisfies the criterion "
+        "against the fetched data — never by comparing the output file to the answer you "
+        "already picked.\n"
+        "Write the answer in the exact required format/identifier."
+    ),
+    "build-compile": (
+        "Onboard the project's own build first (CI workflows, Makefile/CMake, README — the "
+        "exact commands maintainers use) and use that path; it is what the grader assumes.\n"
+        "Install missing toolchain/deps yourself; never assume the environment is complete.\n"
+        "Long builds can exceed the outer time budget — parallelize (-j); if a full build is "
+        "infeasible, target the specific component the task needs.\n"
+        "Verify with the project's own test/run and by producing the expected artifact."
+    ),
+    "devops-operate": (
+        "Probe the current state before changing anything.\n"
+        "Verify by EXERCISING the running system the way a client will — curl the endpoint, "
+        "ssh in, connect the client, hit the port — never by inspecting config and declaring "
+        "it correct. An open port is not a rendered screen; services-up is not "
+        "function-correct.\n"
+        "Target the exercised interface; make the change at the layer the grader interacts "
+        "with."
+    ),
+    "esoteric-codegen": (
+        "Recognize when the task is \"implement an algorithm in an exotic substrate or under a "
+        "hard size/step budget\" (logic gates, ordered regex substitutions, a polyglot source, "
+        "code-golf byte caps, a self-hosting interpreter, a ≤2KB reconstruction). Here the "
+        "whole task is the hard core — there is almost no scaffolding to delegate, and it "
+        "routes to the strongest tier by default.\n"
+        "Model the target's real semantics before writing: what carries STATE between steps "
+        "(a gate's clocked output, a regex pass's captured groups, the interpreter's "
+        "environment), and how the evaluator will run your artifact. The classic error is "
+        "reasoning combinationally where sequential/clocked state is required.\n"
+        "Treat the size/step cap as a first-class constraint that forces genuinely dense, "
+        "principled code — you cannot embed data or brute-force; you must express the "
+        "algorithm compactly.\n"
+        "Verify by running the produced artifact through its own exotic evaluator and diffing "
+        "against a reference (compile+run, apply the full regex list, run the simulator, run "
+        "the battle) AND confirming the cap is honored — never by reading the source and "
+        "judging it plausible."
+    ),
+    "scientific-modeling": (
+        "The core is the MODEL SPECIFICATION — the prior, the likelihood, the DAG structure, "
+        "the parameterization — not the sampler or the install. Get the math of the model "
+        "right first; the fit is mechanical.\n"
+        "Reproduce reference settings faithfully when porting (seed, sampler config, "
+        "hyperparameters); small drifts move the posterior.\n"
+        "Verify against reference posterior means / recovered structure within the stated "
+        "bands, and DISTRUST a lone stochastic self-test — a lenient random check passes a "
+        "wrong model. Assert the model's defining property, not just \"it sampled\".\n"
+        "If honest fits keep missing the bands, the specification is wrong — fix the model, "
+        "don't widen tolerances."
+    ),
+    "bio-design": (
+        "The core is domain-rule design (restriction/cut sites, primer melting-temperature "
+        "windows, sequence identity, spectral/filter-cube matching), which needs real "
+        "molecular-biology knowledge — route it to the strongest tier; the FASTA/file emission "
+        "is scaffolding.\n"
+        "Use the authoritative domain tools and databases (primer3 for Tm, PDB/fpbase for "
+        "sequences/spectra) rather than approximating the rules by hand.\n"
+        "Verify by SIMULATING the biology the grader simulates (assembly, site-directed "
+        "mutagenesis) and checking the product against ground truth — not by inspecting that "
+        "the sequence \"looks reasonable\"."
+    ),
+}
+
+
+def _playbooks():
+    """Item 12: the baked _BAKED_PLAYBOOKS table, used verbatim."""
+    return dict(_BAKED_PLAYBOOKS)
+
+
+_CLASS_MARKER_RE = re.compile(r'#\s*unerr:class\s+([A-Za-z0-9_-]+)')
+
+
+def _class_marker(cmd):
+    """Extract the class name from a `# unerr:class <name>` marker in `cmd`
+    (item 12), or None."""
+    m = _CLASS_MARKER_RE.search(cmd)
+    return m.group(1) if m else None
+
+
+def _scope_reminder():
+    """TP.6: read the agent's own SCOPE manifest (scope.md under the harness
+    state dir — a separate prompt change instructs the agent to write it,
+    out of scope for this file) and return its first ~40 lines prefixed for
+    periodic re-injection, or None if the file doesn't exist / can't be
+    read. Lives under the SAME state dir as state.jsonl (_state_dir()) —
+    default /tmp/cc-harness, deliberately outside the repo, and
+    env-overridable via CC_HARNESS_STATE for test isolation exactly like the
+    rest of this module's state."""
+    path = os.path.join(_state_dir(), "scope.md")
+    try:
+        with open(path) as f:
+            lines = f.readlines()[:40]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    return "Reminder of your acceptance criteria and plan:\n" + "".join(lines)
+
+
+def _post_tool_use_context(text):
+    """Wrap `text` as a PostToolUse hookSpecificOutput.additionalContext
+    payload (Claude Code hooks docs)."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": text,
+        }
+    }
+
+
+def _post_record_context(data, ev, prior_events):
+    """Decide the (at most one) additionalContext string to emit for this
+    PostToolUse record call, or None. Priority when more than one trigger
+    applies on the same call (rare — different markers seldom coincide on
+    one Bash command): weak-verify nudge (T3.1) > class playbook (item 12) >
+    periodic SCOPE re-injection (TP.6). Each nudge/playbook fires at most
+    once per distinct reason/class per session (dedup via a "nudge" ledger
+    event); re-injection is capped only by its own N-event cadence, never
+    by a hard count. Never raises internally — cmd_record's caller (main)
+    still wraps everything in the fail-open try/except."""
+    tool_name = data.get("tool_name") or ""
+    tool_input = data.get("tool_input") or {}
+
+    if tool_name == "Bash" and ev is not None and ev.get("ev") == "cmd":
+        cmd = tool_input.get("command") or ""
+
+        reason = ev.get("verify_weak_reason")
+        if ev.get("verify_weak") and reason:
+            already = any(
+                e.get("ev") == "nudge" and e.get("kind") == "weak_verify" and e.get("reason") == reason
+                for e in prior_events
+            )
+            if not already:
+                text = _weak_verify_nudge_text(reason)
+                if text:
+                    append_event({"t": time.time(), "ev": "nudge", "kind": "weak_verify", "reason": reason})
+                    return "Weak verify detected: " + text
+
+        cls = _class_marker(cmd)
+        if cls is not None:
+            already_cls = any(
+                e.get("ev") == "nudge" and e.get("kind") == "playbook" and e.get("class") == cls
+                for e in prior_events
+            )
+            if not already_cls:
+                playbook = _playbooks().get(cls)
+                if playbook:
+                    append_event({"t": time.time(), "ev": "nudge", "kind": "playbook", "class": cls})
+                    return playbook
+
+    every = _reinject_every()
+    if every > 0:
+        n = len(prior_events) + 1
+        if n % every == 0:
+            return _scope_reminder()
+
+    return None
+
+
 # ── record ────────────────────────────────────────────────────────────────
 
-def build_record_event(data, profile="universal"):
-    """Pure: hook stdin dict -> event dict to append, or None to record
-    nothing. Split out from cmd_record for direct unit testing. Edit/Write/
-    MultiEdit/NotebookEdit/mcp__unerr__file_edit -> an "edit" event (file
-    path only, dropped on tool error). Bash (any non-empty command) -> a
-    "cmd" event ledgered by content hash (key = _cmd_key(cmd)), independent
-    of ok/verify — a run is "verify"-flagged only when the agent suffixes
-    the command with the literal `# unerr:verify` marker; there is no fixed
-    test-runner sensor, this harness has no notion of a repo's test layout.
-    Task -> a "task" event (records which sub-agent ran, for the escalation
-    ladder). profile is accepted for API compat; there is only one profile
-    now so it is otherwise unused."""
+def _extract_output(data):
+    """Best-effort stdout+stderr text from the PostToolUse hook payload's
+    tool_response (Claude Code's Bash tool_response carries "stdout"/
+    "stderr"), or "" if absent/malformed. Passed to _verify_strength for API
+    completeness / future output-content signals — the current classifier
+    rules are shape-based and do not need it."""
+    tr = data.get("tool_response")
+    if not isinstance(tr, dict):
+        return ""
+    return str(tr.get("stdout") or "") + str(tr.get("stderr") or "")
+
+
+def build_record_event(data, profile="universal", events=None):
+    """Hook stdin dict (+ prior `events`, for Gate-V-grounding classification
+    — see below) -> event dict to append, or None to record nothing. Split
+    out from cmd_record for direct unit testing. Edit/Write/MultiEdit/
+    NotebookEdit/mcp__unerr__file_edit -> an "edit" event (file path only,
+    dropped on tool error). Bash (any non-empty command) -> a "cmd" event
+    ledgered by content hash (key = _cmd_key(cmd)), independent of ok/verify
+    — a run is "verify"-flagged only when the agent suffixes the command
+    with the literal `# unerr:verify` marker; there is no fixed test-runner
+    sensor, this harness has no notion of a repo's test layout. A
+    verify-marked Bash command is ALSO run through _verify_strength (T1.1)
+    against `events` (defaults to [] — the selftest's direct unit-test call
+    omits it, which is fine: a verify command with no prior events can only
+    ever classify as unweak-by-shape or first-sight-untampered), and the
+    resulting "verify_weak"/"verify_weak_reason" flags are folded in — a
+    weak "self-referential" classification is cleared by the `# independent:
+    <why>` override (T1.3), banned classes ("existence-only"/"no-comparison"/
+    "tamper") never are. Referenced-path tokens + their current sha256
+    hashes (_parse_referenced_paths/_hash_path) are stored as "ref_paths"/
+    "ref_hashes" for future tamper checks (T1.5) and Rule G's artifact
+    matching (T2.2). Task -> a "task" event (records which sub-agent ran,
+    for the escalation ladder). profile is accepted for API compat; there is
+    only one profile now so it is otherwise unused."""
     tool_name = data.get("tool_name") or ""
     is_error = bool(data.get("is_error"))
     tool_input = data.get("tool_input") or {}
@@ -519,7 +1154,19 @@ def build_record_event(data, profile="universal"):
         verify = _verify_marker_present(cmd)
         exit_code = data.get("exit_code")
         ok = (exit_code == 0) if exit_code is not None else (not is_error)
-        return {"t": t, "ev": "cmd", "key": key, "ok": ok, "verify": verify}
+        ev = {"t": t, "ev": "cmd", "key": key, "ok": ok, "verify": verify}
+        if verify:
+            ev_list = events if events is not None else []
+            weak, reason = _verify_strength(cmd, _extract_output(data), ev_list)
+            override = reason == "self-referential" and bool(_INDEPENDENT_OVERRIDE_RE.search(cmd))
+            ev["verify_weak"] = bool(weak and not override)
+            if reason:
+                ev["verify_weak_reason"] = reason
+            paths = _parse_referenced_paths(_strip_independent_annotation(cmd))
+            if paths:
+                ev["ref_paths"] = paths
+                ev["ref_hashes"] = {p: _hash_path(p) for p in paths}
+        return ev
 
     if tool_name == "Task":
         return {"t": t, "ev": "task", "agent": tool_input.get("subagent_type") or ""}
@@ -536,12 +1183,41 @@ def cmd_record():
     if profile is None:
         return
     _sync_claude_session()
-    ev = build_record_event(data, profile)
+    prior_events = read_events()
+    ev = build_record_event(data, profile, prior_events)
     if ev is not None:
         append_event(ev)
+    context = _post_record_context(data, ev, prior_events)
+    if context:
+        print(json.dumps(_post_tool_use_context(context)))
 
 
 # ── gate ──────────────────────────────────────────────────────────────────
+
+GENERIC_V_BLOCK_MSG = (
+    "You have not proven this task works: establish the command "
+    "that proves success for this task and run it with `# "
+    "unerr:verify` appended; re-run it after your final change. "
+    "This benchmark has no fixed check layout — the marker is "
+    "how you declare which command IS the proof. Finish only once "
+    "that verify-marked command is green and no edit has landed "
+    "since."
+)
+# T1.2: the weak-only-green Stop-block message — distinct from
+# GENERIC_V_BLOCK_MSG so the agent gets the actionable "why it's weak / what
+# independence looks like" instruction instead of being told (incorrectly)
+# that it never verified at all.
+WEAK_VERIFY_V_BLOCK_MSG = (
+    "Your verify only re-reads what you wrote / checks existence; add an "
+    "INDEPENDENT check — recompute the expected value by a different "
+    "method, compare to a reference, or use a known-answer probe from the "
+    "task statement. If the expected value is a literal from the task "
+    "statement, cite it with `# independent: <why>` and re-issue the "
+    "command — that counts as a qualifying green (T1.3). A structural/"
+    "existence-only or compile-only check can never qualify, override or "
+    "not."
+)
+
 
 def _repeated_failure(cmd_events):
     """Light, deliberately conservative Layer-3 signal for Gate E: True if
@@ -558,23 +1234,33 @@ def _repeated_failure(cmd_events):
     return any(n >= STUCK_FAIL_THRESHOLD for n in fail_counts.values())
 
 
-def _gate_e_panel(tasks, block_counts, repeated_failure):
+def _gate_e_panel(tasks, block_counts, repeated_failure, weak_v_blocks):
     """Gate E, PANEL mode (ESCALATION_PANEL=1): byte-identical to the
     original single-arm behavior — one block, once, demanding unerr-opus
     AND unerr-fable spawned together as a decorrelated judge panel. Capped
-    at GATE_CAPS["E"] (1). Trigger is a prior R-block, V capped at 2, OR the
-    light mechanical `repeated_failure` signal (STUCK_FAIL_THRESHOLD+
-    failures of the same command with no success) — the third disjunct
-    never changes the cap, it only widens what counts as "stuck"."""
+    at GATE_CAPS["E"] (1). Trigger is a prior R-block, V capped at 2, the
+    T2.1 weak-verify coupling (`weak_v_blocks` weak-reason V-blocks >=
+    _weak_verify_escalate_n(), always on — defaults to the SAME threshold
+    as v_capped, so the default case adds no new trigger, only a distinct
+    message), OR the light mechanical
+    `repeated_failure` signal (STUCK_FAIL_THRESHOLD+ failures of the same
+    command with no success) — none of these disjuncts change the cap, they
+    only widen what counts as "stuck"/"wrong"."""
     if block_counts.get("E", 0) >= GATE_CAPS["E"]:
         return None
     r_already = block_counts.get("R", 0) >= 1
     v_capped = block_counts.get("V", 0) >= 2
+    weak_capped = _harness_escalate_on_weak() and weak_v_blocks >= _weak_verify_escalate_n()
     escalated = any(t.get("agent") in ("unerr-opus", "unerr-fable") for t in tasks)
-    if not ((r_already or v_capped or repeated_failure) and not escalated):
+    if not ((r_already or v_capped or weak_capped or repeated_failure) and not escalated):
         return None
     if r_already:
         trigger = "a previously-green verification regressed and one rework did not recover it"
+    elif weak_capped:
+        trigger = (
+            "verification has repeatedly blocked because your only greens are "
+            "WEAK (non-independent) — this needs help breaking the false-green loop"
+        )
     elif v_capped:
         trigger = "the verification gate (V) has blocked twice without a green finish"
     else:
@@ -589,12 +1275,16 @@ def _gate_e_panel(tasks, block_counts, repeated_failure):
     )
 
 
-def _gate_e_ladder(tasks, blocks, block_counts, repeated_failure):
+def _gate_e_ladder(tasks, blocks, block_counts, repeated_failure, weak_v_blocks):
     """Gate E, LADDER mode (the default): two rungs, tracked by WHICH agent
     ran rather than "any" escalation. Rung 1 fires once neither unerr-opus
-    nor unerr-fable has run, on a prior R-block, V capped at 2, OR the light
-    mechanical `repeated_failure` signal (STUCK_FAIL_THRESHOLD+ failures of
-    the same command with no success — thrash without progress) — demanding
+    nor unerr-fable has run, on a prior R-block, V capped at 2, the T2.1
+    weak-verify coupling (`weak_v_blocks` weak-reason V-blocks >=
+    _weak_verify_escalate_n(), always on — defaults to the SAME threshold
+    as v_capped, so the default case adds no new trigger, only a distinct
+    message), OR the light mechanical
+    `repeated_failure` signal (STUCK_FAIL_THRESHOLD+ failures of the same
+    command with no success — thrash without progress) — demanding
     unerr-opus ALONE — one decorrelated-enough second opinion for a
     same-family reasoning-effort ladder, not the full panel. Rung 2 fires
     only once opus has run, fable has not, AND a NEW R- or V-block was
@@ -602,8 +1292,8 @@ def _gate_e_ladder(tasks, blocks, block_counts, repeated_failure):
     trigger PERSISTED past opus's fix) — demanding unerr-fable, primed with
     opus's proposal and why it failed. Capped at LADDER_E_CAP (2) total
     E-blocks; once fable has also run (or the cap is spent), Gate E never
-    blocks again. The repeated_failure disjunct only feeds rung 1 — it never
-    changes rung 2's logic or either cap."""
+    blocks again. The repeated_failure/weak_v_blocks disjuncts only feed
+    rung 1 — they never change rung 2's logic or either cap."""
     if block_counts.get("E", 0) >= LADDER_E_CAP:
         return None
 
@@ -616,10 +1306,16 @@ def _gate_e_ladder(tasks, blocks, block_counts, repeated_failure):
     if not opus_ts:
         r_already = block_counts.get("R", 0) >= 1
         v_capped = block_counts.get("V", 0) >= 2
-        if not (r_already or v_capped or repeated_failure):
+        weak_capped = _harness_escalate_on_weak() and weak_v_blocks >= _weak_verify_escalate_n()
+        if not (r_already or v_capped or weak_capped or repeated_failure):
             return None
         if r_already:
             trigger = "a previously-green verification regressed and one rework did not recover it"
+        elif weak_capped:
+            trigger = (
+                "verification has repeatedly blocked because your only greens are "
+                "WEAK (non-independent) — this needs help breaking the false-green loop"
+            )
         elif v_capped:
             trigger = "the verification gate (V) has blocked twice without a green finish"
         else:
@@ -681,6 +1377,12 @@ def evaluate_gate(events, profile="universal"):
     blocks = [e for e in events if e.get("ev") == "block"]
 
     block_counts = Counter(b.get("gate") for b in blocks)
+    # T2.1: count of prior V-blocks that were SPECIFICALLY weak-only-green
+    # (block event carries reason=="weak", tagged by the Gate-V check below)
+    # — distinct from block_counts["V"], which counts every V-block
+    # (never-verified OR weak-only) and already drives the pre-existing
+    # v_capped Gate-E arm unchanged. See _gate_e_panel/_gate_e_ladder.
+    weak_v_blocks = sum(1 for b in blocks if b.get("gate") == "V" and b.get("reason") == "weak")
     # The overall cap stops the "keep working" nudges (Z/R/V) from nagging
     # forever. Gate E — the one-shot terminal escalation — is EXEMPT from it:
     # OVERALL_CAP (3) == V_cap (2) + E_cap (1), so a run that spends its cap on
@@ -724,37 +1426,42 @@ def evaluate_gate(events, profile="universal"):
                 "recover it, escalate per the escalation contract.",
             )
 
-    # Gate V — no verify-marked command has EVER succeeded, or a file edit
-    # landed after the last green verify-marked run.
+    # Gate V — no verify-marked command has EVER succeeded (or every green
+    # was WEAK by the Gate-V-grounding classifier, T1.2/B2), or a file edit
+    # landed after the last non-weak green verify-marked run.
     if not over_cap and block_counts.get("V", 0) < GATE_CAPS["V"]:
         last_green_ts = _last_green_verify_ts(cmds)
         edit_after_green = last_green_ts is not None and any(
             e.get("t", 0) > last_green_ts for e in edits
         )
         if last_green_ts is None or edit_after_green:
-            return (
-                "V",
-                "You have not proven this task works: establish the command "
-                "that proves success for this task and run it with `# "
-                "unerr:verify` appended; re-run it after your final change. "
-                "This benchmark has no fixed check layout — the marker is "
-                "how you declare which command IS the proof. Finish only once "
-                "that verify-marked command is green and no edit has landed "
-                "since.",
+            # A weak-only session (never any QUALIFYING green, but at least
+            # one WEAK green was seen) gets the specific "add an independent
+            # check" instruction (T1.2) instead of the generic "you never
+            # verified" message, and is tagged reason="weak" on the block
+            # event so Gate E's weak-verify coupling (T2.1) can count it
+            # separately from a genuinely-never-verified run.
+            weak_green_seen = last_green_ts is None and any(
+                e.get("ev") == "cmd" and e.get("verify") and e.get("ok") and e.get("verify_weak")
+                for e in cmds
             )
+            if weak_green_seen:
+                return ("V", WEAK_VERIFY_V_BLOCK_MSG, "weak")
+            return ("V", GENERIC_V_BLOCK_MSG)
 
     # Gate E — a VERIFICATION-REVEALED escalation trigger (a prior R-block,
-    # or V capped at 2) OR a light mechanical "stuck" signal
-    # (repeated_failure) fired, but no unerr-opus/unerr-fable ran (or, in
-    # LADDER mode, the trigger persisted past the first hand-off). This gate
-    # is reached even when over_cap (see the exemption above), so a run
-    # whose cap was spent on Z/V blocks still receives the escalation.
-    # ESCALATION_PANEL selects the SHAPE (single spawn-both block vs a
-    # two-rung opus-then-fable ladder) — see _gate_e_panel/_gate_e_ladder.
+    # V capped at 2, or the T2.1 weak-verify coupling) OR a light mechanical
+    # "stuck" signal (repeated_failure) fired, but no unerr-opus/unerr-fable
+    # ran (or, in LADDER mode, the trigger persisted past the first
+    # hand-off). This gate is reached even when over_cap (see the exemption
+    # above), so a run whose cap was spent on Z/V blocks still receives the
+    # escalation. ESCALATION_PANEL selects the SHAPE (single spawn-both
+    # block vs a two-rung opus-then-fable ladder) — see
+    # _gate_e_panel/_gate_e_ladder.
     e_result = (
-        _gate_e_panel(tasks, block_counts, repeated_failure)
+        _gate_e_panel(tasks, block_counts, repeated_failure, weak_v_blocks)
         if _escalation_panel()
-        else _gate_e_ladder(tasks, blocks, block_counts, repeated_failure)
+        else _gate_e_ladder(tasks, blocks, block_counts, repeated_failure, weak_v_blocks)
     )
     if e_result is not None:
         return e_result
@@ -762,9 +1469,31 @@ def evaluate_gate(events, profile="universal"):
     return None
 
 
+def _record_final_gate_telemetry(events):
+    """T2.4, telemetry only — when the gate finally ALLOWS a finish, record
+    whether rung-2 (unerr-fable) ran + a compact final block-count summary
+    into the ledger, so the fable hit-rate (rung-2 spawns -> resolved) can
+    be computed post-run from state.jsonl (e.g. by status.sh). Never affects
+    gating — only reached on the ALLOW path, after the real decision (None)
+    is already made."""
+    tasks = [e for e in events if e.get("ev") == "task"]
+    blocks = [e for e in events if e.get("ev") == "block"]
+    append_event({
+        "t": time.time(),
+        "ev": "final_gate_state",
+        "opus_spawned": any(t.get("agent") == "unerr-opus" for t in tasks),
+        "fable_spawned": any(t.get("agent") == "unerr-fable" for t in tasks),
+        "block_counts": dict(Counter(b.get("gate") for b in blocks)),
+    })
+
+
 def gate_once():
     """Read current state, evaluate, and (on a block) persist the block
-    event. Shared by cmd_gate and the selftest so both exercise the exact
+    event — a Gate-V block additionally carries a "reason" field
+    ("weak" when the block was specifically weak-only-green, T1.2/T2.1;
+    omitted otherwise) when evaluate_gate's result tuple has a 3rd element.
+    On an ALLOW (result is None), records final-gate telemetry (T2.4)
+    instead. Shared by cmd_gate and the selftest so both exercise the exact
     same on-disk state path. Resolves the profile itself: hooks off
     (_profile() is None) is a pure allow, no evaluation, no state write —
     both callers (cmd_gate, run_selftest) already treat a None return as
@@ -775,7 +1504,12 @@ def gate_once():
     events = read_events()
     result = evaluate_gate(events, profile)
     if result is not None:
-        append_event({"t": time.time(), "ev": "block", "gate": result[0]})
+        block_event = {"t": time.time(), "ev": "block", "gate": result[0]}
+        if len(result) > 2 and result[2]:
+            block_event["reason"] = result[2]
+        append_event(block_event)
+    else:
+        _record_final_gate_telemetry(events)
     return result
 
 
@@ -787,7 +1521,10 @@ def cmd_gate():
     result = gate_once()
     if result is None:
         return
-    _letter, reason = result
+    # result may be a 2-tuple (letter, reason) or a 3-tuple (letter, reason,
+    # block_reason_tag) — see evaluate_gate's Gate V weak-only case; only
+    # the first two elements are ever surfaced to the agent.
+    reason = result[1]
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
@@ -948,7 +1685,15 @@ def rule_n(events, cmd):
     expected value comes from the task statement, so a hard or repeated
     block would false-positive on correct PRODUCE-shaped verification. A
     re-issue of the SAME command (by _cmd_key) after its own denial is an
-    evidence-cited override and is allowed through, exactly like rule_t."""
+    evidence-cited override and is allowed through, exactly like rule_t.
+
+    T1.4: this stays the PreToolUse FAST-PATH only — PreToolUse can deny a
+    tool call but cannot inject additionalContext, so it is limited to this
+    one narrow, mechanically-detectable shape. The GENERAL Gate-V-grounding
+    classification (existence-only/self-referential/no-comparison/tamper,
+    with contextual nudges) runs at PostToolUse record time via
+    _verify_strength — see that function and _post_record_context. No
+    behavior change to rule_n itself."""
     if not cmd.strip() or not _verify_marker_present(cmd):
         return None
     target = _tautology_target(cmd)
@@ -970,19 +1715,80 @@ def rule_n(events, cmd):
     return ("N", TAUTOLOGY_DENY_MSG)
 
 
+TRUST_GREEN_DENY_MSG = (
+    "This artifact has a green independent verify; do not re-open a proven "
+    "artifact without a new failing check. If you have a genuine reason to "
+    "revise it (e.g. the task itself changed), re-issue the same edit and "
+    "it will be allowed."
+)
+
+
+def rule_g(events, file_path):
+    """Rule G (trust-the-green, T2.2): once a NON-weak green verify exists
+    for an artifact this session, deny further edits to it absent a NEW red
+    verify since — the mcmc over-escalation/over-work-into-timeout
+    regression guard ("don't re-open a proven artifact without a new
+    failing check"). "An artifact this verify covers" = a referenced-path
+    token parsed at record time (_parse_referenced_paths, stored as
+    "ref_paths" on the qualifying cmd event) whose basename matches
+    file_path's basename — same basename-matching convention rule_n and
+    _edits_since_last_green_verify already use. Override-able + capped like
+    Rule T/B/N: a re-issued identical edit on the same file is an
+    evidence-cited override and allowed through; denials are capped at
+    TRUST_GREEN_DENY_CAP per run — trust-the-green is a strong heuristic,
+    not a certainty, so a genuinely-needed follow-up fix must stay
+    possible. Always on."""
+    if not _harness_trust_green() or not file_path:
+        return None
+    basename = os.path.basename(file_path)
+    covering = [
+        e for e in events
+        if e.get("ev") == "cmd" and e.get("verify") and e.get("ok")
+        and not e.get("verify_weak")
+        and basename in {os.path.basename(p) for p in (e.get("ref_paths") or [])}
+    ]
+    if not covering:
+        return None
+    last_green_t = max(e.get("t", 0) for e in covering)
+    new_red_since = any(
+        e.get("ev") == "cmd" and e.get("verify") and not e.get("ok") and e.get("t", 0) > last_green_t
+        for e in events
+    )
+    if new_red_since:
+        return None
+    prior_same_file = any(
+        e.get("ev") == "deny" and e.get("rule") == "G" and e.get("file") == file_path
+        for e in events
+    )
+    if prior_same_file:
+        return None
+    total_g = len([e for e in events if e.get("ev") == "deny" and e.get("rule") == "G"])
+    if total_g >= TRUST_GREEN_DENY_CAP:
+        return None
+    return ("G", TRUST_GREEN_DENY_MSG)
+
+
 def evaluate_deny(events, data, profile="universal"):
     """Pure: state events + hook stdin dict -> None (allow) or (rule_letter,
-    reason) to deny. Evaluated in fixed order T, B, N; first match wins.
+    reason) to deny. Evaluated in fixed order T, B, N, G; first match wins.
     Universal profile: T is a one-time, override-able nudge on test-shaped
     paths (rule_t); B force-escalates on 5+ un-greened edits on one file
     once verification has already revealed a gap (rule_b, rewired off the
-    `# unerr:verify`-marked cmd ledger); N is a one-time, capped nudge on a
-    marked Bash command that only compares a file the agent wrote this
-    session against a string literal (rule_n) — the chess-best-move
-    anti-tautology case. The old Rule C (a datetime.now()-vs-utcnow()
-    time-source convention check) is GONE — it was python/django-specific
-    and does not belong in a universal harness. profile is accepted for API
-    compat; there is only one profile now so it is otherwise unused."""
+    `# unerr:verify`-marked cmd ledger); N is a one-time, capped, PreToolUse
+    FAST-PATH nudge on a marked Bash command that only compares a file the
+    agent wrote this session against a string literal (rule_n) — the
+    chess-best-move anti-tautology case; the GENERAL, PostToolUse-time
+    verify-grounding path is _verify_strength (T1.1/§6) — rule_n stays as
+    the narrow PreToolUse-only check because PreToolUse can only deny, never
+    inject the richer weak-verify context _verify_strength's classification
+    enables, so it is not retired, just no longer the only line of defense.
+    G is a capped, override-able deny on editing an artifact a NON-weak
+    green verify already covers, absent a new red since (rule_g, T2.2,
+    trust-the-green — the mcmc over-escalation regression guard). The old
+    Rule C (a datetime.now()-vs-utcnow() time-source convention check) is
+    GONE — it was python/django-specific and does not belong in a universal
+    harness. profile is accepted for API compat; there is only one profile
+    now so it is otherwise unused."""
     tool_input = data.get("tool_input") or {}
     file_path = tool_input.get("file_path") or ""
 
@@ -995,6 +1801,10 @@ def evaluate_deny(events, data, profile="universal"):
         return result
 
     result = rule_n(events, tool_input.get("command") or "")
+    if result is not None:
+        return result
+
+    result = rule_g(events, file_path)
     if result is not None:
         return result
 
@@ -1062,18 +1872,14 @@ def run_selftest():
 
     tmp_root = tempfile.mkdtemp(prefix="cc-harness-selftest-")
     orig_env = os.environ.get(STATE_ENV)
-    orig_hooks = os.environ.get(HARNESS_HOOKS_ENV)
-    orig_profile = os.environ.get(HARNESS_PROFILE_ENV)
     orig_panel = os.environ.get(ESCALATION_PANEL_ENV)
-    # Force the harness ON (the single universal profile) regardless of the
-    # ambient env so gate_once/deny_once's profile-off short-circuit doesn't
-    # turn every case below into a no-op. HARNESS_PROFILE is popped too — it
-    # is never read by _profile() anymore, this is belt-and-suspenders. Also
-    # isolate ESCALATION_PANEL to its LADDER default — none of the cases
-    # below assert panel-vs-ladder message shape (only gate letters), so
-    # this is determinism, not a behavior requirement.
-    os.environ[HARNESS_HOOKS_ENV] = "1"
-    os.environ.pop(HARNESS_PROFILE_ENV, None)
+    # The harness runs unconditionally now (the single universal profile) —
+    # no profile-off short-circuit to isolate. Isolate ESCALATION_PANEL to
+    # its LADDER default — none of the cases below assert panel-vs-ladder
+    # message shape (only gate letters), so this is determinism, not a
+    # behavior requirement. Gate-V grounding (strict/escalate-on-weak/
+    # trust-green/nudge-text/reinject-cadence/playbooks) is baked in and
+    # always on, no env to isolate here.
     os.environ.pop(ESCALATION_PANEL_ENV, None)
 
     def fresh_dir(name):
@@ -1313,19 +2119,242 @@ def run_selftest():
         fresh_dir("case16c-rule-n-not-self-written")
         rn4 = deny_once({"tool_name": "Bash", "tool_input": {"command": cmd_n}})
         check("rule N does not fire when the file was never edited this session", rn4 is None)
+
+        # ── Gate V grounding (T1.1-T1.5, T2.1-T2.4, T3.1-T3.2, TP.6, item 12)
+        # ─────────────────────────────────────────────────────────────────
+
+        # Case 17: T1.1 verify-strength classifier — direct unit tests of
+        # _verify_strength (pure given cmd/output/events). Weak shapes flag;
+        # a genuine recompute/known-answer check and a known test-runner do
+        # NOT flag.
+        w1, r1w = _verify_strength("test -f out.txt  # unerr:verify", "", [])
+        check("existence-only (test -f) flags weak", w1 and r1w == "existence-only")
+
+        w2, r2w = _verify_strength("ls out.txt  # unerr:verify", "", [])
+        check("existence-only (ls) flags weak", w2 and r2w == "existence-only")
+
+        w3, r3w = _verify_strength(
+            "test \"$(cat answer.txt)\" = '42'  # unerr:verify", "",
+            [{"ev": "edit", "file": "answer.txt", "t": 1.0}],
+        )
+        check("self-referential (own write vs literal) flags weak", w3 and r3w == "self-referential")
+
+        w4, r4w = _verify_strength("gcc solve.c -o solve  # unerr:verify", "", [])
+        check("no-comparison (bare compile) flags weak", w4 and r4w == "no-comparison")
+
+        w5, r5w = _verify_strength(
+            "python3 recompute_independently.py --check answer.txt  # unerr:verify", "", [],
+        )
+        check("a genuine recompute/known-answer script does not flag weak", not w5)
+
+        w6, r6w = _verify_strength("pytest tests/  # unerr:verify", "", [])
+        check("a known test-runner (pytest) never flags weak", not w6)
+
+        # Case 18: T1.2 — Gate V counts only non-weak greens. A weak-only
+        # green (existence-only) still blocks Gate V, with the distinct,
+        # actionable weak-specific message; the classifier ALSO fires a
+        # one-time Channel-B nudge for that weak reason (T3.1).
+        fresh_dir("case18-weak-only-green-blocks")
+        append_event({"t": 1.0, "ev": "edit", "file": "answer18.txt"})
+        prior18 = read_events()
+        data18 = {"tool_name": "Bash", "tool_input": {"command": "test -f answer18.txt  # unerr:verify"}, "exit_code": 0}
+        ev18 = build_record_event(data18, events=prior18)
+        ev18["t"] = 2.0
+        ctx18 = _post_record_context(data18, ev18, prior18)
+        check("weak verify (existence-only) triggers a one-time Channel-B nudge",
+              ctx18 is not None and "exists" in ctx18.lower())
+        append_event(ev18)
+        r18 = gate_once()
+        check("weak-only green (existence-only) still blocks Gate V", r18 is not None and r18[0] == "V")
+        check("weak-only V-block carries the independence-nudge message",
+              r18 is not None and "INDEPENDENT" in r18[1])
+
+        # Case 18b: a single NON-weak (independent) green satisfies Gate V.
+        fresh_dir("case18b-independent-green-passes")
+        append_event({"t": 1.0, "ev": "edit", "file": "solve18b.py"})
+        prior18b = read_events()
+        ev18b = build_record_event(
+            {"tool_name": "Bash", "tool_input": {"command": "python3 verify_independently.py --recompute  # unerr:verify"}, "exit_code": 0},
+            events=prior18b,
+        )
+        ev18b["t"] = 2.0
+        append_event(ev18b)
+        check("case18b setup: the verify is not weak", ev18b.get("verify_weak") is not True)
+        r18b = gate_once()
+        check("a non-weak green verify satisfies Gate V", r18b is None)
+
+        # Case 19: T1.3 — `# independent: <why>` clears ONLY the
+        # self-referential classification, even though the shape would
+        # otherwise be flagged, and the resulting green satisfies Gate V.
+        fresh_dir("case19-independent-override")
+        append_event({"t": 1.0, "ev": "edit", "file": "answer19.txt"})
+        cmd19 = (
+            "test \"$(cat answer19.txt)\" = '42'  "
+            "# independent: task statement literally says the answer is 42  "
+            "# unerr:verify"
+        )
+        prior19 = read_events()
+        ev19 = build_record_event(
+            {"tool_name": "Bash", "tool_input": {"command": cmd19}, "exit_code": 0},
+            events=prior19,
+        )
+        check("`# independent:` clears the self-referential weak flag", ev19.get("verify_weak") is False)
+        ev19["t"] = 2.0
+        append_event(ev19)
+        r19 = gate_once()
+        check("an overridden self-referential green satisfies Gate V", r19 is None)
+
+        # Case 20: T1.5 tamper-resistance — hash the referenced fixture at
+        # first sight; editing it before a later green run of the SAME
+        # command makes that green WEAK ("tamper"), not passing, even though
+        # its own shape (compares a NOT-self-written reference file) would
+        # otherwise be non-weak.
+        fresh_dir("case20-tamper")
+        fixture20 = os.path.join(tmp_root, "fixture20.json")
+        with open(fixture20, "w") as f:
+            f.write('{"expected": 42}')
+        cmd20 = f"diff computed20.txt {fixture20}  # unerr:verify"
+        ev20a = build_record_event(
+            {"tool_name": "Bash", "tool_input": {"command": cmd20}, "exit_code": 1},
+            events=read_events(),
+        )
+        check("tamper case: first sight (red) is not weak by shape", not ev20a.get("verify_weak"))
+        ev20a["t"] = 1.0
+        append_event(ev20a)
+        with open(fixture20, "w") as f:  # the agent (or a Bash write) tampers with the referenced fixture
+            f.write('{"expected": 99}')
+        ev20b = build_record_event(
+            {"tool_name": "Bash", "tool_input": {"command": cmd20}, "exit_code": 0},
+            events=read_events(),
+        )
+        check(
+            "editing a referenced fixture -> the NEXT green is WEAK (tamper)",
+            ev20b.get("verify_weak") is True and ev20b.get("verify_weak_reason") == "tamper",
+        )
+
+        # Case 21: T2.1 — N weak-verify V-blocks couple into Gate E, reusing
+        # the existing ladder (no new block type). Unit-tested directly
+        # against _gate_e_ladder to isolate the coupling from the OTHER
+        # Gate-E disjuncts (r_already/v_capped/repeated_failure): at the
+        # baked N (== GATE_CAPS["V"]), a single weak-reason V-block alone
+        # does not yet couple to escalation.
+        e21_default = _gate_e_ladder([], [], {"V": 1}, False, 1)
+        check(
+            "default N (== GATE_CAPS['V']) does NOT couple on a single weak V-block",
+            e21_default is None,
+        )
+
+        # Case 22: T2.2 — Rule G (trust-the-green): once a NON-weak green
+        # verify covers an artifact, a further edit to it is denied absent a
+        # new red since; capped + override-able like Rule T/B/N. A NEW red
+        # verify since the green clears it.
+        fresh_dir("case22-rule-g-trust-the-green")
+        append_event({"t": 1.0, "ev": "edit", "file": "proven22.py"})
+        ev22 = build_record_event(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python3 recompute_proven22.py --check proven22.py  # unerr:verify"},
+                "exit_code": 0,
+            },
+            events=read_events(),
+        )
+        check("case22 setup: the verify is not weak", ev22.get("verify_weak") is not True)
+        ev22["t"] = 2.0
+        append_event(ev22)
+        rg1 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "proven22.py", "new_string": "x"}})
+        check("rule G denies re-opening a file a non-weak green already covers",
+              rg1 is not None and rg1[0] == "G")
+        rg2 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "proven22.py", "new_string": "x"}})
+        check("rule G allows the identical re-issue on the same file (override)", rg2 is None)
+
+        fresh_dir("case22b-rule-g-cleared-by-new-red")
+        append_event({"t": 1.0, "ev": "edit", "file": "proven22b.py"})
+        ev22b_green = build_record_event(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python3 recompute_proven22b.py --check proven22b.py  # unerr:verify"},
+                "exit_code": 0,
+            },
+            events=read_events(),
+        )
+        ev22b_green["t"] = 2.0
+        append_event(ev22b_green)
+        ev22b_red = build_record_event(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python3 recompute_proven22b.py --check proven22b.py  # unerr:verify"},
+                "exit_code": 1,
+            },
+            events=read_events(),
+        )
+        ev22b_red["t"] = 3.0
+        append_event(ev22b_red)
+        rg3 = deny_once({"tool_name": "Edit", "tool_input": {"file_path": "proven22b.py", "new_string": "x"}})
+        check("rule G does not fire once a NEW red verify landed since the green", rg3 is None)
+
+        # Case 24: item 12 — a `# unerr:class <name>` marker injects the
+        # matching playbook as additionalContext once per session; a second
+        # occurrence of the SAME class does not re-inject; an unknown class
+        # injects nothing (no error).
+        fresh_dir("case24-playbook-injection")
+        data24 = {"tool_name": "Bash", "tool_input": {"command": "echo hi  # unerr:class build-compile"}, "exit_code": 0}
+        prior24 = read_events()
+        ev24 = build_record_event(data24, events=prior24)
+        ctx24 = _post_record_context(data24, ev24, prior24)
+        check("first sight of a known class marker injects its playbook",
+              ctx24 is not None and "build" in ctx24.lower())
+        append_event(ev24)
+
+        data24b = {"tool_name": "Bash", "tool_input": {"command": "echo hi again  # unerr:class build-compile"}, "exit_code": 0}
+        prior24b = read_events()
+        ev24b = build_record_event(data24b, events=prior24b)
+        ctx24b = _post_record_context(data24b, ev24b, prior24b)
+        check("a second occurrence of the SAME class does not re-inject", ctx24b is None)
+        append_event(ev24b)
+
+        data24c = {"tool_name": "Bash", "tool_input": {"command": "echo hi  # unerr:class not-a-real-class"}, "exit_code": 0}
+        prior24c = read_events()
+        ev24c = build_record_event(data24c, events=prior24c)
+        ctx24c = _post_record_context(data24c, ev24c, prior24c)
+        check("an unknown class marker injects nothing (no error)", ctx24c is None)
+
+        # Case 25: TP.6 — periodic SCOPE re-injection cadence. HARNESS_REINJECT_EVERY
+        # was removed in a prior refactor; the cadence is now the baked
+        # DEFAULT_REINJECT_EVERY (25), read by _reinject_every(). Drive
+        # DEFAULT_REINJECT_EVERY plain (unmarked) Bash record calls — each one
+        # ledgers a "cmd" event, so `n = len(prior_events) + 1` climbs by 1 per
+        # call — and confirm _post_record_context stays silent until the Nth
+        # call, where it returns exactly _scope_reminder()'s reading of
+        # scope.md (written under _state_dir(), same env-isolated dir
+        # fresh_dir() just pointed STATE_ENV at).
+        fresh_dir("case25-scope-reinject-cadence")
+        scope_path25 = os.path.join(_state_dir(), "scope.md")
+        with open(scope_path25, "w") as f:
+            f.write("Acceptance criteria:\n- fix the bug\n- keep tests green\n")
+
+        contexts25 = []
+        for i in range(1, DEFAULT_REINJECT_EVERY + 1):
+            prior25 = read_events()
+            data25 = {"tool_name": "Bash", "tool_input": {"command": f"echo tick-{i}"}, "exit_code": 0}
+            ev25 = build_record_event(data25, events=prior25)
+            contexts25.append(_post_record_context(data25, ev25, prior25))
+            if ev25 is not None:
+                append_event(ev25)
+
+        check(
+            f"SCOPE re-injection fires exactly at the {DEFAULT_REINJECT_EVERY}th record call "
+            "(never before) with scope.md's reminder text",
+            all(c is None for c in contexts25[:-1])
+            and contexts25[-1] is not None
+            and contexts25[-1] == _scope_reminder(),
+        )
+        os.remove(scope_path25)
+
     finally:
         if orig_env is None:
             os.environ.pop(STATE_ENV, None)
         else:
             os.environ[STATE_ENV] = orig_env
-        if orig_hooks is None:
-            os.environ.pop(HARNESS_HOOKS_ENV, None)
-        else:
-            os.environ[HARNESS_HOOKS_ENV] = orig_hooks
-        if orig_profile is None:
-            os.environ.pop(HARNESS_PROFILE_ENV, None)
-        else:
-            os.environ[HARNESS_PROFILE_ENV] = orig_profile
         if orig_panel is None:
             os.environ.pop(ESCALATION_PANEL_ENV, None)
         else:
